@@ -11,7 +11,6 @@ Tài liệu phân tích nghiệp vụ cho hệ thống mô phỏng quy trình x�
 | [03-business-rules.md](03-business-rules.md) | Quy tắc nghiệp vụ BR-01 đến BR-13 |
 | [04-failure-scenarios.md](04-failure-scenarios.md) | Danh sách tình huống lỗi EC-01 đến EC-11 |
 | [05-use-cases.md](05-use-cases.md) | Use case tổng quát, bao gồm Expire Order / TTL Cleanup |
-| [06-acceptance-criteria.md](06-acceptance-criteria.md) | Tiêu chí nghiệm thu AC-01 đến AC-11 |
 
 ## Phạm vi
 
