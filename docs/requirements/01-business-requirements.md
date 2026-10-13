@@ -43,16 +43,56 @@ Xây dựng hệ thống mô phỏng quy trình đặt hàng trong môi trườn
 | TTL Worker | Tìm các đơn quá hạn và kích hoạt luồng xử lý hết hạn; có thể nằm trong Order Service |
 
 ## 5. Luồng nghiệp vụ tổng quát
+```mermaid
+flowchart TD
+    A([Bắt đầu]) --> B[Khách hàng gửi yêu cầu đặt hàng]
+    B --> C[Order Service tạo đơn PENDING<br/>Lưu createdAt và expireAt]
+    C --> D[Inventory Service kiểm tra tồn kho<br/>và giữ hàng]
 
-1. Khách hàng gửi yêu cầu đặt hàng.
-2. Order Service tạo đơn `PENDING`, lưu `createdAt` và `expireAt`.
-3. Inventory Service kiểm tra tồn khả dụng và giữ hàng.
-4. Nếu giữ hàng thành công, Payment Service xử lý thanh toán giả lập.
-5. Nếu giữ hàng và thanh toán thành công hợp lệ, Order Service xác nhận đơn.
-6. Nếu giữ hàng thất bại, thanh toán thất bại hoặc đơn hết hạn, Order Service điều phối nhánh thất bại/compensation tương ứng.
-7. Nếu đã giữ hàng và cần hủy, Inventory Service giải phóng reservation.
-8. Sự kiện kết quả được ghi vào Outbox và gửi đến Notification Service.
+    D --> E{Đủ hàng<br/>và giữ hàng thành công?}
 
+    E -- Không --> F[Order Service ghi nhận FAILED]
+    F --> N1[Ghi sự kiện vào Outbox]
+    N1 --> N2[Notification Service gửi<br/>thông báo thất bại]
+    N2 --> Z([Kết thúc])
+
+    E -- Có --> G[Payment Service<br/>xử lý thanh toán giả lập]
+    G --> H{Thanh toán thành công<br/>hợp lệ trước khi hết hạn?}
+
+    H -- Có --> I[Order Service xác nhận<br/>đơn hàng CONFIRMED]
+    I --> N3[Ghi OrderConfirmed vào Outbox]
+    N3 --> N4[Notification Service gửi<br/>thông báo thành công]
+    N4 --> Z
+
+    H -- Không --> J[Order Service khởi tạo<br/>Saga Compensation]
+    J --> K{Đã giữ hàng?}
+
+    K -- Có --> L[Inventory Service giải phóng<br/>reservation]
+    L --> M{Compensation<br/>thành công?}
+    M -- Không --> R[Lưu trạng thái bù trừ lỗi<br/>và retry]
+    R --> L
+    M -- Có --> O[Chốt trạng thái FAILED<br/>hoặc EXPIRED]
+
+    K -- Không --> O
+    O --> P[Ghi sự kiện kết quả<br/>vào Outbox]
+    P --> Q[Notification Service gửi<br/>thông báo phù hợp]
+    Q --> Z
+
+    T{{TTL hết hạn: currentTime >= expireAt}} -.-> U[Order Service kiểm tra<br/>trạng thái thanh toán]
+    U -.-> H
+
+    V{{Payment UNKNOWN do timeout}} -.-> W[Truy vấn và đối soát<br/>kết quả thanh toán]
+    W -.-> U
+```
+
+## Ghi chú
+
+- `PENDING`: đơn hàng đã tạo và đang được xử lý.
+- `CONFIRMED`: chỉ dùng khi giữ hàng thành công và thanh toán được xác nhận thành công trong thời hạn cho phép.
+- `FAILED` / `EXPIRED`: kết quả cuối khi quy trình thất bại hoặc đơn hết hạn theo quy tắc nghiệp vụ.
+- Nếu thanh toán ở trạng thái `UNKNOWN`, cần truy vấn/đối soát trước khi quyết định compensation; không được mặc định timeout là thanh toán thất bại.
+- Nếu giải phóng reservation thất bại, lưu trạng thái compensation chưa hoàn tất và retry.
+- Sự kiện cần phát được ghi vào Outbox; consumer vẫn cần xử lý idempotent để tránh tác dụng phụ khi sự kiện được phát lại.
 ## 6. Order Expiration / TTL
 
 TTL mặc định đề xuất là 15 phút kể từ khi tạo đơn thành công.
@@ -63,18 +103,7 @@ TTL Worker định kỳ tìm đơn chưa kết thúc mà `currentTime >= expireA
 
 `EXPIRED` là trạng thái nghiệp vụ, không phải lệnh xóa dữ liệu. Chỉ ghi nhận trạng thái cuối cùng theo điều kiện kết thúc đã thống nhất; nếu compensation chưa hoàn tất, tiếp tục theo dõi/retry.
 
-## 7. Trạng thái Order đề xuất
-
-- `PENDING`: Đơn đang xử lý/chờ thanh toán.
-- `CONFIRMED`: Đã giữ hàng và thanh toán thành công hợp lệ.
-- `COMPENSATING`: Đang bù trừ.
-- `FAILED`: Thất bại vì nguyên nhân khác hoặc theo chính sách xử lý thất bại.
-- `EXPIRED`: Đơn quá hạn và đã được xử lý theo chính sách hết hạn.
-- `COMPENSATION_FAILED`: Compensation chưa hoàn tất, cần retry hoặc can thiệp.
-
-Có thể thêm `EXPIRING` làm trạng thái trung gian nếu cần claim/khóa quy trình hết hạn.
-
-## 8. Định hướng kiến trúc
+## 7. Định hướng kiến trúc
 
 - Saga: điều phối các giao dịch cục bộ và compensation.
 - Outbox: ghi thay đổi dữ liệu và sự kiện cần phát trong cùng transaction của service phát.
@@ -82,7 +111,7 @@ Có thể thêm `EXPIRING` làm trạng thái trung gian nếu cần claim/khóa
 - Eventual consistency: trạng thái giữa service có thể tạm thời khác nhau nhưng phải hội tụ.
 - TTL Worker: phát hiện đơn quá hạn và khởi động luồng hết hạn có khả năng phục hồi.
 
-## 9. Giả định cần xác nhận
+## 8. Giả định cần xác nhận
 
 - TTL mặc định là 15 phút.
 - Chính sách thời điểm chấp nhận thanh toán: chỉ thanh toán được xác nhận hợp lệ trước khi nhánh hết hạn được chốt mới đủ điều kiện xác nhận đơn.
