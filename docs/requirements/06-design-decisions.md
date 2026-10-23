@@ -1,415 +1,342 @@
 # 06 – Design Decisions
 
-### 1. Quy ước bắt buộc
+## 1. Quy ước bắt buộc
 
-1. `UNKNOWN` không đồng nghĩa với `FAILED`. Timeout không phải bằng chứng thanh toán thất bại.
-2. `eventId` định danh một sự kiện; `commandId`/`idempotencyKey` định danh một tác dụng nghiệp vụ. Không dùng thay thế cho nhau.
-3. `EXPIRED` là trạng thái nghiệp vụ, không phải thao tác xóa bản ghi Order.
-4. Payment thành công đến muộn sau khi Order đã `EXPIRED` không làm Order được mở lại; hệ thống phải đối soát và hoàn tiền nếu tiền đã được thu.
-5. Một Order không được vừa `CONFIRMED` vừa `EXPIRED`.
-6. Không giải phóng reservation hoặc hoàn tiền khi kết quả payment còn `UNKNOWN`.
-7. Các thao tác có tác dụng phụ phải có khóa idempotency ổn định và lưu kết quả xử lý.
-8. Các thời điểm nghiệp vụ được lưu theo UTC.
+### 1.1. Quy tắc nền
 
-## D-01 – Phân xử cạnh tranh giữa xác nhận thanh toán và hết hạn
+- `UNKNOWN` không đồng nghĩa với `FAILED`. Timeout không phải bằng chứng thanh toán thất bại.
+- `eventId` định danh một sự kiện; `commandId`/`idempotencyKey` định danh một tác dụng nghiệp vụ. Không dùng thay thế cho nhau.
+- `EXPIRED` là trạng thái nghiệp vụ, không phải thao tác xóa bản ghi Order.
+- Payment thành công đến muộn sau khi Order đã `EXPIRED` không làm Order được mở lại; hệ thống phải đối soát và hoàn tiền nếu tiền đã được thu.
+- Một Order không được vừa `CONFIRMED` vừa `EXPIRED`.
+- Không giải phóng reservation hoặc hoàn tiền khi kết quả payment còn `UNKNOWN`.
+- Các thao tác có tác dụng phụ phải có khóa idempotency ổn định và lưu kết quả xử lý.
+- Các thời điểm nghiệp vụ lưu theo UTC.
 
-### Bối cảnh
+### 1.2. Thuật ngữ trạng thái dùng trong file này
 
-Trong W1, FR-09 và BR-13.5 dùng cụm “payment thành công hợp lệ trước khi nhánh hết hạn được chốt”. Cụm này chưa xác định rõ cách phân xử khi callback payment và TTL Worker chạy gần như đồng thời.
+Các tên dưới đây là **đề xuất**; tên cuối cùng được chốt trong `09-state-machine.md`.
 
-EC-11 cũng yêu cầu ngăn hai worker cùng xử lý một đơn và không cho phép một đơn vừa `CONFIRMED` vừa `EXPIRED`.
+| Loại trạng thái | Giá trị dùng trong file này |
+|---|---|
+| Order | `PENDING`, `EXPIRING`, `COMPENSATING`, `COMPENSATION_FAILED`, `CONFIRMED`, `FAILED`, `EXPIRED` |
+| Payment | `SUCCEEDED`, `FAILED`, `UNKNOWN`; "chưa thanh toán" nghĩa là chưa có bản ghi capture |
+| Reservation | `RESERVED`, `RELEASED`, `REJECTED`; "chưa xác minh" nghĩa là kết quả reserve chưa rõ |
+| Saga (bổ sung) | `COMPENSATION_FAILED`, `RECONCILIATION_REQUIRED` |
+| Notification/Outbox | Có trạng thái "chờ gửi lại" (tên chốt ở `09`) |
 
-### Các phương án
+`EXPIRING` là trạng thái trung gian, không phải trạng thái cuối. Nó đánh dấu nhánh hết hạn đã giành quyền xử lý Order.
 
-- **Phương án A:** Chỉ căn cứ vào thời điểm nhận callback payment.
-- **Phương án B:** Chỉ căn cứ vào `expireAt`, không xét thứ tự cập nhật trạng thái.
-- **Phương án C:** Dùng cập nhật trạng thái Order có điều kiện và nguyên tử. Nhánh nào chuyển Order khỏi `PENDING` thành công trước thì thắng; nhánh còn lại không được ghi đè kết quả.
+---
 
-### Quyết định đề xuất
+## 2. Các quyết định thiết kế
 
-Chọn **Phương án C**, với các quy tắc cụ thể sau.
+### D-01 – Phân xử cạnh tranh giữa xác nhận thanh toán và hết hạn
 
-#### D-01.1. Xác nhận đơn
+#### Bối cảnh
 
-Order Service chỉ được chuyển:
+W1 (FR-09, BR-13.5) dùng cụm "payment thành công hợp lệ trước khi nhánh hết hạn được chốt" nhưng chưa nói rõ cách phân xử khi callback payment và TTL Worker chạy gần như đồng thời. EC-11 yêu cầu ngăn hai worker cùng xử lý một đơn và không cho phép một đơn vừa `CONFIRMED` vừa `EXPIRED`.
 
-`PENDING -> CONFIRMED`
+#### Giải pháp: Cập nhật trạng thái Order có điều kiện và nguyên tử; nhánh nào chuyển Order khỏi `PENDING` thành công trước thì thắng, nhánh còn lại không được ghi đè.
 
-khi đồng thời thỏa mãn:
+**D-01.1. Xác nhận đơn.** Chỉ được chuyển `PENDING -> CONFIRMED` khi đồng thời thỏa mãn:
 
-1. Reservation của chính Order đó đã được xác nhận `RESERVED`.
-2. Payment đã được xác minh là `SUCCEEDED`, không phải `UNKNOWN`.
-3. Thời điểm thực hiện chuyển trạng thái nhỏ hơn `expireAt`.
-4. Order vẫn đang ở trạng thái `PENDING` tại thời điểm cập nhật.
+1. Reservation của chính Order đó ở trạng thái `RESERVED`.
+2. Payment ở trạng thái `SUCCEEDED` và hợp lệ: `paymentId` thuộc đúng Order, số tiền khớp tổng đơn (nếu mô hình dữ liệu có giá), kết quả đã được Payment Service lưu bền vững; không phải `UNKNOWN`.
+3. Order đang `PENDING` và thời điểm hiện tại theo đồng hồ DB nhỏ hơn `expireAt`.
 
-Việc cập nhật phải có điều kiện tương đương:
+**D-01.2. Claim hết hạn.** TTL Worker chỉ claim Order `PENDING` khi payment không ở `UNKNOWN`:
 
-`UPDATE Order ... WHERE orderId = ? AND status = 'PENDING'`
+Chỉ worker cập nhật thành công (1 dòng) mới được xử lý nhánh hết hạn. Toàn bộ so sánh thời gian dùng **một nguồn thời gian duy nhất là đồng hồ DB (UTC)**, không dùng đồng hồ của từng service, để tránh lệch giờ.
 
-Phải kiểm tra số bản ghi được cập nhật. Nếu không có bản ghi nào được cập nhật, Order Service phải đọc lại trạng thái hiện tại và xử lý theo nhánh đã thắng; không được ghi đè trạng thái.
-
-#### D-01.2. Claim hết hạn
-
-Khi `currentTime >= expireAt`, TTL Worker chỉ được claim một Order đang `PENDING` nếu trạng thái payment đã được xác minh và không còn `UNKNOWN`.
-
-Worker thực hiện chuyển trạng thái có điều kiện:
-
-`PENDING -> EXPIRING`
-
-`EXPIRING` là trạng thái trung gian được đề xuất cho quá trình xử lý hết hạn, không phải trạng thái cuối. Mục đích là đánh dấu nhánh hết hạn đã giành quyền xử lý để callback payment không thể xác nhận lại Order.
-
-Nếu payment vẫn `UNKNOWN`, Worker không được claim `EXPIRING`; Order phải tiếp tục chờ đối soát.
-
-#### D-01.3. Xử lý bên thua
+**D-01.3. Xử lý bên thua và các tình huống cạnh tranh.**
 
 | Tình huống | Quy tắc bắt buộc |
 |---|---|
-| Chuyển `PENDING -> CONFIRMED` thành công trước | TTL Worker không được chuyển Order sang `EXPIRING` hoặc `EXPIRED`. |
-| Chuyển `PENDING -> EXPIRING` thành công trước | Callback payment không được chuyển Order thành `CONFIRMED`. |
-| Payment thành công sau khi Order đã vào nhánh hết hạn | Đối soát payment; nếu tiền đã thu, thực hiện refund bằng khóa idempotency ổn định. Không mở lại Order. |
-| Payment đang `UNKNOWN` tại thời điểm hết hạn | Không claim hết hạn, không giải phóng reservation và không hoàn tiền cho đến khi kết quả được xác minh. |
-| Hai cập nhật xảy ra đồng thời | Cơ sở dữ liệu chỉ cho phép một cập nhật có điều kiện từ `PENDING` thành công. Bên thua phải đọc lại trạng thái. |
+| `PENDING -> CONFIRMED` thành công trước | TTL Worker không được chuyển Order sang `EXPIRING` hoặc `EXPIRED`. |
+| `PENDING -> EXPIRING` thành công trước | Callback payment không được chuyển Order thành `CONFIRMED`. |
+| `PENDING -> COMPENSATING` (nhánh payment thất bại) thành công trước | TTL Worker không claim; nhánh thất bại tiếp tục. |
+| Payment thành công sau khi Order đã vào nhánh hết hạn | Đối soát payment; nếu tiền đã thu thì refund theo D-05. Không mở lại Order. |
+| Payment đang `UNKNOWN` khi đến hạn | Không claim, không giải phóng reservation, không hoàn tiền cho đến khi xác minh. |
+| Payment chuyển sang `UNKNOWN` sau khi Order đã `EXPIRING` | Đối soát theo D-04; không release, không refund, không chốt `EXPIRED` cho đến khi xác minh. |
+| Hai cập nhật xảy ra đồng thời | DB chỉ cho phép một cập nhật có điều kiện từ `PENDING` thành công; bên thua đọc lại trạng thái. |
 
-**Quy tắc về thời điểm:** Quyết định này ưu tiên thứ tự chuyển trạng thái nguyên tử khỏi `PENDING`, không ưu tiên thứ tự callback đến Order Service. Payment hoàn tất trước `expireAt` nhưng callback đến muộn không tự động có quyền thắng nếu nhánh hết hạn đã claim thành công trước. Trường hợp đó phải xử lý theo nhánh payment đến muộn.
+Claim `EXPIRING` không phải bằng chứng reservation đã được giải phóng hoặc refund đã hoàn tất.
 
-Khi Order đã vào `EXPIRING`, hệ thống thực hiện compensation theo D-05 và chỉ chốt `EXPIRED` khi đáp ứng các điều kiện nghiệp vụ. Không được coi việc claim `EXPIRING` là bằng chứng reservation đã được giải phóng hoặc refund đã hoàn tất.
+**D-01.4. Hệ quả cần chấp nhận (quy tắc nghiêm ngặt).** Quyết định này ưu tiên thứ tự chuyển trạng thái nguyên tử khỏi `PENDING`, không ưu tiên thời điểm callback đến hay timestamp của payment. Hệ quả:
 
-### Lý do
+- Nếu payment thực tế hoàn tất trước `expireAt` nhưng chỉ được **xác minh** sau `expireAt` (ví dụ do `UNKNOWN` kéo dài), Order **không** được `CONFIRMED`. Nhánh hết hạn claim Order và tiền được hoàn theo D-05.
+- Phương án thay thế (cho phép xác nhận dựa trên `paymentCompletedAt < expireAt`, cần giả định A-04) cho kết quả thân thiện với khách hơn nhưng phụ thuộc timestamp bên ngoài. Xem câu hỏi mở **Q-01**.
 
-- Ngăn hai nhánh cùng xác nhận kết quả cuối cho một Order.
-- Có cơ chế phân xử cụ thể khi payment callback và TTL Worker cạnh tranh.
-- Phù hợp với BR-07, BR-11, BR-12, BR-13 và EC-11.
+**D-01.5. Lệnh đang xử lý khi Order rời `PENDING`.**
 
-### Tác động
+- Khi Order không còn `PENDING`, orchestrator **không được gửi lệnh tiến mới** (reserve/capture). Trước mỗi lệnh tiến phải kiểm tra Order còn `PENDING`.
+- Lệnh đã gửi từ trước vẫn có thể hoàn tất (reserve đến muộn, capture đến muộn). Xử lý: reservation bằng release, tiền bằng refund (D-05).
+- Inventory Service phải ghi nhận lệnh release theo `orderId`; reserve đến muộn sau release của cùng `orderId` phải bị từ chối hoặc vô hiệu, để không rò reservation (giả định A-13).
+- Trước khi release, nếu kết quả reserve chưa rõ, phải tra cứu theo khóa reserve (EC-04) rồi mới gửi release.
 
-**Người 2 cần triển khai:**
-- Cập nhật Order state có điều kiện, kiểm tra số dòng cập nhật thành công.
-- Lưu `expireAt` và trạng thái trung gian `EXPIRING`.
-- Không ghi đè trạng thái bằng cập nhật không có điều kiện.
-- Chỉ phát sự kiện nghiệp vụ sau khi trạng thái tương ứng được lưu bền vững.
+#### Lý do
 
-**Người 3 cần kiểm thử:**
-- Payment xác minh thành công trước hạn và xác nhận Order thắng.
-- TTL Worker claim thành công trước và callback đến sau.
-- Hai cập nhật chạy đồng thời.
-- Payment `UNKNOWN` tại thời điểm hết hạn.
-- Payment thành công đến muộn sau `EXPIRED`.
+Ngăn hai nhánh cùng chốt kết quả cho một Order, có cơ chế phân xử cụ thể, kiểm thử được. Phù hợp BR-07, BR-11, BR-12, BR-13 và EC-11.
 
-### Truy vết
+#### Tác động
 
-- FR-09, FR-13, FR-15.
-- BR-01, BR-07, BR-10, BR-12, BR-13.
-- EC-03, EC-05, EC-06, EC-11.
-- UC-03, UC-04, UC-06.
+- **Người 2:** cập nhật Order có điều kiện và kiểm tra số dòng; lưu `expireAt`, `EXPIRING`, claim token, lease; dùng đồng hồ DB; kiểm tra Order còn `PENDING` trước mỗi lệnh tiến; chỉ phát sự kiện sau khi trạng thái đã lưu bền vững.
+- **Người 3:** kiểm thử xác nhận thắng trước hạn; claim thắng và callback đến sau; hai cập nhật đồng thời; payment `UNKNOWN` lúc hết hạn; payment đến muộn sau `EXPIRED`; payment hoàn tất trước hạn nhưng xác minh sau hạn; reserve đến muộn sau release.
 
-## D-02 – Quy ước idempotency key cho lệnh và sự kiện
+#### Truy vết
 
-### Bối cảnh
+FR-09, FR-13, FR-15 · BR-01, BR-07, BR-10, BR-12, BR-13 · EC-03, EC-04, EC-05, EC-06, EC-11 · UC-03, UC-04, UC-06.
 
-BR-03, BR-08 và BR-11 yêu cầu chống tác dụng phụ lặp, phân biệt định danh sự kiện với định danh tác dụng nghiệp vụ, đồng thời từ chối trường hợp cùng khóa nhưng payload khác nhau.
+---
 
-W1 chưa quy định cụ thể cách sinh khóa, nơi lưu và hành vi khi trùng khóa.
+### D-02 – Quy ước idempotency key cho lệnh và sự kiện
 
-### Quyết định đề xuất
+#### Bối cảnh
 
-1. Mỗi tác dụng nghiệp vụ có một `commandId` hoặc `idempotencyKey` ổn định.
-2. Retry cùng tác dụng nghiệp vụ phải sử dụng lại khóa ban đầu.
-3. `eventId` được sinh một lần khi tạo bản ghi Outbox; publish lại phải giữ nguyên `eventId`.
-4. Nơi thực hiện tác dụng nghiệp vụ phải lưu khóa, payload hash và kết quả xử lý.
-5. Cùng khóa và cùng payload: trả lại kết quả đã lưu, không lặp tác dụng phụ.
-6. Cùng khóa nhưng payload khác: trả lỗi xung đột `409 IDEMPOTENCY_KEY_CONFLICT`, không thực hiện tác dụng phụ mới.
-7. Áp dụng unique constraint tại nơi lưu dữ liệu tương ứng. Không chỉ dựa vào kiểm tra bằng code trước khi ghi.
-8. Các công thức dưới đây là quy ước đề xuất; service sở hữu dữ liệu phải bảo đảm cùng một khóa luôn đại diện cho cùng một tác dụng nghiệp vụ.
+BR-03, BR-08, BR-11 yêu cầu chống tác dụng phụ lặp, phân biệt định danh sự kiện với định danh tác dụng nghiệp vụ, và từ chối cùng khóa nhưng khác payload. W1 chưa quy định cách sinh khóa, nơi lưu và hành vi khi trùng.
 
-### Bảng quy tắc khóa
+#### Quyết định đề xuất
 
-| Lệnh/sự kiện | Thành phần sinh khóa | Công thức hoặc quy tắc | Nơi lưu và ràng buộc duy nhất đề xuất | Cùng khóa, cùng payload | Cùng khóa, payload khác |
+- Mỗi tác dụng nghiệp vụ có một `commandId`/`idempotencyKey` ổn định; retry cùng tác dụng dùng lại đúng khóa.
+- `eventId` sinh một lần khi ghi bản ghi Outbox; publish lại giữ nguyên `eventId`.
+- Nơi thực hiện tác dụng nghiệp vụ lưu khóa, payload hash và kết quả xử lý.
+- Cùng khóa, cùng payload: trả lại kết quả đã lưu, không lặp tác dụng phụ.
+- Cùng khóa, khác payload: trả `409 IDEMPOTENCY_KEY_CONFLICT`, không thực hiện tác dụng phụ mới.
+- Áp dụng unique constraint tại nơi lưu dữ liệu, không chỉ kiểm tra bằng code trước khi ghi.
+- Hậu tố `v1` chỉ tăng khi có một **tác dụng nghiệp vụ mới có chủ đích**. Trong demo, mọi khóa luôn là `v1`; retry do timeout/lỗi tạm thời **không** được đổi phiên bản.
+- Thiếu header `Idempotency-Key` khi tạo Order: trả `400 Bad Request`.
+
+#### Bảng quy tắc khóa
+
+| Lệnh/sự kiện | Bên sinh khóa | Công thức / quy tắc | Nơi lưu và ràng buộc duy nhất | Cùng khóa, cùng payload | Cùng khóa, khác payload |
 |---|---|---|---|---|---|
-| Tạo Order | Client tạo `Idempotency-Key` | UUID ngẫu nhiên cho một yêu cầu đặt hàng logic; retry gửi lại đúng khóa | Order DB: `UNIQUE(customerId, idempotencyKey)`; lưu payload hash và response ban đầu | Trả cùng `orderId` và response đã lưu | Trả `409 IDEMPOTENCY_KEY_CONFLICT` |
-| Giữ hàng | Order Service tạo `commandId` | `reserve:{orderId}:v1` | Inventory DB: unique theo `idempotencyKey`; unique reservation theo Order và phiên bản reservation | Trả lại reservation/kết quả đã lưu | Từ chối xung đột, không thay đổi tồn kho |
-| Thu tiền | Order Service tạo `commandId` | `payment:capture:{orderId}:v1` | Payment DB: unique theo `idempotencyKey`; không tạo hai capture cho cùng tác dụng nghiệp vụ | Trả lại `paymentId` và kết quả đã lưu | Từ chối xung đột, không tạo capture mới |
-| Giải phóng reservation | Order Service tạo `commandId` | `inventory:release:{orderId}:{reservationId}:v1` | Inventory DB: unique theo `idempotencyKey` và tác dụng release trên reservation | Trả lại kết quả release đã lưu | Từ chối xung đột, không cộng tồn kho lần hai |
-| Hoàn tiền | Order Service tạo `commandId` | `payment:refund:{orderId}:{paymentId}:v1` | Payment DB: unique theo `idempotencyKey` và tác dụng refund trên payment | Trả lại `refundId` và kết quả đã lưu | Từ chối xung đột, không tạo refund mới |
-| Tạo Outbox event | Service sở hữu trạng thái sinh `eventId` | UUID sinh một lần khi ghi event | Outbox DB: `UNIQUE(eventId)` | Giữ nguyên event khi publish lại | Nếu cùng `eventId` nhưng payload hash khác, cách ly và ghi cảnh báo; không xử lý payload thứ hai |
-| Tiếp nhận event | Consumer ghi nhận `eventId` | Dùng nguyên `eventId` từ producer | Inbox/processed-message store: `UNIQUE(consumerName, eventId)` | Bỏ qua xử lý nghiệp vụ đã hoàn tất | Ghi lỗi dữ liệu và không thực hiện tác dụng phụ từ payload xung đột |
-| Gửi notification | Notification Service tạo khóa giao nhận | `notification:{eventId}:{notificationType}:{channel}` | Notification DB: unique theo `eventId`, loại thông báo và kênh | Trả lại kết quả đã lưu; không chủ động tạo giao nhận logic mới | Từ chối xung đột và ghi lỗi |
+| Tạo Order | Client | UUID ngẫu nhiên cho một yêu cầu đặt hàng logic; retry gửi lại đúng khóa | Order DB: `UNIQUE(customerId, idempotencyKey)`*; lưu payload hash và response ban đầu | Trả cùng `orderId` và response đã lưu | `409 IDEMPOTENCY_KEY_CONFLICT` |
+| Giữ hàng | Order Service | `reserve:{orderId}:v1` | Inventory DB: unique theo `idempotencyKey`; unique reservation theo Order | Trả lại reservation đã lưu | Từ chối, không đổi tồn kho |
+| Thu tiền | Order Service | `payment:capture:{orderId}:v1` | Payment DB: unique theo `idempotencyKey`; không có hai capture cho cùng tác dụng | Trả lại `paymentId` và kết quả đã lưu | Từ chối, không tạo capture mới |
+| Giải phóng reservation | Order Service | `inventory:release:{orderId}:{reservationId}:v1` | Inventory DB: unique theo `idempotencyKey` và tác dụng release trên reservation | Trả lại kết quả release đã lưu | Từ chối, không cộng tồn kho lần hai |
+| Hoàn tiền | Order Service | `payment:refund:{orderId}:{paymentId}:v1` | Payment DB: unique theo `idempotencyKey` và tác dụng refund trên payment | Trả lại `refundId` và kết quả đã lưu | Từ chối, không tạo refund mới |
+| Tạo Outbox event | Service sở hữu trạng thái | UUID sinh một lần khi ghi event | Outbox DB: `UNIQUE(eventId)` | Giữ nguyên event khi publish lại | Cùng `eventId` nhưng payload hash khác: cách ly và cảnh báo, không xử lý payload thứ hai |
+| Tiếp nhận event | Consumer | Dùng nguyên `eventId` từ producer | Inbox/processed-message store: `UNIQUE(consumerName, eventId)` | Bỏ qua xử lý nghiệp vụ đã hoàn tất | Ghi lỗi dữ liệu, không thực hiện tác dụng phụ từ payload xung đột |
+| Gửi notification | Notification Service | `notification:{eventId}:{notificationType}:{channel}` | Notification DB: unique theo `eventId`, loại và kênh | Trả lại kết quả đã lưu, không tạo giao nhận mới | Từ chối xung đột và ghi lỗi |
 
-### Giới hạn quan trọng của notification
+\* Nếu hệ thống không có định danh khách hàng/đăng nhập, dùng `clientId` hoặc `UNIQUE(idempotencyKey)`; Người 2 chốt (A-14). Khi trùng khóa, response trả về vẫn là response ban đầu (`202`); client dùng `GET` để lấy trạng thái hiện tại.
 
-Unique constraint có thể ngăn tạo giao nhận logic trùng trong cơ sở dữ liệu. Tuy nhiên, nếu tiến trình crash sau khi bên nhận đã gửi thông báo nhưng trước khi lưu kết quả gửi, hệ thống có thể không biết thông báo đã được gửi hay chưa.
+#### Giới hạn quan trọng của notification
 
-Để bảo đảm không gửi trùng ra hệ thống bên ngoài, cần bên nhận hỗ trợ idempotency hoặc cơ chế tra cứu giao nhận. Nếu demo không có bên nhận hỗ trợ tính năng đó, phải ghi rõ giới hạn: hệ thống bảo đảm chống trùng ở lớp xử lý nội bộ, nhưng không tuyên bố bảo đảm exactly-once cho tác dụng phụ bên ngoài.
+Unique constraint chỉ ngăn tạo giao nhận logic trùng trong DB. Nếu tiến trình crash sau khi bên nhận đã gửi thông báo nhưng trước khi lưu kết quả, hệ thống có thể không biết thông báo đã gửi hay chưa. Để bảo đảm không gửi trùng ra hệ thống bên ngoài cần bên nhận hỗ trợ idempotency hoặc tra cứu giao nhận. Nếu demo không có, phải ghi rõ: hệ thống chống trùng ở lớp xử lý nội bộ, **không tuyên bố exactly-once** cho tác dụng phụ bên ngoài.
 
-### Tác động
+#### Tác động
 
-**Người 2:** triển khai khóa ổn định, payload hash, unique constraint, lưu kết quả và cơ chế inbox/outbox phù hợp.
+- **Người 2:** khóa ổn định, payload hash, unique constraint, lưu kết quả, inbox/outbox.
+- **Người 3:** retry cùng khóa, cùng khóa khác payload, duplicate message, duplicate publish, retry capture/release/refund, thiếu header khóa.
 
-**Người 3:** kiểm thử retry cùng khóa, payload khác khóa, duplicate message, duplicate publish và retry capture/release/refund.
+#### Truy vết
 
-### Truy vết
+FR-01, FR-03, FR-06, FR-07, FR-08, FR-10, FR-11 · BR-03, BR-05, BR-08, BR-09, BR-11, BR-12 · EC-04, EC-07, EC-08, EC-09, EC-10 · UC-01 đến UC-06.
 
-- FR-01, FR-03, FR-06, FR-07, FR-08, FR-10, FR-11.
-- BR-03, BR-05, BR-08, BR-09, BR-11, BR-12.
-- EC-04, EC-07, EC-08, EC-09, EC-10.
-- UC-01, UC-02, UC-03, UC-04, UC-05, UC-06.
+---
 
-## D-03 – Chính sách retry và backoff
+### D-03 – Chính sách retry và backoff
 
-### Bối cảnh
+#### Bối cảnh
 
-FR-11, FR-12 và EC-09 yêu cầu retry có giới hạn, backoff, theo dõi trạng thái và cảnh báo. W1 chưa quy định số lần gửi tối đa hoặc khoảng thời gian giữa các lần retry.
+FR-11, FR-12, EC-09 yêu cầu retry có giới hạn, backoff, theo dõi trạng thái và cảnh báo. W1 chưa có số lần gửi tối đa hay khoảng cách giữa các lần.
 
-### Quyết định đề xuất
+#### Quyết định đề xuất
 
-Các giá trị sau áp dụng cho cấu hình demo. “Tổng lần gửi” bao gồm lần đầu tiên. Chỉ retry lỗi tạm thời; không retry lỗi dữ liệu hoặc xung đột idempotency.
+Giá trị áp dụng cho cấu hình demo, **cấu hình được** (xem D-08.4). "Tổng lần gửi" tính cả lần đầu. Chỉ retry lỗi tạm thời.
 
-| Thao tác | Tổng lần gửi đồng bộ tối đa | Backoff giữa các lần | Khi vượt ngưỡng |
-|---|---:|---|---|
-| Reserve inventory | 5 | 1s, 2s, 4s, 8s | Tra cứu trạng thái reservation. Nếu kết quả chưa xác định, giữ Saga ở trạng thái chờ đối soát; không gọi capture khi chưa xác nhận đã giữ hàng |
-| Capture payment | 5 lần gửi cùng khóa | 1s, 2s, 4s, 8s | Tra cứu payment. Nếu vẫn `UNKNOWN`, chuyển Saga sang `RECONCILIATION_REQUIRED`; không tạo khóa capture mới |
-| Release reservation | 5 | 1s, 2s, 4s, 8s | Đặt Order ở `COMPENSATION_FAILED`, lưu bước release chưa hoàn tất, cảnh báo và tiếp tục retry nền mỗi 60 giây |
-| Refund payment | 5 | 1s, 2s, 4s, 8s | Lưu refund chưa hoàn tất, đặt Saga ở trạng thái compensation lỗi, cảnh báo và tiếp tục retry nền mỗi 60 giây |
-| Publish Outbox | 8 | 1s, 2s, 4s, 8s, 16s, 32s, 60s | Giữ event chưa được xác nhận, cảnh báo và tiếp tục thử lại mỗi 60 giây; không xóa event |
-| Xử lý notification | 8 | 1s, 2s, 4s, 8s, 16s, 32s, 60s | Đánh dấu `DEAD_LETTER` hoặc trạng thái tương đương, giữ dữ liệu để retry thủ công; không đổi Order status |
+| Thao tác | Tổng lần gửi tối đa | Backoff giữa các lần | Khi vượt ngưỡng |
+|---|---|---|---|
+| Reserve inventory | 5 | 1s, 2s, 4s, 8s | Tra cứu reservation theo khóa reserve. Nếu vẫn chưa rõ: Saga chờ xác minh, truy vấn nền mỗi 30 giây, **không gọi capture** khi chưa xác nhận `RESERVED`. Nếu Order hết hạn trong lúc chờ thì xử lý theo D-01.5 và D-06 |
+| Capture payment | 5 lần gửi cùng khóa | 1s, 2s, 4s, 8s | Tra cứu payment. Nếu vẫn `UNKNOWN`: payment ở `UNKNOWN`, **bắt đầu lịch đối soát D-04**; không tạo khóa capture mới. `RECONCILIATION_REQUIRED` chỉ xảy ra khi D-04 cạn |
+| Release reservation | 5 | 1s, 2s, 4s, 8s | Lưu bước release chưa hoàn tất, cảnh báo, retry nền mỗi 60 giây (xem D-03.2 về trạng thái Order) |
+| Refund payment | 5 | 1s, 2s, 4s, 8s | Lưu refund chưa hoàn tất, Saga ở trạng thái compensation lỗi, cảnh báo, retry nền mỗi 60 giây |
+| Publish Outbox | 8 | 1s, 2s, 4s, 8s, 16s, 32s, 60s | Giữ event chưa xác nhận, cảnh báo, tiếp tục thử mỗi 60 giây; không xóa event |
+| Xử lý notification | 8 | 1s, 2s, 4s, 8s, 16s, 32s, 60s | Giữ ở trạng thái chờ gửi lại, tiếp tục retry nền mỗi 60 giây để tự phục hồi khi Notification Service sống lại (EC-10), cảnh báo; không đổi Order status. `DEAD_LETTER` không dùng trong demo |
 
-Các giá trị trạng thái `RECONCILIATION_REQUIRED` và `DEAD_LETTER` là đề xuất bổ sung cho trạng thái Saga/Notification, không phải trạng thái Order.
+**D-03.1. Điều kiện retry.**
 
-### D-03.1. Điều kiện retry
+- Retry tự động: timeout, lỗi kết nối, HTTP 5xx hoặc lỗi tạm thời tương đương, xung đột lock có thể thử lại mà không đổi ý nghĩa nghiệp vụ.
+- Không retry tự động: request không hợp lệ, thiếu trường bắt buộc, cùng khóa khác payload, lỗi nghiệp vụ xác định (ví dụ không đủ tồn kho).
+- Sau timeout của lệnh có thể đã tạo tác dụng phụ: truy vấn trạng thái hoặc gửi lại **cùng khóa**. Không suy luận lệnh thất bại chỉ vì không có phản hồi.
 
-Retry tự động áp dụng cho:
-- Timeout hoặc lỗi kết nối.
-- HTTP 5xx hoặc lỗi tạm thời tương đương.
-- Xung đột khóa/lock có thể thử lại mà không thay đổi ý nghĩa nghiệp vụ.
+**D-03.2. Trạng thái Order khi compensation lỗi.**
 
-Không retry tự động:
-- Request không hợp lệ.
-- Thiếu trường bắt buộc.
-- Cùng khóa nhưng payload khác.
-- Lỗi nghiệp vụ xác định như không đủ tồn kho.
+- Nhánh thất bại (payment `FAILED`): Order `COMPENSATING`; vượt ngưỡng release thì Order chuyển `COMPENSATION_FAILED` (vẫn retry nền, chưa phải trạng thái cuối).
+- Nhánh hết hạn: Order **giữ `EXPIRING`** (để không mất thông tin đang xử lý hết hạn); trạng thái lỗi nằm ở Saga (`COMPENSATION_FAILED`). Order chỉ sang `EXPIRED` khi đủ điều kiện D-06.2.
 
-Sau timeout của một lệnh có thể đã tạo tác dụng phụ, phải truy vấn trạng thái hoặc gửi lại cùng khóa idempotency. Không được suy luận rằng lệnh thất bại chỉ vì không nhận được phản hồi.
+**D-03.3. Độ bền.** Bộ đếm retry, thời điểm thử kế tiếp và trạng thái vượt ngưỡng phải lưu bền vững để tiếp tục sau khi service restart.
 
-### Lý do
+#### Tác động
 
-Chính sách cụ thể giúp tránh retry vô hạn trong luồng xử lý ban đầu, đồng thời bảo đảm các bước compensation và giao nhận event chưa hoàn tất vẫn có đường phục hồi.
+- **Người 2:** bộ đếm retry bền vững, lịch backoff cấu hình được, retry nền.
+- **Người 3:** kiểm thử số lần gửi chính xác, khóa không đổi qua retry, trạng thái khi vượt ngưỡng, phục hồi sau restart.
 
-### Tác động
+#### Truy vết
 
-**Người 2:** cần bộ đếm retry bền vững, lịch backoff cấu hình được, trạng thái vượt ngưỡng và cơ chế retry nền.
+FR-06, FR-07, FR-08, FR-11, FR-12, FR-13 · BR-03, BR-07, BR-08, BR-10, BR-11 · EC-03, EC-04, EC-05, EC-06, EC-08, EC-09, EC-10, EC-11.
 
-**Người 3:** cần kiểm thử số lần gửi chính xác, khóa không đổi qua retry, trạng thái khi vượt ngưỡng và khả năng phục hồi sau restart.
+---
 
-### Truy vết
+### D-04 – Đối soát payment `UNKNOWN`
 
-- FR-06, FR-07, FR-08, FR-11, FR-12, FR-13.
-- BR-03, BR-07, BR-08, BR-10, BR-11.
-- EC-03, EC-04, EC-05, EC-06, EC-08, EC-09, EC-10, EC-11.
+#### Bối cảnh
 
-## D-04 – Đối soát payment `UNKNOWN`
+EC-03, EC-05 cho thấy timeout có thể xảy ra dù payment đã được xử lý; BR-07 cấm xem timeout là thất bại. W1 chưa chốt tần suất query, thời gian tối đa và cách xử lý khi vẫn chưa rõ.
 
-### Bối cảnh
+#### Quyết định đề xuất
 
-EC-03 và EC-05 xác định rằng timeout có thể xảy ra dù payment đã được xử lý. BR-07 cấm xem timeout là thất bại. W1 chưa chốt tần suất query, thời gian tối đa và cách xử lý khi kết quả vẫn chưa rõ.
+Khi capture hết 5 lần gửi (D-03) mà vẫn timeout:
 
-### Quyết định đề xuất
-
-Khi capture timeout:
-1. Lưu payment ở trạng thái `UNKNOWN`.
-2. Giữ nguyên khóa idempotency của capture.
-3. Bắt đầu lịch đối soát bền vững; lưu `unknownSince`, số lần query và thời điểm query kế tiếp.
-
-Lịch đối soát:
+1. Lưu payment ở `UNKNOWN`, giữ nguyên khóa idempotency của capture.
+2. Bắt đầu lịch đối soát bền vững; lưu `unknownSince`, số lần query và thời điểm query kế tiếp.
+3. Đối soát chỉ **truy vấn**, không gửi lại capture bằng khóa mới.
 
 | Giai đoạn | Tần suất | Số lần tối đa |
-|---|---|---:|
+|---|---|---|
 | 60 giây đầu kể từ khi vào `UNKNOWN` | Mỗi 5 giây | 12 |
-| Từ sau 60 giây đến hết 10 phút | Mỗi 30 giây | Tối đa 18 lần bổ sung |
-| Tổng | Tối đa 10 phút | 30 lần query |
+| Sau 60 giây đến hết 10 phút | Mỗi 30 giây | 18 |
+| **Tổng** | Tối đa 10 phút | **30 lần query** |
 
-Một query timeout cũng tính là một lần query. Thời gian tính theo UTC và trạng thái lịch đối soát phải được lưu bền vững để tiếp tục sau khi service restart.
+Query timeout cũng tính là một lần. Lịch tính theo UTC, lưu bền vững và tiếp tục sau restart.
 
-### D-04.1. Kết quả đối soát
+**D-04.1. Kết quả đối soát.**
 
-- Nếu xác minh được `SUCCEEDED`: lưu kết quả và tiếp tục xử lý theo D-01. Nếu Order đã vào nhánh hết hạn, xử lý theo D-05.
-- Nếu xác minh được `FAILED`: tiếp tục nhánh thất bại/compensation theo nghiệp vụ.
-- Nếu sau 10 phút và 30 lần query vẫn là `UNKNOWN`: chuyển Saga sang `RECONCILIATION_REQUIRED`, phát cảnh báo và yêu cầu can thiệp thủ công.
+- Xác minh được `SUCCEEDED`: lưu kết quả và xử lý theo D-01 (xem D-04.3).
+- Xác minh được `FAILED`: tiếp tục nhánh thất bại/compensation.
+- Hết 10 phút và 30 lần query vẫn `UNKNOWN`: Saga chuyển `RECONCILIATION_REQUIRED`, phát cảnh báo.
 
-Khi vượt ngưỡng:
-- Không tự đổi payment thành `FAILED`.
-- Không giải phóng reservation.
-- Không hoàn tiền.
-- Không chốt Order thành `EXPIRED` chỉ vì TTL đã qua.
-- Nếu Order vẫn `PENDING`, giữ nguyên Order state trong khi chờ kết quả xác minh; lưu rằng TTL đã quá hạn để xử lý lại sau đối soát.
-- Sau khi payment được xác minh, đánh giá lại điều kiện TTL bằng D-01. Không tự gia hạn `expireAt`.
+**D-04.2. Khi đã `RECONCILIATION_REQUIRED`.**
 
-### Lý do
+- Không tự đổi payment thành `FAILED`; không release reservation; không hoàn tiền; không chốt `EXPIRED` chỉ vì TTL đã qua.
+- Tiếp tục **truy vấn nền mỗi 5 phút** (không tính vào 30 lần) và cho phép xử lý thủ công (xem Q-02).
+- Ghi nhận đánh đổi: reservation tiếp tục bị giữ cho đến khi xác minh. Đây là hệ quả có chủ đích của BR-07 (không giải phóng mù quáng) và phải được cảnh báo.
+- Không tự gia hạn `expireAt`.
 
-Giữ tách biệt giữa “không nhận được kết quả” và “đã xác minh thất bại”, tránh giải phóng hàng hoặc hoàn tiền sai khi payment có thể đã thu tiền.
+**D-04.3. Quan hệ với TTL.** Nếu Order còn `PENDING` và đã quá `expireAt` trong lúc payment `UNKNOWN`, Order giữ `PENDING` (không claim). Sau khi xác minh:
 
-### Tác động
+- `SUCCEEDED` khi `now() >= expireAt`: Order Service không `CONFIRMED` (D-01.1); TTL Worker claim như thường; tiền được hoàn theo D-05 (D-01.4).
+- `FAILED`: nhánh nào chuyển Order khỏi `PENDING` trước thì thắng (D-01.3).
 
-**Người 2:** cần API/command truy vấn payment theo `paymentId` hoặc khóa capture; lưu bộ đếm và lịch query bền vững.
+#### Tác động
 
-**Người 3:** cần kiểm thử `UNKNOWN` kéo dài, kết quả thành công ở lần query cuối, kết quả thất bại, restart giữa lịch query và TTL đã quá hạn trong khi payment còn `UNKNOWN`.
+- **Người 2:** API/command truy vấn payment theo `paymentId` hoặc khóa capture; lưu bộ đếm và lịch query bền vững; truy vấn nền sau khi cạn.
+- **Người 3:** `UNKNOWN` kéo dài; thành công ở lần query cuối; thất bại; restart giữa lịch query; TTL đã quá hạn khi payment còn `UNKNOWN`; xác minh không có release/refund trong lúc `UNKNOWN`.
 
-### Truy vết
+#### Truy vết
 
-- FR-05, FR-06, FR-11, FR-13, FR-14, FR-15.
-- BR-07, BR-10, BR-13.
-- EC-03, EC-05, EC-06, EC-11.
-- UC-03, UC-04, UC-06.
+FR-05, FR-06, FR-11, FR-13, FR-14, FR-15 · BR-07, BR-10, BR-13 · EC-03, EC-05, EC-06, EC-11 · UC-03, UC-04, UC-06.
 
-## D-05 – Hoàn tiền khi Order không thể xác nhận
+---
 
-### Bối cảnh
+### D-05 – Hoàn tiền khi Order không thể xác nhận
 
-FR-08 yêu cầu hoàn tiền khi tiền đã thu nhưng đơn không thể hoàn tất và chính sách yêu cầu hủy. EC-11 cũng nêu payment thành công đến muộn sau `EXPIRED` không được làm Order mở lại.
+#### Bối cảnh
 
-W1 chưa xác định điều kiện kích hoạt refund, khóa refund và cách xử lý refund chưa rõ kết quả.
+FR-08 yêu cầu hoàn tiền khi tiền đã thu nhưng đơn không thể hoàn tất. EC-11 nêu payment thành công đến muộn sau `EXPIRED` không làm Order mở lại. W1 chưa xác định điều kiện kích hoạt, khóa refund và cách xử lý refund chưa rõ kết quả.
 
-### Quyết định đề xuất
+#### Quyết định đề xuất
 
-#### D-05.1. Điều kiện kích hoạt
+**D-05.1. Điều kiện kích hoạt.** Chỉ gửi lệnh refund khi Payment Service đã xác minh payment `SUCCEEDED` **và** Order không thể được `CONFIRMED`, gồm:
 
-Chỉ gửi lệnh refund khi Payment Service đã xác minh payment `SUCCEEDED` và Order không thể được xác nhận `CONFIRMED`.
-
-Các trường hợp gồm:
 - Order đã vào nhánh hết hạn và payment được xác minh thành công sau đó.
 - Order đã `EXPIRED` nhưng phát hiện payment thực tế đã thu tiền.
-- Payment đã thu tiền nhưng Order không thể xác nhận do nhánh nghiệp vụ thất bại khác.
+- Payment đã thu tiền nhưng Order không thể xác nhận do nhánh nghiệp vụ khác (ví dụ thua cập nhật có điều kiện ở D-01).
 
-Không gửi refund khi payment đang `UNKNOWN`. Phải đối soát trước.
+Không gửi refund khi payment đang `UNKNOWN`; phải đối soát trước. Demo chỉ hoàn **toàn bộ** số tiền đã thu (hoàn một phần ngoài phạm vi).
 
-#### D-05.2. Khóa refund
+**D-05.2. Khóa refund.** `payment:refund:{orderId}:{paymentId}:v1`. Retry dùng cùng khóa; không sinh khóa mới vì timeout hoặc lỗi tạm thời.
 
-Dùng khóa:
+**D-05.3. Kết quả refund.**
 
-`payment:refund:{orderId}:{paymentId}:v1`
+- Chỉ coi refund hoàn tất khi Payment Service xác minh và lưu bền vững refund thành công.
+- Refund timeout: truy vấn theo `paymentId` hoặc khóa refund theo lịch giống D-04 trước khi kết luận.
+- Refund vẫn `UNKNOWN`: không tạo refund mới bằng khóa khác.
+- Lỗi tạm thời: retry theo D-03; vượt ngưỡng thì ghi nhận compensation chưa hoàn tất, cảnh báo, retry nền mỗi 60 giây.
 
-Retry refund phải sử dụng cùng khóa. Không sinh khóa mới chỉ vì timeout hoặc lỗi tạm thời.
+**D-05.4. Hai trường hợp phân biệt.**
 
-#### D-05.3. Kết quả refund
-
-- Chỉ coi refund hoàn tất khi Payment Service xác minh và lưu bền vững kết quả refund thành công.
-- Nếu refund timeout, truy vấn refund theo `paymentId` hoặc khóa refund trước khi kết luận.
-- Nếu refund vẫn `UNKNOWN`, không tạo refund mới bằng khóa khác.
-- Nếu refund lỗi tạm thời, retry theo D-03.
-- Nếu vượt ngưỡng retry đồng bộ, ghi nhận compensation chưa hoàn tất, cảnh báo và tiếp tục retry nền mỗi 60 giây.
-
-#### D-05.4. Payment đến muộn sau `EXPIRED`
-
-Order vẫn giữ trạng thái `EXPIRED`; không chuyển lại `PENDING` hoặc `CONFIRMED`.
-
-Saga theo dõi tác vụ refund riêng cho đến khi kết quả được xác minh. Trạng thái refund chưa hoàn tất không được che giấu bằng cách đánh dấu compensation thành công.
-
-### Lý do
-
-Tách trạng thái nghiệp vụ của Order khỏi nghĩa vụ tài chính còn phải xử lý; tránh mở lại đơn đã hết hạn hoặc hoàn tiền trùng.
-
-### Tác động
-
-**Người 2:** cần thao tác refund idempotent và khả năng tra cứu trạng thái refund.
-
-**Người 3:** cần kiểm thử late payment sau `EXPIRED`, refund timeout, refund duplicate, refund `UNKNOWN` và retry sau khi vượt ngưỡng.
-
-### Truy vết
-
-- FR-08, FR-12, FR-13, FR-14, FR-15.
-- BR-07, BR-08, BR-13.
-- EC-03, EC-05, EC-09, EC-11.
-- UC-04, UC-06.
-
-## D-06 – TTL và cơ chế claim Order hết hạn
-
-### Bối cảnh
-
-BR-13.1 đã đề xuất TTL mặc định 15 phút. BR-13.2 và EC-11 yêu cầu claim đơn quá hạn để ngăn nhiều worker cùng xử lý. W1 chưa chốt chu kỳ quét và cách worker phục hồi sau crash.
-
-### Quyết định đề xuất
-
-| Thuộc tính | Giá trị/quy tắc |
+| Trường hợp | Quy tắc |
 |---|---|
-| TTL mặc định | 15 phút |
+| Payment đã được xác minh `SUCCEEDED` khi Order đang `EXPIRING` | Refund phải hoàn tất và được xác minh **trước khi** chốt `EXPIRED` (D-06.2). |
+| Payment thành công chỉ được phát hiện sau khi Order đã `EXPIRED` | Order giữ `EXPIRED`, không mở lại. Saga theo dõi tác vụ refund riêng đến khi xác minh xong; trạng thái refund chưa xong không được che bằng cách đánh dấu compensation thành công. |
+
+#### Tác động
+
+- **Người 2:** refund idempotent; tra cứu trạng thái refund; theo dõi refund chưa hoàn tất.
+- **Người 3:** late payment sau `EXPIRED`; refund timeout, duplicate, `UNKNOWN`; retry sau khi vượt ngưỡng.
+
+#### Truy vết
+
+FR-08, FR-12, FR-13, FR-14, FR-15 · BR-07, BR-08, BR-13 · EC-03, EC-05, EC-09, EC-11 · UC-04, UC-06.
+
+---
+
+### D-06 – TTL và cơ chế claim Order hết hạn
+
+#### Bối cảnh
+
+BR-13.1 đã đề xuất TTL 15 phút. BR-13.2 và EC-11 yêu cầu claim đơn quá hạn để ngăn nhiều worker cùng xử lý. W1 chưa chốt chu kỳ quét và cách phục hồi sau crash.
+
+#### Quyết định đề xuất
+
+| Thuộc tính | Giá trị / quy tắc |
+|---|---|
+| TTL mặc định | 15 phút (cấu hình được) |
 | Công thức | `expireAt = createdAt + TTL` |
-| Mốc hết hạn | `currentTime >= expireAt` |
+| Mốc hết hạn | `now() >= expireAt` (đồng hồ DB, UTC) |
 | Chu kỳ quét | Mỗi 5 giây |
-| Trạng thái trước claim | `PENDING` |
-| Trạng thái sau claim | `EXPIRING` |
-| Lease claim | 30 giây |
-| Thời gian lưu | `createdAt`, `expireAt`, `claimedAt` dùng UTC |
+| Trạng thái trước / sau claim | `PENDING` / `EXPIRING` |
+| Lease claim | 30 giây, gia hạn khi worker còn đang xử lý |
+| Dữ liệu lưu | `createdAt`, `expireAt`, `claimedAt`, `claimToken`, `leaseUntil` (UTC) |
 | Retry tạo đơn | Không tự động gia hạn TTL |
 
-### D-06.1. Quy trình claim
+**D-06.1. Quy trình claim.**
 
-1. Worker tìm Order đang `PENDING` và đã đến `expireAt`.
-2. Worker kiểm tra payment; nếu `UNKNOWN`, không claim.
-3. Worker thực hiện cập nhật có điều kiện `PENDING -> EXPIRING`.
-4. Chỉ worker cập nhật thành công mới được tiếp tục xử lý nhánh hết hạn.
-5. Worker lưu `claimToken`, `claimedAt` và `leaseUntil`.
-6. Nếu worker crash, worker khác chỉ được tiếp quản khi lease đã hết hạn và cập nhật claim thành công bằng thao tác nguyên tử.
-7. Worker tiếp quản phải đọc lại trạng thái Order, Saga, Payment và Reservation trước khi tiếp tục; không lặp tác dụng phụ đã hoàn tất.
+1. Worker tìm Order `PENDING` đã đến `expireAt`.
+2. Nếu payment `UNKNOWN`: không claim. Nếu **reservation chưa xác minh**: vẫn được claim, nhưng trước khi release phải tra cứu theo khóa reserve (D-01.5, EC-04).
+3. Worker thực hiện cập nhật có điều kiện `PENDING -> EXPIRING` như D-01.2.
+4. Chỉ worker cập nhật thành công mới xử lý tiếp. Các bước compensation chạy như bước Saga bền vững (không phụ thuộc bộ nhớ của worker).
+5. Trong lúc xử lý, worker gia hạn `leaseUntil` (ví dụ mỗi 10 giây).
+6. Worker cũng quét Order `EXPIRING` có `leaseUntil < now()`. Worker tiếp quản chỉ khi claim lại thành công bằng thao tác nguyên tử, sau đó đọc lại trạng thái Order, Saga, Payment, Reservation và không lặp tác dụng phụ đã hoàn tất.
+7. Idempotency vẫn là lớp bảo vệ bắt buộc nếu hai worker tình cờ thực hiện cùng một bước.
 
-Lease 30 giây là giá trị đề xuất cho demo. Nếu một bước xử lý vẫn đang thực hiện khi lease hết hạn, cơ chế claim phải tránh để hai worker đồng thời thực hiện cùng tác dụng phụ; idempotency vẫn là lớp bảo vệ bắt buộc.
+**D-06.2. Điều kiện chốt `EXPIRED`.** Chỉ chốt khi đồng thời:
 
-### D-06.2. Điều kiện chốt `EXPIRED`
+1. Order đã quá hạn và không được `CONFIRMED`.
+2. Payment không còn `UNKNOWN`.
+3. Reservation cần giải phóng đã được xác nhận `RELEASED`.
+4. Nếu payment đã xác minh `SUCCEEDED` thì refund theo D-05 đã được xác minh hoàn tất.
+5. Trạng thái Order và event `OrderExpired` được lưu bền vững (cùng transaction với Outbox).
 
-Claim `EXPIRING` không đồng nghĩa đã hết hạn hoàn tất.
+Nếu chưa đủ, Order giữ `EXPIRING`, tiếp tục theo dõi và retry; không tuyên bố hoàn tất.
 
-Chỉ chốt `EXPIRED` khi:
-- Order đã quá hạn.
-- Order không được xác nhận `CONFIRMED`.
-- Payment không còn `UNKNOWN`.
-- Reservation cần giải phóng đã được xác nhận `RELEASED`.
-- Refund bắt buộc theo D-05 đã được xác minh hoàn tất.
-- Trạng thái Order và event `OrderExpired` được lưu bền vững.
+#### Tác động
 
-Nếu compensation hoặc refund chưa hoàn tất, tiếp tục theo dõi và retry; không tuyên bố hoàn tất.
+- **Người 2:** worker quét lại, claim nguyên tử, lease có gia hạn, phục hồi các bước chưa hoàn tất.
+- **Người 3:** hai worker cùng claim; worker crash sau claim; lease hết hạn và tiếp quản; TTL khi payment `UNKNOWN`; TTL khi reserve chưa xác minh.
 
-### Lý do
+#### Truy vết
 
-Chu kỳ quét và lease có giá trị cụ thể cho phép kiểm thử TTL, tránh nhiều worker cùng claim và phục hồi sau crash.
+FR-13, FR-14, FR-15 · BR-10, BR-12, BR-13 · EC-04, EC-06, EC-11 · UC-06.
 
-### Tác động
+---
 
-**Người 2:** cần worker có khả năng quét lại, claim nguyên tử, lease và phục hồi các bước chưa hoàn tất.
+### D-07 – API tạo đơn đồng bộ hay bất đồng bộ
 
-**Người 3:** cần kiểm thử hai worker cùng claim, worker crash sau claim, lease hết hạn và TTL khi payment `UNKNOWN`.
+#### Bối cảnh
 
-### Truy vết
+UC-01 yêu cầu tạo Order, khởi tạo Saga và trả Order ID/trạng thái ban đầu. W1 chưa chốt API có chờ toàn bộ Saga hay không.
 
-- FR-13, FR-14, FR-15.
-- BR-10, BR-12, BR-13.
-- EC-06, EC-11.
-- UC-06.
+#### Quyết định đề xuất: `POST` chỉ xác nhận đã tiếp nhận bền vững; client truy vấn trạng thái riêng.
 
-## D-07 – API tạo đơn đồng bộ hay bất đồng bộ
+**D-07.1. Tạo Order.** `POST /api/v1/orders`
 
-### Bối cảnh
-
-UC-01 yêu cầu tạo Order, khởi tạo Saga và trả Order ID/trạng thái ban đầu. W1 chưa chốt API có chờ toàn bộ Saga hoàn tất hay không.
-
-### Các phương án
-
-- **Phương án A:** `POST` chờ cho đến khi đơn `CONFIRMED` hoặc thất bại.
-- **Phương án B:** `POST` chỉ xác nhận đã tiếp nhận bền vững; client truy vấn trạng thái riêng.
-
-### Quyết định đề xuất
-
-Chọn **Phương án B – API tạo đơn bất đồng bộ**.
-
-#### D-07.1. Tạo Order
-
-Endpoint đề xuất:
-
-`POST /api/v1/orders`
-
-Header bắt buộc:
-
-`Idempotency-Key: <client-generated-key>`
-
-Request tối thiểu gồm sản phẩm và số lượng. Schema chi tiết sẽ được chốt trong `14-api-event-contract-draft.md`.
-
-Chỉ trả `202 Accepted` sau khi Order, Saga và Outbox record cần thiết đã được lưu bền vững. Response tối thiểu:
+- Header bắt buộc: `Idempotency-Key: <client-generated-key>`. Thiếu header: `400`.
+- Request tối thiểu gồm sản phẩm và số lượng; schema chi tiết ở `14-api-event-contract-draft.md`.
+- Chỉ trả `202 Accepted` **sau khi** Order, Saga và Outbox record cần thiết đã được lưu bền vững.
 
 ```json
 {
@@ -421,96 +348,129 @@ Chỉ trả `202 Accepted` sau khi Order, Saga và Outbox record cần thiết �
 }
 ```
 
-Header đề xuất:
-- `Location: /api/v1/orders/{orderId}`
-- `Retry-After: 1`
+Header đề xuất: `Location: /api/v1/orders/{orderId}`, `Retry-After: 1`.
 
-`202 Accepted` chỉ có nghĩa hệ thống đã tiếp nhận yêu cầu; không có nghĩa đơn đã thanh toán hoặc được xác nhận.
+`202` chỉ nghĩa là hệ thống đã tiếp nhận yêu cầu, **không** nghĩa là đã thanh toán hay xác nhận.
 
-#### D-07.2. Theo dõi trạng thái
+**D-07.2. Theo dõi trạng thái.** `GET /api/v1/orders/{orderId}` chỉ đọc, không tạo tác dụng phụ nghiệp vụ.
 
-Endpoint đề xuất:
+| Mã | Ý nghĩa |
+|---|---|
+| `200 OK` | Order tồn tại |
+| `202 Accepted` | Tạo đơn đã được tiếp nhận (cả khi gửi lại cùng khóa, cùng payload) |
+| `400 Bad Request` | Request không hợp lệ hoặc thiếu `Idempotency-Key` |
+| `404 Not Found` | Không tìm thấy Order |
+| `409 Conflict` | Cùng `Idempotency-Key` nhưng payload khác |
+| `5xx` | Lỗi hệ thống, yêu cầu chưa được xác nhận đã lưu bền vững |
 
-`GET /api/v1/orders/{orderId}`
+Nếu `POST` gặp lỗi mạng và client không biết server đã tiếp nhận hay chưa, client phải retry với **cùng** `Idempotency-Key`.
 
-GET chỉ đọc trạng thái và không tạo tác dụng phụ nghiệp vụ.
+#### Tác động
 
-Các mã phản hồi đề xuất:
-- `200 OK`: Order tồn tại.
-- `404 Not Found`: không tìm thấy Order.
-- `400 Bad Request`: request tạo đơn không hợp lệ.
-- `409 Conflict`: cùng idempotency key nhưng payload khác.
-- `5xx`: lỗi hệ thống khiến yêu cầu chưa thể được xác nhận đã lưu bền vững.
+- **Người 2:** API trạng thái Order; lưu kết quả của yêu cầu idempotent.
+- **Người 3:** kiểm thử `202`, duplicate POST, cùng khóa khác payload, thiếu header, `GET` không có side effect, retry sau lỗi mạng.
 
-Nếu POST gặp lỗi mạng và client không biết server đã tiếp nhận hay chưa, client phải retry với cùng `Idempotency-Key`.
+#### Truy vết
 
-### Lý do
+FR-01, FR-02, FR-10, FR-14 · BR-09, BR-11, BR-12 · EC-06, EC-07 · UC-01, UC-05, UC-06.
 
-Client không cần giữ kết nối trong toàn bộ quá trình Saga; phù hợp với xử lý phân tán có retry, timeout và trạng thái trung gian.
+---
 
-### Tác động
+### D-08 – Fault injection phục vụ demo và kiểm thử
 
-**Người 2:** cần API trạng thái Order và lưu kết quả của yêu cầu idempotent.
+#### Bối cảnh
 
-**Người 3:** cần kiểm thử `202`, duplicate POST, cùng khóa khác payload, GET không tạo side effect và retry sau lỗi mạng.
+EC-03 đến EC-11 yêu cầu kiểm thử timeout, duplicate message, crash, Outbox publisher lỗi, compensation lỗi và Notification ngừng hoạt động. W1 chưa có quy ước thống nhất để tái tạo các tình huống này.
 
-### Truy vết
+#### Quyết định đề xuất
 
-- FR-01, FR-02, FR-10, FR-14.
-- BR-09, BR-11, BR-12.
-- EC-06, EC-07.
-- UC-01, UC-05, UC-06.
+Fault injection chỉ hoạt động trong profile demo/test. Mặc định `FAULT_INJECTION_ENABLED=false`; không bật ở môi trường production.
 
-## D-08 – Fault injection phục vụ demo và kiểm thử
-
-### Bối cảnh
-
-EC-03 đến EC-11 yêu cầu kiểm thử timeout, duplicate message, crash, Outbox publisher lỗi, compensation lỗi và Notification Service ngừng hoạt động. W1 chưa định nghĩa một quy ước thống nhất để tái tạo các tình huống này.
-
-### Quyết định đề xuất
-
-Fault injection chỉ hoạt động trong profile `demo` hoặc `test`. Mặc định:
-
-`FAULT_INJECTION_ENABLED=false`
-
-Không bật cơ chế này trong môi trường production.
-
-### D-08.1. Các chế độ lỗi
+**D-08.1. Các chế độ lỗi.**
 
 | Chế độ | Ý nghĩa |
 |---|---|
 | `NONE` | Không chèn lỗi |
 | `FAIL` | Trả lỗi tạm thời tại operation được chọn |
-| `TIMEOUT` | Trì hoãn phản hồi quá thời gian chờ của client; side effect có thể đã commit |
+| `TIMEOUT` | Trì hoãn phản hồi quá thời gian chờ của client |
 | `DUPLICATE` | Phát lại cùng command/event với cùng định danh |
 | `CRASH` | Dừng xử lý tại điểm crash được cấu hình |
 
-### D-08.2. Cấu hình fault
-
-Cấu hình test đề xuất có các trường:
+**D-08.2. Cấu hình fault.**
 
 | Trường | Ý nghĩa |
 |---|---|
-| `service` | `inventory`, `payment` hoặc `notification` |
+| `service` | `order`, `inventory`, `payment` hoặc `notification` (`order` gồm Outbox publisher và TTL Worker) |
 | `mode` | Một trong các chế độ D-08.1 |
 | `targetOperation` | Tên command hoặc consumer cần chèn lỗi |
-| `occurrences` | Số lần chèn lỗi còn lại; số nguyên dương |
+| `occurrences` | Số lần chèn lỗi còn lại, số nguyên dương; giảm sau mỗi lần áp dụng |
+| `effectTiming` | `BEFORE_EFFECT` hoặc `AFTER_EFFECT` (side effect đã commit hay chưa) |
 | `delayMs` | Độ trễ cho `TIMEOUT`; mặc định 3000 ms |
 | `duplicateCount` | Tổng số bản sao được phát; mặc định 2 |
-| `crashPoint` | `BEFORE_COMMIT`, `AFTER_COMMIT_BEFORE_RESPONSE` hoặc `AFTER_PUBLISH_BEFORE_MARK` |
+| `crashPoint` | `BEFORE_COMMIT`, `AFTER_COMMIT_BEFORE_RESPONSE`, `AFTER_PUBLISH_BEFORE_MARK`, `AFTER_CLAIM_BEFORE_RELEASE` |
 
-Cấu hình phải tác động đúng operation được chỉ định và giảm `occurrences` sau mỗi lần áp dụng.
+**D-08.3. Quy tắc từng chế độ.**
 
-### D-08.3. Quy tắc từng chế độ
-
-- `FAIL`: phải xác định rõ lỗi xảy ra trước hay sau side effect. Mặc định lỗi test xảy ra trước side effect.
-- `TIMEOUT`: không được giả định side effect thất bại; test phải kiểm tra query/retry idempotent.
-- `DUPLICATE`: giữ nguyên `eventId` hoặc `commandId` tương ứng; không sinh định danh mới để mô phỏng cùng một thông điệp.
-- `CRASH`: tiến trình phải dừng tại điểm cấu hình; test harness khởi động lại service để kiểm tra recovery.
+- `FAIL`: mặc định `effectTiming=BEFORE_EFFECT` (lỗi xảy ra trước side effect).
+- `TIMEOUT`: mặc định `effectTiming=AFTER_EFFECT` (side effect **đã commit** nhưng phản hồi bị trễ), vì đây là tình huống nguy hiểm của EC-03/EC-05. Test phải kiểm tra query hoặc retry idempotent.
+- `DUPLICATE`: giữ nguyên `eventId`/`commandId`; không sinh định danh mới để mô phỏng cùng một thông điệp.
+- `CRASH`: tiến trình dừng đúng điểm cấu hình; test harness khởi động lại service để kiểm tra recovery.
 - Sau mỗi test, cấu hình fault phải được reset để không ảnh hưởng test kế tiếp.
 
-Endpoint điều khiển fault, nếu được triển khai, là API nội bộ dành riêng cho profile test/demo; không phải API nghiệp vụ công khai. Người 2 xác nhận cách triển khai cụ thể.
+**D-08.4. Cấu hình rút ngắn thời gian cho test.** TTL, chu kỳ quét, lease, backoff và lịch đối soát phải cấu hình được (ví dụ TTL 30 giây, backoff 100 ms) hoặc dùng đồng hồ giả, để kiểm thử không phải chờ 15 phút thật. Giá trị mặc định ở D-03, D-04, D-06 là giá trị demo, không hard-code.
 
-### Lý do
+Endpoint điều khiển fault (nếu có) là API nội bộ của profile test/demo, không phải API nghiệp vụ công khai; Người 2 xác nhận cách triển khai.
 
-Cho phép Người 3 tái tạo lỗi có tính lặp lại và kiểm tra idempotency/recovery mà không phụ thuộc vào thao tác thủ công hoặc lỗi ngẫu nhiên
+#### Tác động
+
+- **Người 2:** cơ chế fault injectable; dừng/restart service tại điểm xác định; cấu hình thời gian rút ngắn.
+- **Người 3:** thiết lập/reset fault tự động; xác minh side effect trước/sau crash; chạy lại cùng kịch bản nhiều lần.
+
+#### Truy vết
+
+FR-11, FR-12, FR-13, FR-14 · BR-08, BR-10, BR-11, BR-12 · EC-03 đến EC-11 · UC-02 đến UC-06.
+
+---
+
+## 4. Giả định cần Người 2 xác nhận khả thi
+
+| ID | Giả định/đề xuất | Trạng thái |
+|---|---|---|
+| A-01 | Cập nhật Order và tạo Outbox record trong cùng transaction cục bộ của Order Service | Chờ xác nhận |
+| A-02 | Payment Service truy vấn được trạng thái theo `paymentId` hoặc khóa capture ổn định | Chờ xác nhận |
+| A-03 | Payment Service cung cấp kết quả capture và refund đã lưu bền vững | Chờ xác nhận |
+| A-04 | Payment Service cung cấp timestamp hoàn tất payment đáng tin cậy (cần nếu chọn phương án thay thế ở Q-01) | Chờ xác nhận |
+| A-05 | Inventory hỗ trợ reserve/release idempotent và truy vấn trạng thái reservation | Chờ xác nhận |
+| A-06 | Dùng được conditional update hoặc cơ chế nguyên tử tương đương để claim Order khỏi `PENDING` | Chờ xác nhận |
+| A-07 | Lưu được lease/claim token để phục hồi khi TTL Worker crash | Chờ xác nhận |
+| A-08 | Triển khai được Outbox publisher và consumer chống xử lý event trùng | Chờ xác nhận |
+| A-09 | Lưu được bộ đếm retry và lịch đối soát bền vững qua restart | Chờ xác nhận |
+| A-10 | Payment mock hỗ trợ capture, query, refund và các fault mode cần cho demo | Chờ xác nhận |
+| A-11 | Bật/tắt được fault injection riêng trong profile demo/test | Chờ xác nhận |
+| A-12 | Notification lưu được kết quả giao nhận; mức bảo đảm không gửi trùng ra ngoài phụ thuộc khả năng bên nhận | Chờ xác nhận |
+| A-13 | Inventory ghi nhận release theo `orderId` và từ chối/vô hiệu reserve đến muộn sau release | Chờ xác nhận |
+| A-14 | Có định danh khách hàng/client để dùng `UNIQUE(customerId, idempotencyKey)`; nếu không thì dùng `UNIQUE(idempotencyKey)` | Chờ xác nhận |
+| A-15 | Dùng một nguồn thời gian duy nhất (đồng hồ DB, UTC) trong conditional update; TTL, backoff, lease cấu hình được cho test | Chờ xác nhận |
+| A-16 | Worker gia hạn được lease khi đang xử lý và quét được Order `EXPIRING` có lease hết hạn | Chờ xác nhận |
+
+---
+
+## 5. Giả định cần Người 3 xác nhận kiểm thử được
+
+| ID | Giả định/đề xuất | Trạng thái |
+|---|---|---|
+| T-01 | Kiểm thử được hai conditional update cạnh tranh và chứng minh chỉ một nhánh thắng | Chờ xác nhận |
+| T-02 | Cấu hình được TTL rút ngắn hoặc dùng đồng hồ giả để không phải chờ 15 phút thật | Chờ xác nhận |
+| T-03 | Mô phỏng được payment `UNKNOWN` kéo dài và trả kết quả ở một lần query xác định | Chờ xác nhận |
+| T-04 | Đếm chính xác số lần capture/refund/release ở service mock | Chờ xác nhận |
+| T-05 | Dừng service ở các điểm crash và khởi động lại trong test harness | Chờ xác nhận |
+| T-06 | Phát cùng event nhiều lần với cùng `eventId` để kiểm thử consumer idempotent | Chờ xác nhận |
+| T-07 | Xác minh trạng thái Order, Saga, Payment, Reservation và Outbox sau mỗi kịch bản | Chờ xác nhận |
+| T-08 | Xác minh retry/backoff mà không phụ thuộc thời gian chờ dài thực tế | Chờ xác nhận |
+| T-09 | Kiểm thử Notification ngừng hoạt động rồi phục hồi mà không đổi trạng thái Order | Chờ xác nhận |
+| T-10 | Xác minh không release hoặc refund trong khi payment còn `UNKNOWN` | Chờ xác nhận |
+| T-11 | Kiểm thử reserve đang xử lý khi Order hết hạn, và reserve đến muộn sau release (D-01.5) | Chờ xác nhận |
+| T-12 | Kiểm thử payment hoàn tất trước `expireAt` nhưng xác minh sau `expireAt`: kết quả phải theo D-01.4 | Chờ xác nhận |
+| T-13 | Kiểm thử worker tiếp quản khi lease hết hạn và gia hạn lease khi còn xử lý | Chờ xác nhận |
+
+---
