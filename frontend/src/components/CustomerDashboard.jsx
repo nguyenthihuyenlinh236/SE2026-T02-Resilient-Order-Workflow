@@ -2,13 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   CircleHelp,
   Clock3,
-  LogOut,
   Package,
   PackageCheck,
   RefreshCw,
-  ShoppingBag,
   WifiOff,
 } from 'lucide-react'
+import CustomerSidebar from './CustomerSidebar.jsx'
 import OrderForm from './OrderForm.jsx'
 import OrderHistory from './OrderHistory.jsx'
 import './CustomerDashboard.css'
@@ -220,36 +219,11 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
 
   return (
     <div className="customer-dashboard">
-      <aside className="dashboard-sidebar">
-        <a className="dashboard-brand" href="/" aria-label="Resilient Orders">
-          <span className="dashboard-brand-mark"><PackageCheck size={21} /></span>
-          resilient<span>.</span>
-        </a>
-
-        <div className="dashboard-nav-label">KHÔNG GIAN CỦA BẠN</div>
-        <div className="dashboard-nav-item">
-          <ShoppingBag size={17} />
-          <span>Đơn hàng</span>
-          <span className="dashboard-nav-count">{loading ? '—' : orders.length}</span>
-        </div>
-
-        <div className="dashboard-sidebar-bottom">
-          <div className="dashboard-help">
-            <strong>Cần hỗ trợ?</strong>
-            <p>Đội ngũ của chúng tôi luôn sẵn sàng giúp bạn.</p>
-          </div>
-          <div className="dashboard-profile">
-            <div className="dashboard-avatar">{user.username.slice(0, 1).toUpperCase()}</div>
-            <div className="dashboard-profile-copy">
-              <strong>{user.username}</strong>
-              <span>Khách hàng</span>
-            </div>
-            <button className="dashboard-icon-button" onClick={onLogout} title="Đăng xuất" type="button">
-              <LogOut size={16} />
-            </button>
-          </div>
-        </div>
-      </aside>
+      <CustomerSidebar
+        onLogout={onLogout}
+        orderCount={loading ? '—' : orders.length}
+        user={user}
+      />
 
       <main className="dashboard-main">
         <header className="dashboard-topbar">
