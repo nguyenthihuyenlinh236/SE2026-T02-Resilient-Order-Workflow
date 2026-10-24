@@ -55,7 +55,8 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 
 **Then**
 - Hệ thống không tạo thêm Order cho cùng một thao tác logic.
-- Hệ thống trả lại `orderId` và trạng thái hiện tại của Order đã tồn tại.
+- Hệ thống trả lại phản hồi ban đầu của yêu cầu trùng, gồm mã phản hồi `202 Accepted` và `orderId` đã tạo.
+- Client dùng API truy vấn trạng thái Order để lấy trạng thái hiện tại; không yêu cầu API tạo đơn trả về trạng thái đã cập nhật như một phản hồi mới.
 - Hệ thống không tạo thêm chuỗi capture chỉ vì khách hàng gửi lại yêu cầu.
 
 ### AC-01.3 – Không tạo Order khi lưu thất bại
@@ -70,6 +71,20 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 - Hệ thống không trả về xác nhận rằng Order đã được tạo thành công.
 - Nếu kết quả commit chưa rõ, hệ thống phải tra cứu theo khóa yêu cầu ổn định trước khi thử tạo lại.
 - Hệ thống không được tạo trùng Order do retry.
+
+### AC-01.4 – Cùng idempotency key nhưng payload khác
+
+**Given**
+- Một idempotency key đã được dùng cho yêu cầu tạo Order.
+- Client gửi yêu cầu khác nội dung nhưng tái sử dụng key đó.
+
+**When**
+- Order Service kiểm tra idempotency key và payload của yêu cầu mới.
+
+**Then**
+- Hệ thống từ chối yêu cầu hoặc trả lỗi xung đột theo API contract đã thống nhất.
+- Hệ thống không tạo Order mới và không thực hiện reserve/capture cho payload xung đột.
+- Hệ thống ghi nhận lỗi vận hành phù hợp; không phát domain event thành công cho yêu cầu bị từ chối.
 
 ## 4. AC-02 – Giữ hàng thành công
 
@@ -184,10 +199,10 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 
 **Then**
 - Hệ thống sử dụng cùng khóa `inventory:release:{orderId}:{reservationId}:v1` cho cùng một hành động release.
-- Hệ thống tra cứu kết quả nếu cần để tránh release trùng.
-- Hệ thống không kết thúc nhánh thất bại khi Reservation vẫn chưa được giải quyết.
-- Khi vượt 5 lần gửi, trạng thái xử lý bù trừ là `COMPENSATION_FAILED`.
-- Hệ thống tiếp tục thử lại nền mỗi 60 giây.
+- Tổng số lần gửi tự động tối đa là 5, tính cả lần gửi đầu tiên; các lần retry dùng backoff cấu hình `1s, 2s, 4s, 8s`.
+- Nếu kết quả release chưa rõ, hệ thống truy vấn bằng khóa ổn định trước khi kết luận; không giả định Reservation đã được giải phóng.
+- Khi đã vượt ngưỡng gửi mà compensation vẫn chưa hoàn tất, Saga được ghi `COMPENSATION_FAILED` và tiếp tục retry nền mỗi 60 giây.
+- Order không được chuyển sang trạng thái kết thúc `FAILED` khi Reservation vẫn chưa được giải quyết. Trạng thái Order trong nhánh thất bại phải tuân theo State Machine; nhánh hết hạn giữ Order ở `EXPIRING` trong khi compensation còn tồn đọng.
 
 ## 7. AC-05 – Thanh toán timeout và UNKNOWN
 
@@ -248,8 +263,8 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 - Không xác minh được kết quả cuối cùng.
 
 **Then**
-- Saga chuyển sang `RECONCILIATION_REQUIRED`.
-- Hệ thống tiếp tục polling nền mỗi 5 phút.
+- Sau tổng cộng 30 lần truy vấn trong tối đa 10 phút, Saga chuyển sang `RECONCILIATION_REQUIRED` và phát cảnh báo vận hành.
+- Hệ thống tiếp tục polling nền mỗi 5 phút; các truy vấn nền này không tính vào 30 lần truy vấn của lịch đối soát chính.
 - Không tự kết luận Payment `FAILED`.
 - Không release Reservation, refund hoặc hoàn tất `EXPIRED` khi điều kiện an toàn chưa được thỏa mãn.
 - Không gia hạn `expireAt` chỉ vì đối soát kéo dài.
@@ -350,8 +365,28 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 - Capture status vẫn là `SUCCEEDED`.
 - Refund status được giữ là `UNKNOWN`.
 - Hệ thống đối soát refund hoặc thử lại theo chính sách tương ứng.
-- Nếu vượt ngưỡng gửi, đánh dấu `COMPENSATION_FAILED` và tiếp tục retry nền mỗi 60 giây.
+- Tổng số lần gửi refund tự động tối đa là 5, tính cả lần đầu; retry dùng cùng khóa `payment:refund:{orderId}:{paymentId}:v1` và backoff cấu hình `1s, 2s, 4s, 8s`.
+- Nếu refund timeout hoặc vẫn `UNKNOWN`, hệ thống truy vấn/đối soát theo chính sách; không tạo refund mới bằng khóa khác.
+- Nếu lỗi tạm thời vượt ngưỡng gửi, Saga ghi `COMPENSATION_FAILED`, phát cảnh báo và tiếp tục retry nền mỗi 60 giây.
+- Nếu Payment Service xác minh refund `FAILED` (không phải timeout/UNKNOWN), Saga chuyển `RECONCILIATION_REQUIRED` để theo dõi/can thiệp theo chính sách; không đánh đồng lỗi nghiệp vụ đã xác minh với kết quả chưa rõ.
 - Không kết luận refund thành công khi chưa được xác minh.
+
+### AC-07.3 – Capture thành công muộn sau khi Order đã EXPIRED
+
+**Given**
+- Order đã ở trạng thái `EXPIRED`.
+- Payment Service sau đó xác minh capture của Order đã `SUCCEEDED`.
+
+**When**
+- Reconciliation Worker ghi nhận kết quả capture muộn.
+
+**Then**
+- Order giữ nguyên `EXPIRED`; hệ thống không mở lại Order và không chuyển Order sang `CONFIRMED`.
+- Saga ghi nhận công việc refund muộn theo mô hình đã thống nhất trong State Machine và Design Decisions.
+- Hệ thống gửi refund bằng khóa ổn định `payment:refund:{orderId}:{paymentId}:v1`.
+- Refund được theo dõi riêng; chỉ đánh dấu hoàn tất khi Payment Service xác minh `SUCCEEDED`.
+- Nếu refund timeout/UNKNOWN, hệ thống tiếp tục đối soát; nếu refund `FAILED` đã xác minh, phát cảnh báo và xử lý theo chính sách can thiệp.
+- Không tạo domain event `OrderConfirmed` cho Order đã hết hạn.
 
 ## 10. AC-08 – Outbox và thông báo
 
@@ -499,23 +534,51 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 - Fault injection mặc định tắt ngoài môi trường được cấu hình cho kiểm thử.
 - Sau khi fault injection kết thúc, hệ thống có thể phục hồi các công việc bị gián đoạn.
 
+### AC-11.3 – Lưu giữ dữ liệu 29 ngày
+
+**Given**
+- Order, Saga, kết quả Reservation/Payment, Outbox/Inbox và log kiểm toán thuộc phạm vi lưu giữ đã được xác định.
+- Chính sách lưu giữ đã chỉ rõ mốc bắt đầu tính 29 ngày cho từng loại dữ liệu.
+
+**When**
+- Dữ liệu được lưu trong hệ thống và tiến trình dọn dẹp dữ liệu chạy.
+
+**Then**
+- Dữ liệu thuộc phạm vi bắt buộc không bị xóa trước khi hết thời hạn lưu giữ 29 ngày tính từ mốc đã thống nhất.
+- Chính sách nêu rõ dữ liệu nào được xóa, ẩn danh hoặc lưu tiếp sau thời hạn; không suy ra rằng mọi dữ liệu phải xóa đúng tại ngày thứ 29 nếu chính sách chưa quy định.
+- Việc dọn dẹp không xóa dữ liệu cần thiết để điều tra Saga chưa hoàn tất, đối soát Payment hoặc chứng minh kết quả nghiệp vụ.
+
+### AC-11.4 – Theo dõi thời hạn phản hồi Change Request
+
+**Given**
+- Nhóm tiếp nhận một Change Request trong quá trình phát triển W2.
+- Thời điểm tiếp nhận và thời điểm phản hồi được ghi nhận.
+
+**When**
+- Nhóm đánh giá tác động đến Use Case, State Machine, Saga, API/event contract và Acceptance Criteria.
+
+**Then**
+- Có thể truy xuất thời điểm tiếp nhận, người phụ trách, kết quả đánh giá và thời điểm phản hồi.
+- Mục tiêu phản hồi là không quá 14 giờ theo ràng buộc dự án.
+- Nếu không thể phản hồi trong thời hạn, lý do và trạng thái xử lý được ghi nhận; tiêu chí này là kiểm soát quy trình nhóm, không phải SLA runtime của Order Service.
+
 ## 14. Liên kết yêu cầu
 
-| Nhóm tiêu chí | Use Case liên quan | Tài liệu đối chiếu |
-|---|---|---|
-| Tạo Order và gửi yêu cầu | UC-01 | Functional Requirements, Business Rules |
-| Giữ hàng và hết hàng | UC-02 | State Machine, Saga Workflow |
-| Capture thành công/thất bại | UC-03 | State Machine, Saga Workflow |
-| Compensation và refund | UC-04, UC-11 | Business Rules, Saga Workflow |
-| Notification và Outbox | UC-05 | Functional Requirements, Saga Workflow |
-| TTL và hết hạn | UC-06 | State Machine, Business Rules |
-| Đối soát Payment | UC-07 | Design Decisions, Saga Workflow |
-| Khôi phục sau sự cố | UC-08 | Non-functional Requirements |
-| Trạng thái đơn hàng | UC-09 | State Machine |
-| Idempotency | UC-10 | Design Decisions |
-| Thanh toán muộn và refund | UC-11 | State Machine, Saga Workflow |
+| Nhóm tiêu chí | Use Case liên quan | Truy vết FR/BR/D/NFR | Tài liệu đối chiếu |
+|---|---|---|---|
+| Tạo Order, phản hồi bất đồng bộ và yêu cầu trùng | UC-01, UC-10 | FR-01, BR-03, BR-11, D-02, D-07 | Detailed Use Cases, Design Decisions |
+| Giữ hàng, hết hàng và reserve timeout | UC-02 | FR-03, FR-04, BR-02, BR-05, D-03 | State Machine, Saga Workflow |
+| Capture thành công và phân xử nhánh cạnh tranh | UC-01, UC-03, UC-06 | FR-05, FR-09, BR-01, D-01 | State Machine, Saga Workflow |
+| Capture thất bại, release và compensation | UC-03, UC-04 | FR-07, FR-12, BR-04, BR-08, D-03 | State Machine, Saga Workflow |
+| Timeout, UNKNOWN và đối soát | UC-03, UC-07 | FR-05, FR-11, FR-14, BR-07, D-04 | State Machine, Saga Workflow |
+| TTL, claim, lease và hết hạn | UC-06 | FR-15, BR-13, D-01, D-06 | State Machine, Saga Workflow |
+| Refund, refund UNKNOWN và payment muộn | UC-04, UC-06, UC-11 | FR-08, FR-12, BR-08, D-05 | State Machine, Saga Workflow |
+| Outbox, event trùng và Notification | UC-05, UC-10 | FR-10, BR-09, BR-12, D-02 | Functional Requirements, Saga Workflow |
+| Khởi động lại và phục hồi | UC-08 | FR-13, FR-14, BR-10, NFR-01, D-03/D-04/D-06 | Non-functional Requirements, State Machine |
+| Tính nhất quán dưới tải | UC-01, UC-02, UC-03, UC-06 | FR-03, FR-06, FR-09, NFR-C01, NFR-02 | Non-functional Requirements, State Machine |
+| Lưu giữ dữ liệu và phản hồi Change Request | Áp dụng quy trình W2 | NFR-C02, NFR-C03 | Non-functional Requirements |
 
-Các mã yêu cầu cụ thể phải được đối chiếu với danh mục FR, BR, EC, D và NFR trong thư mục `docs/requirements/` trước khi dùng làm tiêu chí nghiệm thu chính thức.
+**Lưu ý khi chốt với nhóm:** Tên trạng thái `COMPENSATION_FAILED` cần được dùng rõ theo từng đối tượng. Trong State Machine, Order có trạng thái này; Saga cũng có trạng thái này. Với nhánh hết hạn, Order giữ `EXPIRING` trong khi Saga ghi nhận compensation lỗi. Cần giữ quy tắc này nhất quán giữa `09-state-machine.md`, `10-saga-workflow-and-compensation.md` và tiêu chí tương ứng ở đây.
 
 ## 15. Điều kiện hoàn thành
 
