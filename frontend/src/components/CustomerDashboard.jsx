@@ -58,6 +58,15 @@ function formatDate(value) {
   }).format(new Date(value))
 }
 
+function localDateKey(value) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
 function csvCell(value) {
   const text = String(value ?? '')
   const safeText = /^[\t\r\n ]*[=+\-@]/.test(text) ? `'${text}` : text
@@ -151,6 +160,8 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
   const [orderSearch, setOrderSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('ALL')
   const [orderSort, setOrderSort] = useState('newest')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
   const [exportMessage, setExportMessage] = useState('')
   const queueSyncing = useRef(false)
 
@@ -310,21 +321,28 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
   ).length
   const latestOrder = orders[0]
   const normalizedSearch = orderSearch.trim().toLocaleLowerCase('vi')
+  const dateRangeError = Boolean(dateFrom && dateTo && dateFrom > dateTo)
   const visibleOrders = orders
     .filter((order) => {
       const matchesStatus = statusFilter === 'ALL' || order.status === statusFilter
+      const createdDate = localDateKey(order.createdAt)
+      const matchesDateRange = !dateRangeError
+        && (!dateFrom || createdDate >= dateFrom)
+        && (!dateTo || createdDate <= dateTo)
       const searchableText = [
         order.orderId,
         order.orderId.slice(0, 8),
         ...order.items.map((item) => item.sku),
       ].join(' ').toLocaleLowerCase('vi')
-      return matchesStatus && (!normalizedSearch || searchableText.includes(normalizedSearch))
+      return matchesStatus
+        && matchesDateRange
+        && (!normalizedSearch || searchableText.includes(normalizedSearch))
     })
     .sort((left, right) => {
       const dateDifference = new Date(left.createdAt) - new Date(right.createdAt)
       return orderSort === 'newest' ? -dateDifference : dateDifference
     })
-  const hasActiveOrderFilters = Boolean(normalizedSearch) || statusFilter !== 'ALL'
+  const hasActiveOrderFilters = Boolean(normalizedSearch || dateFrom || dateTo) || statusFilter !== 'ALL'
 
   function handleExportOrders() {
     downloadOrdersCsv(visibleOrders)
@@ -486,7 +504,7 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
               </span>
               <button
                 className="dashboard-export-button"
-                disabled={loading || visibleOrders.length === 0}
+                disabled={loading || dateRangeError || visibleOrders.length === 0}
                 onClick={handleExportOrders}
                 title="Tải các đơn đang hiển thị dưới dạng CSV"
                 type="button"
@@ -519,6 +537,24 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
                 </button>
               )}
             </label>
+            <label className="dashboard-order-date">
+              <span>Từ ngày</span>
+              <input
+                aria-label="Lọc đơn từ ngày"
+                onChange={(event) => setDateFrom(event.target.value)}
+                type="date"
+                value={dateFrom}
+              />
+            </label>
+            <label className="dashboard-order-date">
+              <span>Đến ngày</span>
+              <input
+                aria-label="Lọc đơn đến ngày"
+                onChange={(event) => setDateTo(event.target.value)}
+                type="date"
+                value={dateTo}
+              />
+            </label>
             <label className="dashboard-order-select">
               <span className="visually-hidden">Lọc theo trạng thái</span>
               <select onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
@@ -535,6 +571,11 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
               </select>
             </label>
           </div>
+          {dateRangeError && (
+            <p className="dashboard-filter-error" role="alert">
+              Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.
+            </p>
+          )}
 
           <div className="dashboard-order-card">
             <div className="dashboard-order-heading">
@@ -555,13 +596,15 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
               <div className="dashboard-empty">
                 <div className="dashboard-empty-icon"><Search size={22} /></div>
                 <strong>Không tìm thấy đơn hàng phù hợp</strong>
-                <p>Thử thay đổi từ khóa hoặc trạng thái lọc.</p>
+                <p>Thử thay đổi từ khóa, khoảng ngày hoặc trạng thái lọc.</p>
                 {hasActiveOrderFilters && (
                   <button
                     className="dashboard-clear-filters"
                     onClick={() => {
                       setOrderSearch('')
                       setStatusFilter('ALL')
+                      setDateFrom('')
+                      setDateTo('')
                     }}
                     type="button"
                   >

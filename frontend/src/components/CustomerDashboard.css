@@ -477,7 +477,12 @@
 
 .dashboard-order-filters {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(145px, 190px) minmax(130px, 165px);
+  grid-template-columns:
+    minmax(190px, 1.5fr)
+    minmax(130px, 1fr)
+    minmax(130px, 1fr)
+    minmax(145px, 1fr)
+    minmax(135px, 1fr);
   gap: 9px;
   margin-bottom: 12px;
 }
@@ -497,6 +502,41 @@
 
 .dashboard-order-search {
   gap: 8px;
+}
+
+.dashboard-order-date {
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  min-width: 0;
+  min-height: 37px;
+  padding: 3px 9px;
+  border: 1px solid #e3e8e1;
+  border-radius: 9px;
+  background: #fff;
+  color: #89948c;
+}
+
+.dashboard-order-date:focus-within {
+  border-color: #9db49e;
+  box-shadow: 0 0 0 2px #edf3ec;
+}
+
+.dashboard-order-date > span {
+  color: #89948c;
+  font-size: 8px;
+}
+
+.dashboard-order-date input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #52645a;
+  font: inherit;
+  font-size: 10px;
 }
 
 .dashboard-order-search:focus-within,
@@ -534,6 +574,12 @@
 
 .dashboard-order-select select {
   cursor: pointer;
+}
+
+.dashboard-filter-error {
+  margin: -4px 0 10px;
+  color: #98514b;
+  font-size: 10px;
 }
 
 .dashboard-order-card {
@@ -774,6 +820,14 @@
   .dashboard-order-heading,
   .dashboard-order-row {
     grid-template-columns: 1fr 1.1fr 1fr;
+  }
+
+  .dashboard-order-filters {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .dashboard-order-search {
+    grid-column: 1 / -1;
   }
 
   .dashboard-order-heading span:nth-child(2),
