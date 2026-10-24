@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { ArrowRight, Eye, EyeOff, LockKeyhole, LogOut, PackageCheck, ShieldCheck } from 'lucide-react'
+import { ArrowRight, Eye, EyeOff, LockKeyhole, PackageCheck, ShieldCheck } from 'lucide-react'
 
-function LoginView({ user, error, onLogin, onLogout, onClearError }) {
+function LoginView({ error, onLogin, onClearError }) {
   const [showPassword, setShowPassword] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -16,14 +16,6 @@ function LoginView({ user, error, onLogin, onLogout, onClearError }) {
       onClearError(loginError.message)
     } finally {
       setSubmitting(false)
-    }
-  }
-
-  async function handleLogout() {
-    try {
-      await onLogout()
-    } catch (logoutError) {
-      onClearError(logoutError.message)
     }
   }
 
@@ -43,18 +35,6 @@ function LoginView({ user, error, onLogin, onLogout, onClearError }) {
       </section>
 
       <section className="login-content">
-        {user ? (
-          <div className="login-form">
-            <span className="form-icon"><PackageCheck size={20} /></span>
-            <span className="form-eyebrow">ĐĂNG NHẬP THÀNH CÔNG</span>
-            <h2>Xin chào, {user.username}</h2>
-            <p className="form-description">Phiên khách hàng của bạn đã sẵn sàng.</p>
-            {error && <div className="form-error" role="alert">{error}</div>}
-            <button className="submit-button" onClick={handleLogout} type="button">
-              Đăng xuất <LogOut size={17} />
-            </button>
-          </div>
-        ) : (
         <form className="login-form" onSubmit={handleSubmit}>
           <span className="form-icon"><LockKeyhole size={20} /></span>
           <span className="form-eyebrow">CHÀO MỪNG TRỞ LẠI</span>
@@ -99,7 +79,6 @@ function LoginView({ user, error, onLogin, onLogout, onClearError }) {
           </button>
           <div className="form-security"><ShieldCheck size={14} /> Kết nối bảo mật và riêng tư</div>
         </form>
-        )}
       </section>
     </main>
   )
