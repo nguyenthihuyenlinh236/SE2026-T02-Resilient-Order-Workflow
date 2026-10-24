@@ -1,4 +1,3 @@
-
 # 11. Sequence Diagrams – Resilient Order Workflow
 
 ## 1. Mục đích
