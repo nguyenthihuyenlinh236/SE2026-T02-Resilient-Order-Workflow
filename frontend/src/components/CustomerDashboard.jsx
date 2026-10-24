@@ -4,6 +4,7 @@ import {
   ChevronUp,
   CircleHelp,
   Clock3,
+  Download,
   LogOut,
   Package,
   PackageCheck,
@@ -57,6 +58,49 @@ function formatDate(value) {
   }).format(new Date(value))
 }
 
+function csvCell(value) {
+  const text = String(value ?? '')
+  const safeText = /^[\t\r\n ]*[=+\-@]/.test(text) ? `'${text}` : text
+  return `"${safeText.replaceAll('"', '""')}"`
+}
+
+function downloadOrdersCsv(orders) {
+  const headers = [
+    'Mã đơn',
+    'Trạng thái',
+    'Ngày tạo',
+    'Hạn xử lý',
+    'Cửa hàng',
+    'Trạng thái Saga',
+    'Thanh toán',
+    'Tồn kho',
+    'Giao hàng',
+    'Sản phẩm',
+  ]
+  const rows = orders.map((order) => [
+    order.orderId,
+    statusLabels[order.status] || order.status,
+    formatDate(order.createdAt),
+    formatDate(order.expireAt),
+    order.storeId,
+    order.sagaStatus,
+    order.paymentStatus,
+    order.reservationStatus,
+    order.fulfillmentStatus,
+    order.items.map((item) => `${item.sku} x${item.quantity}`).join('; '),
+  ])
+  const csv = [headers, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n')
+  const blob = new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `don-hang-${new Date().toISOString().slice(0, 10)}.csv`
+  document.body.append(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
 function OrderStatus({ status }) {
   const presentation = statusPresentation(status)
   const label = statusLabels[status] || status.toLowerCase().replaceAll('_', ' ')
@@ -107,6 +151,7 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
   const [orderSearch, setOrderSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('ALL')
   const [orderSort, setOrderSort] = useState('newest')
+  const [exportMessage, setExportMessage] = useState('')
   const queueSyncing = useRef(false)
 
   const loadOrders = useCallback(async (isRefresh = false) => {
@@ -281,6 +326,11 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
     })
   const hasActiveOrderFilters = Boolean(normalizedSearch) || statusFilter !== 'ALL'
 
+  function handleExportOrders() {
+    downloadOrdersCsv(visibleOrders)
+    setExportMessage(`Đã xuất ${visibleOrders.length} đơn hàng thành CSV.`)
+  }
+
   return (
     <div className="customer-dashboard">
       <aside className="dashboard-sidebar">
@@ -428,12 +478,26 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
               <span className="dashboard-eyebrow">LỊCH SỬ MUA SẮM</span>
               <h2>Đơn hàng của bạn</h2>
             </div>
-            <span className="dashboard-order-count">
-              {visibleOrders.length === orders.length
-                ? `${orders.length} đơn`
-                : `${visibleOrders.length}/${orders.length} đơn`}
-            </span>
+            <div className="dashboard-order-actions">
+              <span className="dashboard-order-count">
+                {visibleOrders.length === orders.length
+                  ? `${orders.length} đơn`
+                  : `${visibleOrders.length}/${orders.length} đơn`}
+              </span>
+              <button
+                className="dashboard-export-button"
+                disabled={loading || visibleOrders.length === 0}
+                onClick={handleExportOrders}
+                title="Tải các đơn đang hiển thị dưới dạng CSV"
+                type="button"
+              >
+                <Download size={14} />
+                Xuất CSV
+              </button>
+            </div>
           </div>
+
+          {exportMessage && <p className="dashboard-export-message" role="status">{exportMessage}</p>}
 
           <div className="dashboard-order-filters">
             <label className="dashboard-order-search">
