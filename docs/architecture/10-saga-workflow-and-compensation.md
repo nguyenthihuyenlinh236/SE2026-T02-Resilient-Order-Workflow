@@ -48,6 +48,31 @@ Mỗi hành động có tác động nghiệp vụ phải có khóa idempotency 
 
 Saga phải lưu đủ thông tin để khôi phục sau sự cố, gồm trạng thái hiện tại, kết quả các bước, thông tin cần thiết để bù trừ và các lần thử lại.
 
+
+### 2.5. Phân biệt trạng thái Order và Saga
+
+Order và Saga là hai đối tượng có vòng đời riêng. Không sử dụng trạng thái của Saga để thay thế trực tiếp trạng thái Order.
+
+| Tình huống | Order.status | Saga.status |
+|---|---|---|
+| Đang xử lý đặt hàng | `PENDING` | `RUNNING` |
+| Đang bù trừ nhánh thất bại thông thường | `COMPENSATING` | `COMPENSATING` |
+| Bù trừ nhánh thất bại thông thường vượt ngưỡng retry | `COMPENSATING` | `COMPENSATION_FAILED` |
+| Đang xử lý hết hạn | `EXPIRING` | `COMPENSATING` hoặc trạng thái xử lý tương ứng đã lưu |
+| Bù trừ nhánh hết hạn vượt ngưỡng retry | `EXPIRING` | `COMPENSATION_FAILED` |
+| Đang đối soát kết quả thanh toán chưa rõ | Giữ trạng thái Order hiện tại phù hợp với nhánh đã nhận quyền xử lý | `RECONCILING` hoặc `RECONCILIATION_REQUIRED` |
+| Các hành động bắt buộc đã hoàn tất và Order thất bại | `FAILED` | `COMPLETED` |
+| Các điều kiện hết hạn đã được xác minh và hoàn tất | `EXPIRED` | `COMPLETED` |
+
+Quy tắc:
+
+- `COMPENSATION_FAILED` là trạng thái xử lý của Saga khi hành động bù trừ vượt ngưỡng retry. Với nhánh hết hạn, Order tiếp tục giữ `EXPIRING` cho đến khi đủ điều kiện chuyển trạng thái cuối.
+- Với nhánh thất bại thông thường, Order giữ `COMPENSATING` trong thời gian còn hành động bù trừ bắt buộc chưa hoàn tất.
+- Sau khi retry thành công, Saga tiếp tục từ tiến trình đã lưu; không khởi tạo lại Saga hoặc lặp lại các tác động nghiệp vụ đã thành công.
+- Chỉ chuyển Saga sang `COMPLETED` khi mọi hành động bắt buộc của nhánh đã được xác minh.
+- Chỉ chuyển Order sang `FAILED` hoặc `EXPIRED` khi đáp ứng đầy đủ điều kiện của State Machine.
+- Các cập nhật phải có điều kiện và không được ghi đè nhánh đã nhận quyền xử lý.
+
 ## 3. Các thành phần tham gia
 
 | Thành phần | Trách nhiệm |
@@ -201,6 +226,7 @@ Mọi lần thử lại phải:
 | Capture thanh toán | Capture `SUCCEEDED` nhưng Order không thể xác nhận và phải kết thúc | Yêu cầu refund qua Payment Service | Refund được xác minh `SUCCEEDED` |
 | Release Reservation | Kết quả release chưa rõ | Truy vấn hoặc gửi lại cùng idempotency key | Reservation được xác minh `RELEASED` hoặc không tồn tại |
 | Refund | Kết quả refund chưa rõ | Đối soát refund; không giả định đã hoàn tiền | Refund được xác minh `SUCCEEDED` |
+| Refund | Refund được xác minh `FAILED` | Ghi nhận lỗi bù trừ, nguyên nhân và trạng thái giao dịch; thực hiện chính sách xử lý đã được phê duyệt | Chỉ hoàn tất nhánh khi refund được xác minh `SUCCEEDED` hoặc có quyết định xử lý ngoại lệ được ghi nhận rõ ràng |
 | Gửi thông báo | Outbox đã commit nhưng gửi thất bại | Publisher thử gửi lại sự kiện | Sự kiện được xử lý theo cơ chế chống trùng |
 | Worker xử lý hết hạn | Worker chết sau khi nhận lease | Worker khác tiếp quản khi lease hết hạn | Quy trình tiếp tục từ trạng thái đã lưu |
 
@@ -228,12 +254,30 @@ Quy tắc:
 
 ## 9. Chính sách retry và đối soát
 
+
 ### 9.1. Compensation retry
 
-- Release/refund được thử lại theo chính sách retry đã thống nhất trong D-03.
-- Khi vượt 5 lần gửi, đánh dấu `COMPENSATION_FAILED`.
-- Tiếp tục thử lại nền mỗi 60 giây.
-- Không chuyển thành `FAILED` hoặc `EXPIRED` nếu các điều kiện bù trừ bắt buộc chưa hoàn tất.
+- Release và refund sử dụng chính sách retry đã thống nhất trong D-03.
+- Mỗi hành động retry sử dụng lại idempotency key của chính hành động đó.
+- Khi vượt 5 lần gửi, Saga chuyển sang `COMPENSATION_FAILED` và ghi nhận nguyên nhân, số lần gửi, thời điểm thử gần nhất cùng hành động đang chờ.
+- Saga tiếp tục thử lại nền mỗi 60 giây, trừ khi có quy tắc vận hành khác được thống nhất trong D-03.
+- `COMPENSATION_FAILED` không có nghĩa là hành động bù trừ đã hoàn tất.
+- Với nhánh thất bại thông thường, Order tiếp tục ở `COMPENSATING` cho đến khi các compensation bắt buộc hoàn tất.
+- Với nhánh hết hạn, Order tiếp tục ở `EXPIRING` cho đến khi các điều kiện chuyển sang `EXPIRED` được xác minh.
+- Nếu kết quả release hoặc refund là `UNKNOWN`, hệ thống phải tra cứu hoặc đối soát trước khi kết luận thành công hay thất bại.
+- Nếu release/refund thất bại đã xác minh, hệ thống không được coi hành động đó là thành công chỉ vì đã gửi đủ số lần retry.
+- Sau khi compensation hoàn tất, Orchestrator đọc trạng thái Order hiện tại và tiếp tục đúng nhánh đã nhận quyền xử lý. Không được ghi đè `CONFIRMED`, `FAILED` hoặc `EXPIRED` đã commit.
+
+### 9.1.1. Refund thất bại đã xác minh
+
+- Phân biệt refund `FAILED` đã xác minh với refund `UNKNOWN`.
+- Với `UNKNOWN`, tra cứu giao dịch theo khóa refund ổn định; không tự tạo một refund mới.
+- Với `FAILED` đã xác minh, ghi nhận kết quả, nguyên nhân và trạng thái của giao dịch refund.
+- Không đổi trạng thái capture thành `FAILED` chỉ vì refund thất bại.
+- Không tạo refund mới với idempotency key khác để né kết quả của refund trước đó.
+- Việc tạo một tác vụ refund mới chỉ được phép khi có quy tắc nghiệp vụ được phê duyệt và bảo đảm không thể hoàn tiền trùng.
+- Trong khi chưa giải quyết xong khoản tiền cần hoàn, Saga không được đánh dấu `COMPLETED`; Order không được chuyển sang trạng thái cuối yêu cầu refund đã hoàn tất.
+- Nếu cần xử lý thủ công, ghi nhận yêu cầu can thiệp và giữ lại đầy đủ dấu vết giao dịch.
 
 ### 9.2. Payment reconciliation
 
