@@ -75,15 +75,16 @@ class OrderControllerTest {
                 Instant.now(), Instant.now().plusSeconds(900),
                 "/api/v1/orders/" + orderId, List.of()
         );
-        when(orderService.create("request-1", request, customer)).thenReturn(response);
+        String idempotencyKey = "k".repeat(200);
+        when(orderService.create(idempotencyKey, request, customer)).thenReturn(response);
 
-        var result = controller.createOrder("request-1", request, customer);
+        var result = controller.createOrder(idempotencyKey, request, customer);
 
         assertEquals(HttpStatus.ACCEPTED, result.getStatusCode());
         assertEquals(response.statusUrl(), result.getHeaders().getLocation().toString());
         assertEquals("1", result.getHeaders().getFirst(HttpHeaders.RETRY_AFTER));
         assertEquals(response, result.getBody());
-        verify(orderService).create("request-1", request, customer);
+        verify(orderService).create(idempotencyKey, request, customer);
     }
 
     @Test
@@ -106,6 +107,21 @@ class OrderControllerTest {
         ResponseStatusException exception = assertThrows(
                 ResponseStatusException.class,
                 () -> controller.listOrders(staff, 20)
+        );
+
+        assertEquals(HttpStatus.FORBIDDEN, exception.getStatusCode());
+        verify(orderService, never()).listForCustomer(any(), anyInt());
+    }
+
+    @Test
+    void rejectsAdminOrderListRequestBeforeCallingService() {
+        AuthenticatedUser admin = new AuthenticatedUser(
+                UUID.randomUUID(), "admin", AccountRole.ADMIN, null
+        );
+
+        ResponseStatusException exception = assertThrows(
+                ResponseStatusException.class,
+                () -> controller.listOrders(admin, 20)
         );
 
         assertEquals(HttpStatus.FORBIDDEN, exception.getStatusCode());
