@@ -43,43 +43,37 @@ Các sơ đồ được xây dựng dựa trên Use Case, State Machine và Saga
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    actor C as Customer
-    participant O as Order Service / Orchestrator
-    participant DB as Order DB + Outbox
-    participant I as Inventory Service
-    participant P as Payment Service
-    participant PUB as Outbox Publisher
-    participant N as Notification Service
-
-    C->>O: Gửi yêu cầu đặt hàng + idempotency key
-    O->>DB: Kiểm tra idempotency key
-    DB-->>O: Chưa tồn tại yêu cầu tương ứng
-
-    O->>DB: Tạo Order PENDING, Saga và expireAt
-    Note over O,DB: Lưu Order và dữ liệu Saga trong transaction
-    DB-->>O: Commit thành công
-    O-->>C: 202 Accepted + orderId + PENDING
-
-    O->>I: Reserve hàng bằng reserve key
-    I-->>O: RESERVED đã xác minh
-    O->>DB: Lưu kết quả Reservation
-
-    O->>P: Capture bằng capture key
-    P-->>O: SUCCEEDED đã xác minh
-    O->>DB: Lưu captureStatus = SUCCEEDED
-
-    O->>DB: Conditional update PENDING -> CONFIRMED
-    Note over O,DB: Chỉ xác nhận nếu Order chưa hết hạn và chưa bị nhánh khác nhận quyền
-    O->>DB: Ghi OrderConfirmed vào Outbox
-    Note over O,DB: Cập nhật Order và ghi Outbox trong cùng transaction
-    DB-->>O: Commit thành công
-
-    PUB->>DB: Đọc event chưa được đánh dấu đã gửi
-    DB-->>PUB: OrderConfirmed + eventId
-    PUB->>N: Phát OrderConfirmed
-    N->>N: Kiểm tra eventId và chống xử lý trùng
-    N-->>PUB: Đã tiếp nhận event
+autonumber
+actor C as Customer
+participant O as Order Service / Orchestrator
+participant DB as Order DB + Outbox
+participant I as Inventory Service
+participant P as Payment Service
+participant PUB as Outbox Publisher
+participant N as Notification Service
+C->>O: Gửi yêu cầu đặt hàng + idempotency key
+O->>DB: Kiểm tra idempotency key
+DB-->>O: Chưa tồn tại yêu cầu tương ứng
+O->>DB: Tạo Order PENDING, Saga và expireAt
+Note over O,DB: Lưu Order và dữ liệu Saga trong transaction
+DB-->>O: Commit thành công
+O-->>C: 202 Accepted + orderId + PENDING
+O->>I: Reserve hàng bằng reserve key
+I-->>O: RESERVED đã xác minh
+O->>DB: Lưu kết quả Reservation
+O->>P: Capture bằng capture key
+P-->>O: SUCCEEDED đã xác minh
+O->>DB: Lưu captureStatus = SUCCEEDED
+O->>DB: Conditional update PENDING -> CONFIRMED
+Note over O,DB: Chỉ xác nhận nếu Order chưa hết hạn và chưa bị nhánh khác nhận quyền
+O->>DB: Ghi OrderConfirmed vào Outbox
+Note over O,DB: Cập nhật Order và ghi Outbox trong cùng transaction
+DB-->>O: Commit thành công
+PUB->>DB: Đọc event chưa được đánh dấu đã gửi
+DB-->>PUB: OrderConfirmed + eventId
+PUB->>N: Phát OrderConfirmed
+N->>N: Kiểm tra eventId và chống xử lý trùng
+N-->>PUB: Đã tiếp nhận event
 ```
 
 ### Kết quả mong đợi
@@ -103,39 +97,35 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    actor C as Customer
-    participant O as Order Service / Orchestrator
-    participant DB as Order DB + Outbox
-    participant I as Inventory Service
-    participant PUB as Outbox Publisher
-    participant N as Notification Service
-
-    C->>O: Gửi yêu cầu đặt hàng
-    O->>DB: Tạo Order PENDING và Saga
+autonumber
+actor C as Customer
+participant O as Order Service / Orchestrator
+participant DB as Order DB + Outbox
+participant I as Inventory Service
+participant PUB as Outbox Publisher
+participant N as Notification Service
+C->>O: Gửi yêu cầu đặt hàng
+O->>DB: Tạo Order PENDING và Saga
+DB-->>O: Commit thành công
+O-->>C: 202 Accepted + orderId + PENDING
+O->>I: Reserve hàng bằng reserve key
+I-->>O: REJECTED - không đủ hàng
+O->>DB: Lưu kết quả Reservation đã xác minh
+O->>DB: Conditional claim nhánh thất bại
+alt Order vẫn PENDING và chưa hết hạn
+    DB-->>O: Đã nhận quyền xử lý
+    Note over O,DB: Xác minh không có Reservation và chưa capture thành công
+    O->>DB: Chuyển Order sang FAILED và ghi OrderFailed vào Outbox
+    Note over O,DB: Order và Outbox được commit cùng transaction
     DB-->>O: Commit thành công
-    O-->>C: 202 Accepted + orderId + PENDING
-
-    O->>I: Reserve hàng bằng reserve key
-    I-->>O: REJECTED - không đủ hàng
-    O->>DB: Lưu kết quả Reservation đã xác minh
-
-    O->>DB: Conditional claim nhánh thất bại
-    alt Order vẫn PENDING và chưa hết hạn
-        DB-->>O: Đã nhận quyền xử lý
-        Note over O,DB: Xác minh không có Reservation và chưa capture thành công
-        O->>DB: Chuyển Order sang FAILED và ghi OrderFailed vào Outbox
-        Note over O,DB: Order và Outbox được commit cùng transaction
-        DB-->>O: Commit thành công
-    else Nhánh khác đã nhận quyền xử lý
-        DB-->>O: Conditional update thất bại
-        O->>DB: Đọc trạng thái Order và Saga hiện tại
-    end
-
-    PUB->>DB: Đọc event chưa gửi
-    DB-->>PUB: OrderFailed
-    PUB->>N: Phát OrderFailed
-    N->>N: Chống xử lý trùng và gửi thông báo
+else Nhánh khác đã nhận quyền xử lý
+    DB-->>O: Conditional update thất bại
+    O->>DB: Đọc trạng thái Order và Saga hiện tại
+end
+PUB->>DB: Đọc event chưa gửi
+DB-->>PUB: OrderFailed
+PUB->>N: Phát OrderFailed
+N->>N: Chống xử lý trùng và gửi thông báo
 ```
 
 ### Kết quả mong đợi
@@ -158,48 +148,43 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    actor C as Customer
-    participant O as Order Service / Orchestrator
-    participant DB as Order DB + Outbox
-    participant I as Inventory Service
-    participant P as Payment Service
-    participant PUB as Outbox Publisher
-    participant N as Notification Service
-
-    C->>O: Gửi yêu cầu đặt hàng
-    O->>DB: Tạo Order PENDING và Saga
+autonumber
+actor C as Customer
+participant O as Order Service / Orchestrator
+participant DB as Order DB + Outbox
+participant I as Inventory Service
+participant P as Payment Service
+participant PUB as Outbox Publisher
+participant N as Notification Service
+C->>O: Gửi yêu cầu đặt hàng
+O->>DB: Tạo Order PENDING và Saga
+DB-->>O: Commit thành công
+O-->>C: 202 Accepted + orderId + PENDING
+O->>I: Reserve bằng reserve key
+I-->>O: RESERVED đã xác minh
+O->>DB: Lưu Reservation
+O->>P: Capture bằng capture key
+P-->>O: FAILED đã xác minh
+O->>DB: Lưu captureStatus = FAILED
+O->>DB: Conditional claim nhánh thất bại
+alt Order vẫn PENDING và chưa hết hạn
+    DB-->>O: Đã nhận quyền xử lý
+    O->>DB: Lưu bước compensation cần thực hiện
+    O->>I: Release Reservation bằng release key
+    I-->>O: RELEASED đã xác minh
+    O->>DB: Lưu releaseStatus = SUCCEEDED
+    O->>DB: Xác minh không còn compensation bắt buộc
+    O->>DB: Chuyển Order sang FAILED và ghi OrderFailed vào Outbox
+    Note over O,DB: Commit trạng thái cuối và event trong cùng transaction
     DB-->>O: Commit thành công
-    O-->>C: 202 Accepted + orderId + PENDING
-
-    O->>I: Reserve bằng reserve key
-    I-->>O: RESERVED đã xác minh
-    O->>DB: Lưu Reservation
-
-    O->>P: Capture bằng capture key
-    P-->>O: FAILED đã xác minh
-    O->>DB: Lưu captureStatus = FAILED
-
-    O->>DB: Conditional claim nhánh thất bại
-    alt Order vẫn PENDING và chưa hết hạn
-        DB-->>O: Đã nhận quyền xử lý
-        O->>DB: Lưu bước compensation cần thực hiện
-        O->>I: Release Reservation bằng release key
-        I-->>O: RELEASED đã xác minh
-        O->>DB: Lưu releaseStatus = SUCCEEDED
-        O->>DB: Xác minh không còn compensation bắt buộc
-        O->>DB: Chuyển Order sang FAILED và ghi OrderFailed vào Outbox
-        Note over O,DB: Commit trạng thái cuối và event trong cùng transaction
-        DB-->>O: Commit thành công
-    else Nhánh khác đã nhận quyền xử lý
-        DB-->>O: Conditional update thất bại
-        O->>DB: Đọc trạng thái hiện tại và tiếp tục nhánh hợp lệ
-    end
-
-    PUB->>DB: Đọc event chưa gửi
-    DB-->>PUB: OrderFailed
-    PUB->>N: Phát OrderFailed
-    N->>N: Chống xử lý trùng và gửi thông báo
+else Nhánh khác đã nhận quyền xử lý
+    DB-->>O: Conditional update thất bại
+    O->>DB: Đọc trạng thái hiện tại và tiếp tục nhánh hợp lệ
+end
+PUB->>DB: Đọc event chưa gửi
+DB-->>PUB: OrderFailed
+PUB->>N: Phát OrderFailed
+N->>N: Chống xử lý trùng và gửi thông báo
 ```
 
 ### Kết quả mong đợi
@@ -224,54 +209,49 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant O as Order Service / Orchestrator
-    participant P as Payment Service
-    participant DB as Order DB
-    participant R as Reconciliation Worker
-
-    O->>P: Capture bằng capture key
-    P--xO: Timeout hoặc mất phản hồi
-    O->>DB: Lưu captureStatus = UNKNOWN
-    O->>DB: Lưu trạng thái Saga cần đối soát
-    Note over O,DB: Lưu bền vững trước khi tiến trình kết thúc hoặc retry
-
-    loop Theo lịch đối soát đã cấu hình
-        R->>DB: Lấy giao dịch UNKNOWN cần đối soát
-        DB-->>R: capture key + trạng thái Order/Saga
-        R->>P: Query giao dịch bằng capture key
-        P-->>R: Trạng thái giao dịch
-        R->>DB: Lưu kết quả đối soát
-
-        alt Capture SUCCEEDED đã xác minh
-            R->>DB: Lưu captureStatus = SUCCEEDED
-        else Capture FAILED đã xác minh
-            R->>DB: Lưu captureStatus = FAILED
-        else Kết quả vẫn UNKNOWN
-            R->>DB: Giữ trạng thái chưa xác định
-        end
+autonumber
+participant O as Order Service
+participant P as Payment Service
+participant DB as Order DB
+participant R as Reconciliation Worker
+O->>P: Capture using capture key
+P--xO: Timeout or no response
+O->>DB: Save captureStatus UNKNOWN
+O->>DB: Save Saga reconciliation state
+Note over O,DB: Persist state before retry or process exit
+loop Scheduled reconciliation
+    R->>DB: Find UNKNOWN transactions
+    DB-->>R: Capture key and Order/Saga state
+    R->>P: Query transaction using capture key
+    P-->>R: Transaction status
+    R->>DB: Save reconciliation result
+    alt Capture SUCCEEDED is verified
+        R->>DB: Save captureStatus SUCCEEDED
+    else Capture FAILED is verified
+        R->>DB: Save captureStatus FAILED
+    else Result remains UNKNOWN
+        R->>DB: Keep status UNKNOWN
     end
-
-    alt Capture SUCCEEDED đã xác minh
-        R->>DB: Yêu cầu đánh giá lại Order
-        Note over R,DB: Chỉ xác nhận nếu Order vẫn đủ điều kiện và chưa hết hạn
-    else Capture FAILED đã xác minh
-        R->>DB: Yêu cầu đánh giá nhánh thất bại
-        Note over R,DB: Nếu nhánh thất bại hợp lệ, thực hiện compensation cần thiết
-    else Hết lịch đối soát chính mà vẫn UNKNOWN
-        R->>DB: Đặt Saga = RECONCILIATION_REQUIRED
-        Note over R,DB: Giữ Reservation theo chính sách; tiếp tục đối soát nền
-    end
+end
+alt Capture SUCCEEDED is verified
+    R->>DB: Request Order eligibility check
+    Note over R,DB: Confirm only if Order is eligible and not expired
+else Capture FAILED is verified
+    R->>DB: Request failure branch evaluation
+    Note over R,DB: Run required compensation if eligible
+else Still UNKNOWN after primary reconciliation window
+    R->>DB: Set Saga RECONCILIATION_REQUIRED
+    Note over R,DB: Apply reservation policy and continue background reconciliation
+end
 ```
 
 ### Kết quả mong đợi
 
 - Timeout không tự động chuyển `captureStatus` thành `FAILED`.
 - Khi capture còn `UNKNOWN`, không được release Reservation hoặc refund chỉ dựa trên giả định giao dịch thất bại/thành công.
-- Việc retry capture phải dùng lại cùng `capture key`; không tạo một giao dịch capture mới chỉ vì mất phản hồi.
-- Lịch đối soát chính và số lần truy vấn phải tuân theo cấu hình thống nhất với file Saga Workflow.
-- Nếu vẫn chưa xác định được kết quả sau lịch đối soát chính, Saga chuyển sang `RECONCILIATION_REQUIRED` và tiếp tục được xử lý nền.
-- Khi có kết quả xác minh, hệ thống phải đọc lại trạng thái Order trước khi quyết định xác nhận, thất bại hay tiếp tục xử lý hết hạn.
+- Retry capture phải dùng lại cùng `capture key`; không tạo giao dịch capture mới chỉ vì mất phản hồi.
+- Lịch đối soát và số lần truy vấn tuân theo file Saga Workflow.
+- Khi có kết quả xác minh, hệ thống phải đọc lại trạng thái Order trước khi quyết định xác nhận, thất bại hay xử lý hết hạn.
 - Không chuyển Order trở lại `CONFIRMED` nếu nhánh hết hạn hoặc nhánh khác đã nhận quyền xử lý hợp lệ.
 
 ## 7. Luồng 5 – Order hết hạn (TTL)
@@ -286,71 +266,63 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant T as TTL Worker
-    participant DB as Order DB
-    participant I as Inventory Service
-    participant P as Payment Service
-
-    T->>DB: Quét Order PENDING đã hết hạn và EXPIRING có lease hết hạn
-    DB-->>T: Danh sách ứng viên
-
-    T->>DB: Đọc captureStatus và trạng thái Saga
-    DB-->>T: Trạng thái hiện tại
-
-    alt Capture đang UNKNOWN
-        T->>DB: Giữ nhánh đối soát hoặc RECONCILIATION_REQUIRED
-        Note over T,DB: Không tự ý refund, release hoặc kết thúc EXPIRED khi kết quả thanh toán chưa rõ
-    else Chưa có capture thành công và đủ điều kiện hết hạn
-        T->>DB: Conditional claim PENDING -> EXPIRING
-        Note over T,DB: Ghi claimToken, claimedAt và leaseUntil cùng thao tác claim
-        DB-->>T: Claim thành công hoặc thất bại
-
-        alt Claim thất bại
-            T->>DB: Đọc trạng thái hiện tại
-            Note over T,DB: Không xử lý song song nếu worker khác đã nhận quyền
-        else Claim thành công
-            T->>DB: Đọc trạng thái Reservation
-            alt Reservation chưa được xác minh
-                T->>I: Query bằng reserve key
-                I-->>T: Reservation status
-                T->>DB: Lưu kết quả truy vấn
-            end
-
-            alt Reservation đang RESERVED
-                T->>I: Release bằng release key
-                I-->>T: Kết quả release
-                T->>DB: Lưu kết quả release
-            else Reservation không tồn tại hoặc đã RELEASED
-                Note over T,I: Không tạo release không cần thiết
-            end
-
-            T->>DB: Kiểm tra đủ điều kiện kết thúc
-            T->>DB: Commit Order EXPIRED + Saga hoàn tất + OrderExpired Outbox
+autonumber
+participant T as TTL Worker
+participant DB as Order DB
+participant I as Inventory Service
+participant P as Payment Service
+T->>DB: Quét Order PENDING đã hết hạn và EXPIRING có lease hết hạn
+DB-->>T: Danh sách ứng viên
+T->>DB: Đọc captureStatus và trạng thái Saga
+DB-->>T: Trạng thái hiện tại
+alt Capture đang UNKNOWN
+    T->>DB: Giữ nhánh đối soát hoặc RECONCILIATION_REQUIRED
+    Note over T,DB: Không tự ý refund, release hoặc kết thúc EXPIRED khi kết quả thanh toán chưa rõ
+else Chưa có capture thành công và đủ điều kiện hết hạn
+    T->>DB: Conditional claim PENDING -> EXPIRING
+    Note over T,DB: Ghi claimToken, claimedAt và leaseUntil cùng thao tác claim
+    DB-->>T: Claim thành công hoặc thất bại
+    alt Claim thất bại
+        T->>DB: Đọc trạng thái hiện tại
+        Note over T,DB: Không xử lý song song nếu worker khác đã nhận quyền
+    else Claim thành công
+        T->>DB: Đọc trạng thái Reservation
+        alt Reservation chưa được xác minh
+            T->>I: Query bằng reserve key
+            I-->>T: Reservation status
+            T->>DB: Lưu kết quả truy vấn
         end
-    else Capture SUCCEEDED đã xác minh
-        T->>DB: Conditional claim nhánh hết hạn nếu Order vẫn đủ điều kiện
-        DB-->>T: Kết quả claim
-
-        alt Claim thành công
-            T->>P: Refund bằng refund key
-            P-->>T: Kết quả refund
-            T->>DB: Lưu refundStatus và trạng thái Saga
-
-            alt Refund SUCCEEDED đã xác minh
-                T->>DB: Kiểm tra Reservation và release nếu còn cần
-                T->>I: Query/Release bằng key ổn định khi cần
-                I-->>T: Kết quả đã xác minh
-                T->>DB: Kiểm tra mọi điều kiện kết thúc
-                T->>DB: Commit Order EXPIRED + Saga hoàn tất + OrderExpired Outbox
-            else Refund UNKNOWN hoặc FAILED
-                T->>DB: Giữ nhánh xử lý chưa hoàn tất
-                Note over T,DB: Không đánh dấu Saga hoàn tất; xử lý theo chính sách refund
-            end
-        else Claim thất bại
-            T->>DB: Đọc trạng thái hiện tại
+        alt Reservation đang RESERVED
+            T->>I: Release bằng release key
+            I-->>T: Kết quả release
+            T->>DB: Lưu kết quả release
+        else Reservation không tồn tại hoặc đã RELEASED
+            Note over T,I: Không tạo release không cần thiết
         end
+        T->>DB: Kiểm tra đủ điều kiện kết thúc
+        T->>DB: Commit Order EXPIRED + Saga hoàn tất + OrderExpired Outbox
     end
+else Capture SUCCEEDED đã xác minh
+    T->>DB: Conditional claim nhánh hết hạn nếu Order vẫn đủ điều kiện
+    DB-->>T: Kết quả claim
+    alt Claim thành công
+        T->>P: Refund bằng refund key
+        P-->>T: Kết quả refund
+        T->>DB: Lưu refundStatus và trạng thái Saga
+        alt Refund SUCCEEDED đã xác minh
+            T->>DB: Kiểm tra Reservation và release nếu còn cần
+            T->>I: Query/Release bằng key ổn định khi cần
+            I-->>T: Kết quả đã xác minh
+            T->>DB: Kiểm tra mọi điều kiện kết thúc
+            T->>DB: Commit Order EXPIRED + Saga hoàn tất + OrderExpired Outbox
+        else Refund UNKNOWN hoặc FAILED
+            T->>DB: Giữ nhánh xử lý chưa hoàn tất
+            Note over T,DB: Không đánh dấu Saga hoàn tất; xử lý theo chính sách refund
+        end
+    else Claim thất bại
+        T->>DB: Đọc trạng thái hiện tại
+    end
+end
 ```
 
 ### Kết quả mong đợi
@@ -377,45 +349,39 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant O as Order Service / Orchestrator
-    participant DB as Order DB
-    participant I as Inventory Service
-    participant R as Saga Recovery Worker
-
-    O->>DB: Lưu bước compensation RELEASE_REQUIRED
-    O->>I: Release bằng release key ổn định
-    I--xO: Timeout hoặc lỗi
-
-    O->>DB: Lưu releaseStatus = UNKNOWN hoặc FAILED
-    Note over O,DB: Không coi Reservation đã được giải phóng
-
-    O->>I: Query Reservation bằng reserve key hoặc release key
-    I-->>O: Trạng thái Reservation
-    O->>DB: Lưu kết quả truy vấn
-
-    alt Reservation đã RELEASED
-        O->>DB: Đánh dấu release đã xác minh thành công
-        O->>DB: Đánh giá các compensation còn lại
-    else Reservation vẫn RESERVED
-        O->>I: Retry release bằng cùng release key
-        I-->>O: Kết quả release
-        O->>DB: Lưu kết quả đã xác minh
-    else Trạng thái vẫn chưa xác định hoặc service không khả dụng
-        O->>DB: Lưu bước compensation còn tồn đọng
-        O->>DB: Cập nhật trạng thái Saga cần phục hồi
-    end
-
-    opt Vượt ngưỡng retry
-        O->>DB: Saga = COMPENSATION_FAILED
-        Note over O,DB: Order status và Saga status là hai trường riêng biệt
-    end
-
-    R->>DB: Tìm Saga có compensation chưa hoàn tất
-    DB-->>R: Bước release cần tiếp tục
-    R->>I: Query hoặc retry release bằng key ổn định
-    I-->>R: Trạng thái Reservation
-    R->>DB: Lưu kết quả và cập nhật tiến trình Saga
+autonumber
+participant O as Order Service / Orchestrator
+participant DB as Order DB
+participant I as Inventory Service
+participant R as Saga Recovery Worker
+O->>DB: Lưu bước compensation RELEASE_REQUIRED
+O->>I: Release bằng release key ổn định
+I--xO: Timeout hoặc lỗi
+O->>DB: Lưu releaseStatus = UNKNOWN hoặc FAILED
+Note over O,DB: Không coi Reservation đã được giải phóng
+O->>I: Query Reservation bằng reserve key hoặc release key
+I-->>O: Trạng thái Reservation
+O->>DB: Lưu kết quả truy vấn
+alt Reservation đã RELEASED
+    O->>DB: Đánh dấu release đã xác minh thành công
+    O->>DB: Đánh giá các compensation còn lại
+else Reservation vẫn RESERVED
+    O->>I: Retry release bằng cùng release key
+    I-->>O: Kết quả release
+    O->>DB: Lưu kết quả đã xác minh
+else Trạng thái vẫn chưa xác định hoặc service không khả dụng
+    O->>DB: Lưu bước compensation còn tồn đọng
+    O->>DB: Cập nhật trạng thái Saga cần phục hồi
+end
+opt Vượt ngưỡng retry
+    O->>DB: Saga = COMPENSATION_FAILED
+    Note over O,DB: Order status và Saga status là hai trường riêng biệt
+end
+R->>DB: Tìm Saga có compensation chưa hoàn tất
+DB-->>R: Bước release cần tiếp tục
+R->>I: Query hoặc retry release bằng key ổn định
+I-->>R: Trạng thái Reservation
+R->>DB: Lưu kết quả và cập nhật tiến trình Saga
 ```
 
 ### Kết quả mong đợi
@@ -439,49 +405,43 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant O as Order Service / Orchestrator
-    participant DB as Order DB
-    participant I as Inventory Service
-    participant P as Payment Service
-    participant R as Saga Recovery Worker
-
-    O->>DB: Lưu bước tiếp theo và trạng thái Saga
-    O->>I: Reserve bằng reserve key
-    I-->>O: RESERVED
-    Note over O: Tiến trình bị crash trước khi lưu kết quả
-
-    R->>DB: Quét Saga chưa hoàn tất hoặc có lease hết hạn
-    DB-->>R: Saga state + bước đang xử lý + operation keys
-    R->>DB: Claim quyền phục hồi bằng cập nhật có điều kiện
-    DB-->>R: Kết quả claim
-
-    alt Không nhận được quyền phục hồi
-        R->>DB: Đọc lại trạng thái hiện tại
-        Note over R,DB: Không chạy song song với worker đang giữ lease hợp lệ
-    else Nhận được quyền phục hồi
-        R->>I: Query Reservation bằng reserve key
-        I-->>R: Reservation status
-
-        alt Reservation đã RESERVED
-            R->>DB: Ghi nhận kết quả Reservation
-        else Reservation chưa tồn tại và có thể retry an toàn
-            R->>I: Retry Reserve bằng cùng reserve key
-            I-->>R: Kết quả Reservation
-            R->>DB: Lưu kết quả đã xác minh
-        else Kết quả chưa xác định
-            R->>DB: Giữ bước cần đối soát
-        end
-
-        opt Reservation đã được xác minh và Saga còn đủ điều kiện thanh toán
-            R->>P: Query hoặc tiếp tục Capture bằng capture key đã lưu
-            P-->>R: Kết quả giao dịch
-            R->>DB: Lưu kết quả capture
-        end
-
-        R->>DB: Xác định bước tiếp theo từ trạng thái bền vững
-        Note over R,DB: Không khởi tạo Saga mới chỉ vì worker cũ bị crash
+autonumber
+participant O as Order Service / Orchestrator
+participant DB as Order DB
+participant I as Inventory Service
+participant P as Payment Service
+participant R as Saga Recovery Worker
+O->>DB: Lưu bước tiếp theo và trạng thái Saga
+O->>I: Reserve bằng reserve key
+I-->>O: RESERVED
+Note over O: Tiến trình bị crash trước khi lưu kết quả
+R->>DB: Quét Saga chưa hoàn tất hoặc có lease hết hạn
+DB-->>R: Saga state + bước đang xử lý + operation keys
+R->>DB: Claim quyền phục hồi bằng cập nhật có điều kiện
+DB-->>R: Kết quả claim
+alt Không nhận được quyền phục hồi
+    R->>DB: Đọc lại trạng thái hiện tại
+    Note over R,DB: Không chạy song song với worker đang giữ lease hợp lệ
+else Nhận được quyền phục hồi
+    R->>I: Query Reservation bằng reserve key
+    I-->>R: Reservation status
+    alt Reservation đã RESERVED
+        R->>DB: Ghi nhận kết quả Reservation
+    else Reservation chưa tồn tại và có thể retry an toàn
+        R->>I: Retry Reserve bằng cùng reserve key
+        I-->>R: Kết quả Reservation
+        R->>DB: Lưu kết quả đã xác minh
+    else Kết quả chưa xác định
+        R->>DB: Giữ bước cần đối soát
     end
+    opt Reservation đã được xác minh và Saga còn đủ điều kiện thanh toán
+        R->>P: Query hoặc tiếp tục Capture bằng capture key đã lưu
+        P-->>R: Kết quả giao dịch
+        R->>DB: Lưu kết quả capture
+    end
+    R->>DB: Xác định bước tiếp theo từ trạng thái bền vững
+    Note over R,DB: Không khởi tạo Saga mới chỉ vì worker cũ bị crash
+end
 ```
 
 ### Kết quả mong đợi
@@ -506,53 +466,47 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    actor C as Customer
-    participant O as Order Service
-    participant DB as Order DB + Outbox
-    participant I as Inventory Service
-    participant P as Payment Service
-    participant PUB as Outbox Publisher
-    participant N as Notification Service
-    participant IN as Consumer Inbox
-
-    C->>O: Gửi yêu cầu + idempotency key
-    O->>DB: Tra cứu idempotency key
-    DB-->>O: Kết quả tra cứu
-
-    alt Yêu cầu mới
-        O->>DB: Tạo Order + liên kết idempotency key
-        Note over O,DB: Commit Order và dữ liệu cần phục hồi
-        DB-->>O: Commit thành công
-        O-->>C: 202 Accepted + orderId + PENDING
-    else Yêu cầu trùng
-        O-->>C: Trả lại orderId và trạng thái hiện tại
-    end
-
-    Note over O,I: Chỉ tiếp tục workflow khi cần; không tạo Reservation trùng
-    O->>I: Reserve bằng reserve key ổn định
-    I-->>O: Kết quả Reservation
-
-    opt Order đủ điều kiện thanh toán
-        O->>P: Capture bằng capture key ổn định
-        P-->>O: Kết quả capture
-    end
-
-    O->>DB: Ghi trạng thái nghiệp vụ và event vào Outbox trong cùng transaction
-    PUB->>DB: Đọc event chưa được đánh dấu đã gửi
-    DB-->>PUB: Event + eventId
-    PUB->>N: Phát event
-    N->>IN: Kiểm tra và ghi nhận consumerName + eventId
-
-    alt Event đã xử lý
-        IN-->>N: Đã tồn tại
-        N-->>PUB: Bỏ qua tác dụng nghiệp vụ trùng
-    else Event mới
-        IN-->>N: Chưa tồn tại
-        N->>N: Xử lý event và gửi thông báo theo chính sách
-        N->>IN: Hoàn tất ghi nhận xử lý
-        N-->>PUB: Đã tiếp nhận event
-    end
+autonumber
+actor C as Customer
+participant O as Order Service
+participant DB as Order DB + Outbox
+participant I as Inventory Service
+participant P as Payment Service
+participant PUB as Outbox Publisher
+participant N as Notification Service
+participant IN as Consumer Inbox
+C->>O: Gửi yêu cầu + idempotency key
+O->>DB: Tra cứu idempotency key
+DB-->>O: Kết quả tra cứu
+alt Yêu cầu mới
+    O->>DB: Tạo Order + liên kết idempotency key
+    Note over O,DB: Commit Order và dữ liệu cần phục hồi
+    DB-->>O: Commit thành công
+    O-->>C: 202 Accepted + orderId + PENDING
+else Yêu cầu trùng
+    O-->>C: Trả lại orderId và trạng thái hiện tại
+end
+Note over O,I: Chỉ tiếp tục workflow khi cần; không tạo Reservation trùng
+O->>I: Reserve bằng reserve key ổn định
+I-->>O: Kết quả Reservation
+opt Order đủ điều kiện thanh toán
+    O->>P: Capture bằng capture key ổn định
+    P-->>O: Kết quả capture
+end
+O->>DB: Ghi trạng thái nghiệp vụ và event vào Outbox trong cùng transaction
+PUB->>DB: Đọc event chưa được đánh dấu đã gửi
+DB-->>PUB: Event + eventId
+PUB->>N: Phát event
+N->>IN: Kiểm tra và ghi nhận consumerName + eventId
+alt Event đã xử lý
+    IN-->>N: Đã tồn tại
+    N-->>PUB: Bỏ qua tác dụng nghiệp vụ trùng
+else Event mới
+    IN-->>N: Chưa tồn tại
+    N->>N: Xử lý event và gửi thông báo theo chính sách
+    N->>IN: Hoàn tất ghi nhận xử lý
+    N-->>PUB: Đã tiếp nhận event
+end
 ```
 
 ### Kết quả mong đợi
