@@ -164,10 +164,12 @@
   margin: 12px 0 0;
   padding: 9px 11px;
   border: 1px solid #f0d3d0;
+  border-left: 3px solid #ba655d;
   border-radius: 8px;
   background: #fff0ee;
   color: #98514b;
   font-size: 10px;
+  line-height: 1.5;
 }
 
 .order-form-footer {

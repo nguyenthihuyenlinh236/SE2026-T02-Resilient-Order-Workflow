@@ -3,6 +3,7 @@ import { Minus, PackagePlus, Plus, ShoppingBasket, Trash2 } from 'lucide-react'
 import './OrderForm.css'
 
 const MAX_ITEMS = 20
+const MAX_QUANTITY = 2147483647
 
 function createEmptyItem() {
   return { sku: '', quantity: 1 }
@@ -10,14 +11,17 @@ function createEmptyItem() {
 
 function OrderForm({ onSubmit, submitting = false, error = '' }) {
   const [items, setItems] = useState([createEmptyItem()])
+  const [validationError, setValidationError] = useState('')
 
   function updateItem(index, changes) {
+    setValidationError('')
     setItems((currentItems) => currentItems.map((item, itemIndex) =>
       itemIndex === index ? { ...item, ...changes } : item,
     ))
   }
 
   function addItem() {
+    setValidationError('')
     setItems((currentItems) => (
       currentItems.length < MAX_ITEMS
         ? [...currentItems, createEmptyItem()]
@@ -26,6 +30,7 @@ function OrderForm({ onSubmit, submitting = false, error = '' }) {
   }
 
   function removeItem(index) {
+    setValidationError('')
     setItems((currentItems) => (
       currentItems.length > 1
         ? currentItems.filter((_, itemIndex) => itemIndex !== index)
@@ -35,11 +40,29 @@ function OrderForm({ onSubmit, submitting = false, error = '' }) {
 
   function handleSubmit(event) {
     event.preventDefault()
+
+    const normalizedItems = items.map((item) => ({
+      sku: item.sku.trim(),
+      quantity: Number(item.quantity),
+    }))
+    if (normalizedItems.some((item) => !item.sku)) {
+      setValidationError('Nhập mã SKU cho từng sản phẩm.')
+      return
+    }
+    if (normalizedItems.some((item) =>
+      !Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > MAX_QUANTITY,
+    )) {
+      setValidationError('Số lượng phải là số nguyên từ 1 đến 2.147.483.647.')
+      return
+    }
+    if (new Set(normalizedItems.map((item) => item.sku)).size !== normalizedItems.length) {
+      setValidationError('Mỗi mã SKU chỉ được xuất hiện một lần trong đơn.')
+      return
+    }
+
+    setValidationError('')
     onSubmit({
-      items: items.map((item) => ({
-        sku: item.sku.trim(),
-        quantity: Number(item.quantity),
-      })),
+      items: normalizedItems,
     })
   }
 
@@ -94,6 +117,7 @@ function OrderForm({ onSubmit, submitting = false, error = '' }) {
               />
               <button
                 aria-label={`Tăng số lượng dòng ${index + 1}`}
+                disabled={Number(item.quantity) >= MAX_QUANTITY}
                 onClick={() => updateItem(index, { quantity: Number(item.quantity) + 1 })}
                 type="button"
               >
@@ -125,7 +149,9 @@ function OrderForm({ onSubmit, submitting = false, error = '' }) {
         <span>{items.length}/{MAX_ITEMS}</span>
       </button>
 
-      {error && <p className="order-form-error" role="alert">{error}</p>}
+      {(validationError || error) && (
+        <p className="order-form-error" role="alert">{validationError || error}</p>
+      )}
 
       <div className="order-form-footer">
         <span>Kiểm tra thông tin trước khi gửi đơn.</span>
