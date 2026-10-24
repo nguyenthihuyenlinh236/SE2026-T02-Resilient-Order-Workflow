@@ -8,7 +8,9 @@ import {
   RefreshCw,
   ShoppingBag,
 } from 'lucide-react'
+import OrderForm from './OrderForm.jsx'
 import './CustomerDashboard.css'
+import { createOrder } from '../services/orderApi.js'
 
 const statusLabels = {
   PENDING: 'Đang xử lý',
@@ -69,6 +71,9 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [submittingOrder, setSubmittingOrder] = useState(false)
+  const [orderMessage, setOrderMessage] = useState('')
+  const [orderError, setOrderError] = useState('')
 
   const loadOrders = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true)
@@ -82,6 +87,21 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
       setRefreshing(false)
     }
   }, [onError])
+
+  async function handleCreateOrder(payload) {
+    setSubmittingOrder(true)
+    setOrderError('')
+    setOrderMessage('')
+    try {
+      const order = await createOrder(user.accountId, payload)
+      setOrderMessage(`Đã tiếp nhận đơn #${order.orderId.slice(0, 8).toUpperCase()}.`)
+      await loadOrders(true)
+    } catch (submitError) {
+      setOrderError(submitError.message)
+    } finally {
+      setSubmittingOrder(false)
+    }
+  }
 
   useEffect(() => {
     let active = true
@@ -167,6 +187,15 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
             <p>Cùng xem lại hành trình những đơn hàng gần đây của bạn.</p>
           </div>
           <div className="dashboard-welcome-icon"><Package size={25} /></div>
+        </section>
+
+        <section className="dashboard-create-order" aria-label="Tạo đơn hàng">
+          <OrderForm
+            error={orderError}
+            onSubmit={handleCreateOrder}
+            submitting={submittingOrder}
+          />
+          {orderMessage && <p className="dashboard-order-success" role="status">{orderMessage}</p>}
         </section>
 
         <section className="dashboard-stats" aria-label="Thống kê đơn hàng">
