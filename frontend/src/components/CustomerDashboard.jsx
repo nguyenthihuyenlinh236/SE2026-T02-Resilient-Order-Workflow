@@ -199,6 +199,7 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
       refreshOfflineQueue(navigator.onLine)
       const handleOnline = () => {
         setIsOnline(true)
+        loadOrders(true)
         refreshOfflineQueue(true)
       }
       const handleOffline = () => setIsOnline(false)
@@ -210,7 +211,7 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
         window.removeEventListener('online', handleOnline)
         window.removeEventListener('offline', handleOffline)
       }
-  }, [onError, refreshOfflineQueue])
+  }, [loadOrders, onError, refreshOfflineQueue])
 
   const confirmedCount = orders.filter((order) => order.status === 'CONFIRMED').length
   const activeCount = orders.filter((order) =>
@@ -256,12 +257,13 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
           <span>Tài khoản <span className="dashboard-separator">/</span> Đơn hàng</span>
           <button
             className="dashboard-refresh"
-            disabled={refreshing || loading}
+            disabled={!isOnline || refreshing || loading}
             onClick={() => loadOrders(true)}
             type="button"
+            title={isOnline ? 'Tải lại danh sách đơn hàng' : 'Cần kết nối mạng để tải đơn hàng'}
           >
             <RefreshCw className={refreshing ? 'dashboard-spin' : ''} size={15} />
-            Làm mới
+            {isOnline ? 'Làm mới' : 'Ngoại tuyến'}
           </button>
         </header>
 
