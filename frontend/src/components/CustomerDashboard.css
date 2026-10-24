@@ -262,7 +262,9 @@
 .dashboard-offline-orders {
   display: grid;
   gap: 5px;
+  max-height: 220px;
   margin: 0 0 0 23px;
+  overflow-y: auto;
   padding: 0;
   list-style: none;
   color: #786d5d;
@@ -271,24 +273,46 @@
 
 .dashboard-offline-orders li {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
+  min-width: 0;
+  padding: 5px 0;
+  border-top: 1px solid #eee6d8;
+}
+
+.dashboard-offline-order-copy {
+  display: grid;
+  gap: 2px;
   min-width: 0;
 }
 
-.dashboard-offline-orders time {
+.dashboard-offline-order-copy time {
   flex: 0 0 auto;
   color: #948670;
 }
 
-.dashboard-offline-orders li > span {
+.dashboard-offline-order-copy > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.dashboard-offline-orders .dashboard-offline-more {
-  color: #948670;
-  font-style: italic;
+.dashboard-offline-remove {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border: 1px solid #e6d3ce;
+  border-radius: 6px;
+  background: #fffaf9;
+  color: #995e56;
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.dashboard-offline-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .dashboard-offline-retry {

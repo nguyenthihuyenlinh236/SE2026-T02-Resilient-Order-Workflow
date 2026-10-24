@@ -43,6 +43,11 @@ export async function listOfflineOrders(accountId) {
   return queue.list(accountId)
 }
 
+export async function removeOfflineOrder(idempotencyKey) {
+  const queue = await loadQueueApi()
+  return queue.remove(idempotencyKey)
+}
+
 export async function syncOfflineOrders(accountId) {
   const queue = await loadQueueApi()
   return queue.sync(accountId)

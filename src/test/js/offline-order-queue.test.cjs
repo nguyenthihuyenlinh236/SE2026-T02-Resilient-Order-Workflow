@@ -44,6 +44,22 @@ test("queues orders by account and retains a stable idempotency key", async () =
     assert.equal((await queue.list("customer-1"))[0].idempotencyKey, first.idempotencyKey);
 });
 
+test("removes only the selected pending order", async () => {
+    const queue = createOfflineOrderQueue({
+        storage: createMemoryStorage(),
+        fetchImpl: async () => response({})
+    });
+    const first = await queue.enqueue("customer-1", { items: [{ sku: "ITEM-1", quantity: 1 }] });
+    const second = await queue.enqueue("customer-1", { items: [{ sku: "ITEM-2", quantity: 2 }] });
+
+    await queue.remove(first.idempotencyKey);
+
+    const pending = await queue.list("customer-1");
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].idempotencyKey, second.idempotencyKey);
+    assert.equal(pending[0].payload.items[0].sku, "ITEM-2");
+});
+
 test("syncs pending orders with session and CSRF credentials, then removes them", async () => {
     const storage = createMemoryStorage();
     const calls = [];

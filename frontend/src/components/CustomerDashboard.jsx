@@ -15,6 +15,7 @@ import { createOrder } from '../services/orderApi.js'
 import {
   enqueueOfflineOrder,
   listOfflineOrders,
+  removeOfflineOrder,
   syncOfflineOrders,
 } from '../services/offlineOrderQueueApi.js'
 
@@ -87,6 +88,7 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
     typeof navigator !== 'undefined' && navigator.onLine
   ))
   const [isQueueSyncing, setIsQueueSyncing] = useState(false)
+  const [removingOfflineOrder, setRemovingOfflineOrder] = useState('')
   const queueSyncing = useRef(false)
 
   const loadOrders = useCallback(async (isRefresh = false) => {
@@ -151,6 +153,32 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
       setIsQueueSyncing(false)
     }
   }, [loadOrders, user.accountId])
+
+  async function handleRemoveOfflineOrder(entry) {
+    const confirmed = window.confirm(
+      'Bỏ đơn đang chờ này khỏi thiết bị? Thao tác này không thể hoàn tác.',
+    )
+    if (!confirmed) return
+
+    setRemovingOfflineOrder(entry.idempotencyKey)
+    try {
+      await removeOfflineOrder(entry.idempotencyKey)
+      const pending = await listOfflineOrders(user.accountId)
+      setPendingOfflineCount(pending.length)
+      setPendingOfflineOrders(pending)
+      setQueueNotice({
+        message: 'Đã bỏ đơn offline khỏi hàng đợi trên thiết bị.',
+        error: false,
+      })
+    } catch (queueError) {
+      setQueueNotice({
+        message: `Không thể bỏ đơn offline: ${queueError.message}`,
+        error: true,
+      })
+    } finally {
+      setRemovingOfflineOrder('')
+    }
+  }
 
   async function handleCreateOrder(payload) {
     setSubmittingOrder(true)
@@ -300,22 +328,28 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
                   {isQueueSyncing ? 'Đang đồng bộ' : 'Thử lại'}
                 </button>
               </div>
-              <ul className="dashboard-offline-orders" aria-label="Sản phẩm trong các đơn offline đang chờ">
-                {pendingOfflineOrders.slice(0, 3).map((entry) => (
+              <ul className="dashboard-offline-orders" aria-label="Đơn offline đang chờ đồng bộ">
+                {pendingOfflineOrders.map((entry) => (
                   <li key={entry.idempotencyKey}>
-                    <time dateTime={entry.createdAt}>{formatDate(entry.createdAt)}</time>
-                    <span>
-                      {(entry.payload?.items || [])
-                        .slice(0, 3)
-                        .map((item) => `${item.sku} ×${item.quantity}`)
-                        .join(', ')}
-                      {(entry.payload?.items || []).length > 3 && '…'}
-                    </span>
+                    <div className="dashboard-offline-order-copy">
+                      <time dateTime={entry.createdAt}>{formatDate(entry.createdAt)}</time>
+                      <span>
+                        {(entry.payload?.items || [])
+                          .map((item) => `${item.sku} ×${item.quantity}`)
+                          .join(', ')}
+                      </span>
+                    </div>
+                    <button
+                      aria-label={`Bỏ đơn offline tạo lúc ${formatDate(entry.createdAt)}`}
+                      className="dashboard-offline-remove"
+                      disabled={isQueueSyncing || removingOfflineOrder === entry.idempotencyKey}
+                      onClick={() => handleRemoveOfflineOrder(entry)}
+                      type="button"
+                    >
+                      {removingOfflineOrder === entry.idempotencyKey ? 'Đang bỏ...' : 'Bỏ đơn'}
+                    </button>
                   </li>
                 ))}
-                {pendingOfflineCount > 3 && (
-                  <li className="dashboard-offline-more">Còn {pendingOfflineCount - 3} đơn đang chờ.</li>
-                )}
               </ul>
             </div>
           )}
