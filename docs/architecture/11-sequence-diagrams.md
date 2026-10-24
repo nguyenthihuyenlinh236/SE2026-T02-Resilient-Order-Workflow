@@ -471,7 +471,7 @@ sequenceDiagram
     autonumber
     actor C as Customer
     participant O as Order Service
-    participant DB as Order DB + Outbox
+    participant DB as Order DB and Outbox
     participant I as Inventory Service
     participant P as Payment Service
     participant PUB as Outbox Publisher
@@ -485,7 +485,7 @@ sequenceDiagram
     alt New request
         O->>DB: Create Order and store idempotency key
         DB-->>O: Commit success
-        O-->>C: 202 Accepted with orderId and PENDING
+        O-->>C: Return 202 Accepted and orderId
     else Duplicate request
         O->>DB: Read existing Order
         DB-->>O: Existing orderId and current status
@@ -494,14 +494,14 @@ sequenceDiagram
 
     O->>I: Reserve using stable reserve key
     I-->>O: Reservation result
-    Note over O,I: Continue workflow only when required; do not create duplicate reservations
+    Note over O,I: Do not create duplicate reservations
 
     opt Order is eligible for payment
         O->>P: Capture using stable capture key
         P-->>O: Capture result
     end
 
-    O->>DB: Commit business state and event to Outbox in one transaction
+    O->>DB: Commit business state and Outbox event
     PUB->>DB: Read unpublished events
     DB-->>PUB: Event and eventId
     PUB->>N: Publish event
@@ -509,10 +509,10 @@ sequenceDiagram
 
     alt Event already processed
         IN-->>N: Duplicate detected
-        N-->>PUB: Skip duplicate business effect
+        N-->>PUB: Acknowledge without repeating business effect
     else New event
         IN-->>N: Event not found
-        N->>N: Process event and send notification by policy
+        N->>N: Process event and notification
         N->>IN: Record successful processing
         N-->>PUB: Acknowledge event
     end
