@@ -86,6 +86,18 @@ window.addEventListener("online", async () => {
 
 Mỗi nháp giữ nguyên `Idempotency-Key` qua các lần đồng bộ. Trước khi gửi, module kiểm tra phiên hiện tại qua `/api/v1/auth/me`, xác minh đúng tài khoản Customer, rồi lấy CSRF token. Lỗi mạng và phản hồi lỗi không xóa nháp; client có thể xem `queue.list(accountId)` và xóa nháp cụ thể bằng `queue.remove(idempotencyKey)`. Đây là module client, chưa có giao diện đặt hàng tích hợp; dữ liệu nháp chỉ lưu trên trình duyệt hiện tại và có thể mất nếu người dùng xóa dữ liệu trình duyệt.
 
+## Kiểm thử tải cục bộ
+
+Script `scripts/order-load-test.mjs` dùng Node.js tích hợp sẵn, không cần cài thêm package. Chỉ chạy với ứng dụng/database thử nghiệm: script tạo đơn lặp lại và tiêu thụ tồn kho. Cần có một tài khoản `CUSTOMER` đã được tạo trước:
+
+```powershell
+$env:LOAD_TEST_USERNAME = "load-test-customer"
+$env:LOAD_TEST_PASSWORD = "<customer-password>"
+node scripts/order-load-test.mjs
+```
+
+Mặc định chạy 148 phiên đăng nhập độc lập trong tối thiểu 120 giây; mỗi phiên tạo đơn, chờ 5–10 giây, tra cứu đơn rồi tiếp tục. Báo cáo JSON in p95 cho POST/GET, throughput, lỗi 5xx và phản hồi không mong đợi. Kết quả chỉ được coi đạt ngưỡng cá nhân hóa khi p95 mỗi endpoint ≤2 giây, 5xx ≤1%, đủ 148 phiên và chạy đủ thời lượng. Có thể dùng `LOAD_TEST_VUS` hoặc `LOAD_TEST_DURATION_SECONDS` để thử nhanh, nhưng các lần chạy đó không thể xác nhận đạt tải mục tiêu. `LOAD_TEST_BASE_URL` mặc định là `http://localhost:8080`; SKU mặc định là `DEMO-ITEM`.
+
 ## Mô phỏng payment
 
 `PAYMENT_SIMULATED_OUTCOME` nhận `SUCCEEDED` (mặc định), `FAILED` hoặc `UNKNOWN`. Đặt `UNKNOWN` để giữ Saga ở trạng thái đối soát; đổi sang `SUCCEEDED`/`FAILED` và khởi động lại ứng dụng để worker tiếp tục bằng cùng payment record. TTL mặc định 15 phút, có thể chỉnh bằng `ORDER_TTL` (ví dụ `30s`). Các worker có chu kỳ riêng trong `application.yml`.
