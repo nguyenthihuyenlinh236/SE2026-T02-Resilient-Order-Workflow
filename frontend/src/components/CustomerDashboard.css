@@ -216,6 +216,31 @@
   font-size: 11px;
 }
 
+.dashboard-offline-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid #e7ddc8;
+  border-radius: 9px;
+  background: #fbf6ea;
+  color: #8a7048;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.dashboard-offline-notice svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.dashboard-offline-notice.is-error {
+  border-color: #f0d3d0;
+  background: #fff0ee;
+  color: #98514b;
+}
+
 .dashboard-welcome {
   display: flex;
   align-items: center;

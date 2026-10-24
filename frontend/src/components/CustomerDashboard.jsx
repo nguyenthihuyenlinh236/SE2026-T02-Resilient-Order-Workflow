@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   CircleHelp,
   Clock3,
@@ -11,6 +11,11 @@ import {
 import OrderForm from './OrderForm.jsx'
 import './CustomerDashboard.css'
 import { createOrder } from '../services/orderApi.js'
+import {
+  enqueueOfflineOrder,
+  listOfflineOrders,
+  syncOfflineOrders,
+} from '../services/offlineOrderQueueApi.js'
 
 const statusLabels = {
   PENDING: 'Đang xử lý',
@@ -74,6 +79,9 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
   const [submittingOrder, setSubmittingOrder] = useState(false)
   const [orderMessage, setOrderMessage] = useState('')
   const [orderError, setOrderError] = useState('')
+  const [pendingOfflineCount, setPendingOfflineCount] = useState(0)
+  const [queueNotice, setQueueNotice] = useState(null)
+  const queueSyncing = useRef(false)
 
   const loadOrders = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true)
@@ -88,11 +96,69 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
     }
   }, [onError])
 
+  const refreshOfflineQueue = useCallback(async (shouldSync = false) => {
+    if (queueSyncing.current) return
+    queueSyncing.current = true
+
+    try {
+      let result
+      if (shouldSync && navigator.onLine) {
+        result = await syncOfflineOrders(user.accountId)
+      }
+      const pending = await listOfflineOrders(user.accountId)
+      setPendingOfflineCount(pending.length)
+
+      if (!result) return
+      if (result.sent > 0) {
+        setQueueNotice({
+          message: `Đã đồng bộ ${result.sent} đơn offline${result.pending ? `; còn ${result.pending} đơn chờ` : ''}.`,
+          error: false,
+        })
+        await loadOrders(true)
+        return
+      }
+      if (result.reason === 'empty') {
+        setQueueNotice(null)
+        return
+      }
+
+      const messages = {
+        authentication_required: 'Đăng nhập lại bằng tài khoản này để đồng bộ đơn đang chờ.',
+        account_mismatch: 'Đơn offline chỉ được đồng bộ bằng đúng tài khoản đã tạo đơn.',
+        network_unavailable: 'Chưa có kết nối ổn định; đơn offline vẫn được giữ trên thiết bị.',
+        retryable_response: 'Server chưa xử lý được đơn offline; đơn vẫn được giữ để thử lại.',
+        server_rejected: `Server từ chối đồng bộ đơn offline (${result.status}); đơn vẫn được giữ trên thiết bị.`,
+      }
+      setQueueNotice({
+        message: messages[result.reason] || 'Không đồng bộ được đơn offline; đơn vẫn được giữ trên thiết bị.',
+        error: result.reason === 'server_rejected' || result.reason === 'account_mismatch',
+      })
+    } catch (queueError) {
+      setQueueNotice({
+        message: `Không thể truy cập hàng đợi offline: ${queueError.message}`,
+        error: true,
+      })
+    } finally {
+      queueSyncing.current = false
+    }
+  }, [loadOrders, user.accountId])
+
   async function handleCreateOrder(payload) {
     setSubmittingOrder(true)
     setOrderError('')
     setOrderMessage('')
     try {
+      if (!navigator.onLine) {
+        await enqueueOfflineOrder(user.accountId, payload)
+        const pending = await listOfflineOrders(user.accountId)
+        setPendingOfflineCount(pending.length)
+        setQueueNotice({
+          message: 'Mất kết nối. Đơn đã được lưu trên thiết bị và sẽ đồng bộ khi có mạng.',
+          error: false,
+        })
+        return
+      }
+
       const order = await createOrder(user.accountId, payload)
       setOrderMessage(`Đã tiếp nhận đơn #${order.orderId.slice(0, 8).toUpperCase()}.`)
       await loadOrders(true)
@@ -120,10 +186,15 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
         if (active) setLoading(false)
       })
 
-    return () => {
-      active = false
-    }
-  }, [onError])
+      refreshOfflineQueue(navigator.onLine)
+      const handleOnline = () => refreshOfflineQueue(true)
+      window.addEventListener('online', handleOnline)
+
+      return () => {
+        active = false
+        window.removeEventListener('online', handleOnline)
+      }
+  }, [onError, refreshOfflineQueue])
 
   const confirmedCount = orders.filter((order) => order.status === 'CONFIRMED').length
   const activeCount = orders.filter((order) =>
@@ -190,6 +261,21 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
         </section>
 
         <section className="dashboard-create-order" aria-label="Tạo đơn hàng">
+          {pendingOfflineCount > 0 && (
+            <div className="dashboard-offline-notice" role="status">
+              <Clock3 size={15} />
+              <span>{pendingOfflineCount} đơn đang chờ đồng bộ từ thiết bị này.</span>
+            </div>
+          )}
+          {queueNotice && (
+            <div
+              className={`dashboard-offline-notice${queueNotice.error ? ' is-error' : ''}`}
+              role={queueNotice.error ? 'alert' : 'status'}
+            >
+              <CircleHelp size={15} />
+              <span>{queueNotice.message}</span>
+            </div>
+          )}
           <OrderForm
             error={orderError}
             onSubmit={handleCreateOrder}
