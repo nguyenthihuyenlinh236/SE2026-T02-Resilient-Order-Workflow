@@ -8,8 +8,10 @@ import {
   Package,
   PackageCheck,
   RefreshCw,
+  Search,
   ShoppingBag,
   WifiOff,
+  X,
 } from 'lucide-react'
 import OrderForm from './OrderForm.jsx'
 import './CustomerDashboard.css'
@@ -29,6 +31,16 @@ const statusLabels = {
   EXPIRING: 'Đang hết hạn',
   COMPENSATING: 'Đang hoàn tác',
 }
+
+const statusFilterOptions = [
+  ['ALL', 'Tất cả trạng thái'],
+  ['PENDING', 'Đang xử lý'],
+  ['CONFIRMED', 'Đã xác nhận'],
+  ['FAILED', 'Thất bại'],
+  ['EXPIRED', 'Đã hết hạn'],
+  ['EXPIRING', 'Đang hết hạn'],
+  ['COMPENSATING', 'Đang hoàn tác'],
+]
 
 function statusPresentation(status) {
   if (['FAILED', 'EXPIRED'].includes(status)) return { label: 'status-failed', Icon: CircleHelp }
@@ -92,6 +104,9 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
   const [isQueueSyncing, setIsQueueSyncing] = useState(false)
   const [removingOfflineOrder, setRemovingOfflineOrder] = useState('')
   const [expandedOrderId, setExpandedOrderId] = useState(null)
+  const [orderSearch, setOrderSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState('ALL')
+  const [orderSort, setOrderSort] = useState('newest')
   const queueSyncing = useRef(false)
 
   const loadOrders = useCallback(async (isRefresh = false) => {
@@ -249,6 +264,22 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
     ['PENDING', 'EXPIRING', 'COMPENSATING'].includes(order.status),
   ).length
   const latestOrder = orders[0]
+  const normalizedSearch = orderSearch.trim().toLocaleLowerCase('vi')
+  const visibleOrders = orders
+    .filter((order) => {
+      const matchesStatus = statusFilter === 'ALL' || order.status === statusFilter
+      const searchableText = [
+        order.orderId,
+        order.orderId.slice(0, 8),
+        ...order.items.map((item) => item.sku),
+      ].join(' ').toLocaleLowerCase('vi')
+      return matchesStatus && (!normalizedSearch || searchableText.includes(normalizedSearch))
+    })
+    .sort((left, right) => {
+      const dateDifference = new Date(left.createdAt) - new Date(right.createdAt)
+      return orderSort === 'newest' ? -dateDifference : dateDifference
+    })
+  const hasActiveOrderFilters = Boolean(normalizedSearch) || statusFilter !== 'ALL'
 
   return (
     <div className="customer-dashboard">
@@ -397,7 +428,48 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
               <span className="dashboard-eyebrow">LỊCH SỬ MUA SẮM</span>
               <h2>Đơn hàng của bạn</h2>
             </div>
-            <span className="dashboard-order-count">{orders.length} đơn</span>
+            <span className="dashboard-order-count">
+              {visibleOrders.length === orders.length
+                ? `${orders.length} đơn`
+                : `${visibleOrders.length}/${orders.length} đơn`}
+            </span>
+          </div>
+
+          <div className="dashboard-order-filters">
+            <label className="dashboard-order-search">
+              <Search size={15} />
+              <span className="visually-hidden">Tìm theo mã đơn hoặc SKU</span>
+              <input
+                onChange={(event) => setOrderSearch(event.target.value)}
+                placeholder="Tìm mã đơn hoặc SKU..."
+                type="search"
+                value={orderSearch}
+              />
+              {orderSearch && (
+                <button
+                  aria-label="Xóa nội dung tìm kiếm"
+                  onClick={() => setOrderSearch('')}
+                  type="button"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </label>
+            <label className="dashboard-order-select">
+              <span className="visually-hidden">Lọc theo trạng thái</span>
+              <select onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
+                {statusFilterOptions.map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="dashboard-order-select">
+              <span className="visually-hidden">Sắp xếp đơn hàng</span>
+              <select onChange={(event) => setOrderSort(event.target.value)} value={orderSort}>
+                <option value="newest">Mới nhất trước</option>
+                <option value="oldest">Cũ nhất trước</option>
+              </select>
+            </label>
           </div>
 
           <div className="dashboard-order-card">
@@ -415,7 +487,25 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
                 <strong>Chưa có đơn hàng nào</strong>
                 <p>Đơn hàng của bạn sẽ xuất hiện ở đây sau khi đặt.</p>
               </div>
-            ) : orders.map((order) => {
+            ) : visibleOrders.length === 0 ? (
+              <div className="dashboard-empty">
+                <div className="dashboard-empty-icon"><Search size={22} /></div>
+                <strong>Không tìm thấy đơn hàng phù hợp</strong>
+                <p>Thử thay đổi từ khóa hoặc trạng thái lọc.</p>
+                {hasActiveOrderFilters && (
+                  <button
+                    className="dashboard-clear-filters"
+                    onClick={() => {
+                      setOrderSearch('')
+                      setStatusFilter('ALL')
+                    }}
+                    type="button"
+                  >
+                    Xóa bộ lọc
+                  </button>
+                )}
+              </div>
+            ) : visibleOrders.map((order) => {
               const isExpanded = expandedOrderId === order.orderId
               const detailsId = `order-details-${order.orderId}`
               const details = [
