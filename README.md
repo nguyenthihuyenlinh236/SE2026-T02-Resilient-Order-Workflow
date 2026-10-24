@@ -68,6 +68,24 @@ Khởi tạo admin lần đầu bằng biến môi trường `APP_BOOTSTRAP_ADMI
 
 Nhân viên xem đơn tại `GET /api/v1/staff/orders`, nhận đơn bằng `POST /api/v1/staff/orders/{id}/claim`, rồi chuyển `RECEIVED → PREPARING → DELIVERED` bằng `PATCH /api/v1/staff/orders/{id}/fulfillment`. Mỗi mutation cần session và CSRF token.
 
+## Hàng đợi đơn khi mất mạng (client)
+
+`/offline-order-queue.js` cung cấp `window.OfflineOrderQueue` và lưu nháp trong IndexedDB của trình duyệt. Client lấy `accountId` từ `/api/v1/auth/me`, rồi dùng module như sau:
+
+```javascript
+const queue = OfflineOrderQueue.createOfflineOrderQueue();
+await queue.enqueue(account.accountId, {
+  items: [{ sku: "DEMO-ITEM", quantity: 2 }]
+});
+
+window.addEventListener("online", async () => {
+  const result = await queue.sync(account.accountId);
+  // Hiển thị result cho người dùng; các đơn chưa gửi vẫn còn trong hàng đợi.
+});
+```
+
+Mỗi nháp giữ nguyên `Idempotency-Key` qua các lần đồng bộ. Trước khi gửi, module kiểm tra phiên hiện tại qua `/api/v1/auth/me`, xác minh đúng tài khoản Customer, rồi lấy CSRF token. Lỗi mạng và phản hồi lỗi không xóa nháp; client có thể xem `queue.list(accountId)` và xóa nháp cụ thể bằng `queue.remove(idempotencyKey)`. Đây là module client, chưa có giao diện đặt hàng tích hợp; dữ liệu nháp chỉ lưu trên trình duyệt hiện tại và có thể mất nếu người dùng xóa dữ liệu trình duyệt.
+
 ## Mô phỏng payment
 
 `PAYMENT_SIMULATED_OUTCOME` nhận `SUCCEEDED` (mặc định), `FAILED` hoặc `UNKNOWN`. Đặt `UNKNOWN` để giữ Saga ở trạng thái đối soát; đổi sang `SUCCEEDED`/`FAILED` và khởi động lại ứng dụng để worker tiếp tục bằng cùng payment record. TTL mặc định 15 phút, có thể chỉnh bằng `ORDER_TTL` (ví dụ `30s`). Các worker có chu kỳ riêng trong `application.yml`.
@@ -76,4 +94,4 @@ Các event nghiệp vụ được lưu cùng transaction thay đổi trạng th�
 
 ## Phạm vi của base code
 
-Đã có luồng nền cho giữ hàng, payment mock, xác nhận/thất bại, giải phóng reservation, refund mock và hết hạn; các nhánh cạnh tranh dùng conditional update theo DB clock. Increment RE-005 bổ sung session/authentication, role/ownership checks, audit, luồng fulfillment theo store và dọn retention cho đơn kết thúc. Chưa có client/web offline draft queue, retry/backoff đầy đủ, lease worker bền vững, cảnh báo quản trị qua kênh ngoài, fault-injection API, payment reconciliation theo lịch D-04, TLS termination hoặc tích hợp broker/provider thật. Hiệu năng 148 người dùng đồng thời và các ngưỡng p95/độ lỗi cần được xác minh bằng môi trường tải riêng trước khi coi là đạt.
+Đã có luồng nền cho giữ hàng, payment mock, xác nhận/thất bại, giải phóng reservation, refund mock và hết hạn; các nhánh cạnh tranh dùng conditional update theo DB clock. Increment RE-005 bổ sung session/authentication, role/ownership checks, audit, luồng fulfillment theo store, dọn retention cho đơn kết thúc và module lưu hàng đợi đơn offline phía trình duyệt. Chưa có giao diện đặt hàng tích hợp, retry/backoff tự động, lease worker bền vững, cảnh báo quản trị qua kênh ngoài, fault-injection API, payment reconciliation theo lịch D-04, TLS termination hoặc tích hợp broker/provider thật. Hiệu năng 148 người dùng đồng thời và các ngưỡng p95/độ lỗi cần được xác minh bằng môi trường tải riêng trước khi coi là đạt.
