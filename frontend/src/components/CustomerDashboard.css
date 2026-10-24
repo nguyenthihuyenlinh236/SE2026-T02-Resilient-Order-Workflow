@@ -235,8 +235,7 @@
 }
 
 .dashboard-offline-notice {
-  display: flex;
-  align-items: flex-start;
+  display: grid;
   gap: 8px;
   margin-bottom: 12px;
   padding: 10px 12px;
@@ -248,9 +247,48 @@
   line-height: 1.5;
 }
 
+.dashboard-offline-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .dashboard-offline-notice svg {
   flex: 0 0 auto;
   margin-top: 1px;
+}
+
+.dashboard-offline-orders {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 0 23px;
+  padding: 0;
+  list-style: none;
+  color: #786d5d;
+  font-size: 10px;
+}
+
+.dashboard-offline-orders li {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dashboard-offline-orders time {
+  flex: 0 0 auto;
+  color: #948670;
+}
+
+.dashboard-offline-orders li > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-offline-orders .dashboard-offline-more {
+  color: #948670;
+  font-style: italic;
 }
 
 .dashboard-offline-retry {

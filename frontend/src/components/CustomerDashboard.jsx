@@ -81,6 +81,7 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
   const [orderMessage, setOrderMessage] = useState('')
   const [orderError, setOrderError] = useState('')
   const [pendingOfflineCount, setPendingOfflineCount] = useState(0)
+  const [pendingOfflineOrders, setPendingOfflineOrders] = useState([])
   const [queueNotice, setQueueNotice] = useState(null)
   const [isOnline, setIsOnline] = useState(() => (
     typeof navigator !== 'undefined' && navigator.onLine
@@ -113,6 +114,7 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
       }
       const pending = await listOfflineOrders(user.accountId)
       setPendingOfflineCount(pending.length)
+      setPendingOfflineOrders(pending)
 
       if (!result) return
       if (result.sent > 0) {
@@ -159,6 +161,7 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
         await enqueueOfflineOrder(user.accountId, payload)
         const pending = await listOfflineOrders(user.accountId)
         setPendingOfflineCount(pending.length)
+        setPendingOfflineOrders(pending)
         setQueueNotice({
           message: 'Mất kết nối. Đơn đã được lưu trên thiết bị và sẽ đồng bộ khi có mạng.',
           error: false,
@@ -281,18 +284,37 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
 
         <section className="dashboard-create-order" aria-label="Tạo đơn hàng">
           {pendingOfflineCount > 0 && (
-            <div className="dashboard-offline-notice" role="status">
-              <Clock3 size={15} />
-              <span>{pendingOfflineCount} đơn đang chờ đồng bộ từ thiết bị này.</span>
-              <button
-                className="dashboard-offline-retry"
-                disabled={!isOnline || isQueueSyncing}
-                onClick={() => refreshOfflineQueue(true)}
-                type="button"
-              >
-                <RefreshCw className={isQueueSyncing ? 'dashboard-spin' : ''} size={13} />
-                {isQueueSyncing ? 'Đang đồng bộ' : 'Thử lại'}
-              </button>
+            <div className="dashboard-offline-notice">
+              <div className="dashboard-offline-summary" role="status">
+                <Clock3 size={15} />
+                <span>{pendingOfflineCount} đơn đang chờ đồng bộ từ thiết bị này.</span>
+                <button
+                  className="dashboard-offline-retry"
+                  disabled={!isOnline || isQueueSyncing}
+                  onClick={() => refreshOfflineQueue(true)}
+                  type="button"
+                >
+                  <RefreshCw className={isQueueSyncing ? 'dashboard-spin' : ''} size={13} />
+                  {isQueueSyncing ? 'Đang đồng bộ' : 'Thử lại'}
+                </button>
+              </div>
+              <ul className="dashboard-offline-orders" aria-label="Sản phẩm trong các đơn offline đang chờ">
+                {pendingOfflineOrders.slice(0, 3).map((entry) => (
+                  <li key={entry.idempotencyKey}>
+                    <time dateTime={entry.createdAt}>{formatDate(entry.createdAt)}</time>
+                    <span>
+                      {(entry.payload?.items || [])
+                        .slice(0, 3)
+                        .map((item) => `${item.sku} ×${item.quantity}`)
+                        .join(', ')}
+                      {(entry.payload?.items || []).length > 3 && '…'}
+                    </span>
+                  </li>
+                ))}
+                {pendingOfflineCount > 3 && (
+                  <li className="dashboard-offline-more">Còn {pendingOfflineCount - 3} đơn đang chờ.</li>
+                )}
+              </ul>
             </div>
           )}
           {queueNotice && (
