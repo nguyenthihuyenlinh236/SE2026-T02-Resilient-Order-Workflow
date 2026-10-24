@@ -7,6 +7,7 @@ import {
   PackageCheck,
   RefreshCw,
   ShoppingBag,
+  WifiOff,
 } from 'lucide-react'
 import OrderForm from './OrderForm.jsx'
 import './CustomerDashboard.css'
@@ -262,6 +263,12 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
         </header>
 
         {error && <div className="dashboard-error" role="alert"><CircleHelp size={16} />{error}</div>}
+        {!isOnline && (
+          <div className="dashboard-connection-notice" role="status">
+            <WifiOff size={15} />
+            <span>Đang ngoại tuyến. Đơn mới sẽ được lưu trên thiết bị để đồng bộ sau.</span>
+          </div>
+        )}
 
         <section className="dashboard-welcome">
           <div>

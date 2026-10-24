@@ -216,6 +216,24 @@
   font-size: 11px;
 }
 
+.dashboard-connection-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 17px;
+  padding: 10px 12px;
+  border: 1px solid #e7ddc8;
+  border-radius: 9px;
+  background: #fbf6ea;
+  color: #8a7048;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.dashboard-connection-notice svg {
+  flex: 0 0 auto;
+}
+
 .dashboard-offline-notice {
   display: flex;
   align-items: flex-start;
