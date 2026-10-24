@@ -3,13 +3,13 @@ import {
   CircleHelp,
   Clock3,
   Package,
-  PackageCheck,
   RefreshCw,
-  WifiOff,
 } from 'lucide-react'
 import CustomerSidebar from './CustomerSidebar.jsx'
+import DashboardToolbar from './DashboardToolbar.jsx'
 import OrderForm from './OrderForm.jsx'
 import OrderHistory from './OrderHistory.jsx'
+import OrderStats from './OrderStats.jsx'
 import './CustomerDashboard.css'
 import { createOrder } from '../services/orderApi.js'
 import {
@@ -212,11 +212,6 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
       }
   }, [loadOrders, onError, refreshOfflineQueue])
 
-  const confirmedCount = orders.filter((order) => order.status === 'CONFIRMED').length
-  const activeCount = orders.filter((order) =>
-    ['PENDING', 'EXPIRING', 'COMPENSATING'].includes(order.status),
-  ).length
-
   return (
     <div className="customer-dashboard">
       <CustomerSidebar
@@ -226,27 +221,13 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
       />
 
       <main className="dashboard-main">
-        <header className="dashboard-topbar">
-          <span>Tài khoản <span className="dashboard-separator">/</span> Đơn hàng</span>
-          <button
-            className="dashboard-refresh"
-            disabled={!isOnline || refreshing || loading}
-            onClick={() => loadOrders(true)}
-            type="button"
-            title={isOnline ? 'Tải lại danh sách đơn hàng' : 'Cần kết nối mạng để tải đơn hàng'}
-          >
-            <RefreshCw className={refreshing ? 'dashboard-spin' : ''} size={15} />
-            {isOnline ? 'Làm mới' : 'Ngoại tuyến'}
-          </button>
-        </header>
-
-        {error && <div className="dashboard-error" role="alert"><CircleHelp size={16} />{error}</div>}
-        {!isOnline && (
-          <div className="dashboard-connection-notice" role="status">
-            <WifiOff size={15} />
-            <span>Đang ngoại tuyến. Đơn mới sẽ được lưu trên thiết bị để đồng bộ sau.</span>
-          </div>
-        )}
+        <DashboardToolbar
+          error={error}
+          isOnline={isOnline}
+          loading={loading}
+          onRefresh={() => loadOrders(true)}
+          refreshing={refreshing}
+        />
 
         <section className="dashboard-welcome">
           <div>
@@ -315,23 +296,7 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
           {orderMessage && <p className="dashboard-order-success" role="status">{orderMessage}</p>}
         </section>
 
-        <section className="dashboard-stats" aria-label="Thống kê đơn hàng">
-          <article className="dashboard-stat">
-            <span>Tổng đơn hàng</span>
-            <strong>{loading ? '—' : orders.length}</strong>
-            <small>Tất cả đơn đã đặt</small>
-          </article>
-          <article className="dashboard-stat">
-            <span>Đã xác nhận</span>
-            <strong>{loading ? '—' : confirmedCount}</strong>
-            <small>Đơn hàng thành công</small>
-          </article>
-          <article className="dashboard-stat">
-            <span>Đang xử lý</span>
-            <strong>{loading ? '—' : activeCount}</strong>
-            <small>Đang cập nhật trạng thái</small>
-          </article>
-        </section>
+        <OrderStats loading={loading} orders={orders} />
 
         <OrderHistory loading={loading} orders={orders} />
       </main>
