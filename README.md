@@ -7,6 +7,8 @@
 Yêu cầu: JDK 17+, Maven 3.9+ và Docker Compose.
 
 ```powershell
+$env:APP_BOOTSTRAP_ADMIN_USERNAME = "admin"
+$env:APP_BOOTSTRAP_ADMIN_PASSWORD = "<choose-a-local-password-of-at-least-12-characters>"
 docker compose up -d
 mvn spring-boot:run
 ```
@@ -21,22 +23,50 @@ Mặc định ứng dụng kết nối `jdbc:postgresql://localhost:5432/resilie
 
 ## API
 
-Tạo đơn (API trả `202 Accepted` sau khi đã lưu bền vững; tiến trình Saga chạy nền):
+API dùng session cookie có CSRF token. Trước lệnh `POST`, `PATCH` hoặc `logout`, gọi `GET /api/v1/auth/csrf`, giữ cookie và gửi token trả về trong header được chỉ định (`X-XSRF-TOKEN`).
+
+Đăng nhập:
 
 ```powershell
-curl.exe -X POST http://localhost:8080/api/v1/orders `
-  -H "Content-Type: application/json" `
-  -H "Idempotency-Key: demo-order-001" `
-  -d '{"items":[{"sku":"DEMO-ITEM","quantity":2}]}'
+$csrf = Invoke-RestMethod http://localhost:8080/api/v1/auth/csrf -SessionVariable session
+Invoke-RestMethod -Method Post http://localhost:8080/api/v1/auth/login `
+  -WebSession $session `
+  -Headers @{ "X-XSRF-TOKEN" = $csrf.token } `
+  -ContentType "application/json" `
+  -Body '{"username":"admin","password":"<configured-admin-password>"}'
+```
+
+Tạo đơn (API trả `202 Accepted` sau khi đã lưu bền vững; tiến trình Saga chạy nền; cần tài khoản `CUSTOMER`):
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/v1/orders `
+  -WebSession $session `
+  -Headers @{ "X-XSRF-TOKEN" = $csrf.token; "Idempotency-Key" = "demo-order-001" } `
+  -ContentType "application/json" `
+  -Body '{"items":[{"sku":"DEMO-ITEM","quantity":2}]}'
 ```
 
 Tra cứu trạng thái:
 
 ```powershell
-curl.exe http://localhost:8080/api/v1/orders/<orderId>
+Invoke-RestMethod http://localhost:8080/api/v1/orders/<orderId> -WebSession $session
 ```
 
 Gửi lại POST cùng `Idempotency-Key` và payload trả lại cùng Order; dùng lại khóa với payload khác trả `409 IDEMPOTENCY_KEY_CONFLICT`. API từ chối khóa idempotency thiếu, SKU trùng, danh sách hàng rỗng hoặc số lượng không dương.
+
+## Tài khoản và phân quyền
+
+Khởi tạo admin lần đầu bằng biến môi trường `APP_BOOTSTRAP_ADMIN_USERNAME` và `APP_BOOTSTRAP_ADMIN_PASSWORD` (tối thiểu 12 ký tự); không có mật khẩu mặc định. Admin tạo tài khoản `CUSTOMER`, `STAFF` hoặc admin khác qua `POST /api/v1/admin/accounts`. Tài khoản nhân viên phải gắn với store đã tồn tại; base code tạo sẵn `DEMO-STORE`.
+
+- `CUSTOMER`: chỉ tạo đơn và xem đơn của chính mình.
+- `STAFF`: chỉ xem/nhận/cập nhật fulfillment của đơn trong cửa hàng được gán; mỗi đơn chỉ một nhân viên nhận.
+- `ADMIN`: quản lý tài khoản, xem đơn và đọc cảnh báo bảo mật.
+
+Đơn không tồn tại và đơn thuộc tài khoản khác đều trả `404 Order not found`. Mỗi truy cập bị từ chối được ghi vào audit log độc lập với transaction nghiệp vụ. Sau 10 lần từ chối trong cùng phiên, phiên bị thu hồi và tạo cảnh báo trong hàng đợi admin. Phiên hết hạn sau 30 phút không hoạt động; tài khoản bị khóa 15 phút ngay sau lần đăng nhập sai thứ năm. Cookie phiên là HttpOnly/SameSite=Strict; bật `SESSION_COOKIE_SECURE=true` khi dùng HTTPS.
+
+Đơn được ẩn khỏi danh sách sau 26 ngày; worker mỗi giờ xóa dữ liệu của đơn đã kết thúc và các bản ghi liên quan. Đơn quá hạn nhưng còn Saga/bù trừ chưa hoàn tất được giữ lại an toàn và ghi lỗi vận hành để đối soát, không xóa mù làm thất thoát reservation hoặc payment.
+
+Nhân viên xem đơn tại `GET /api/v1/staff/orders`, nhận đơn bằng `POST /api/v1/staff/orders/{id}/claim`, rồi chuyển `RECEIVED → PREPARING → DELIVERED` bằng `PATCH /api/v1/staff/orders/{id}/fulfillment`. Mỗi mutation cần session và CSRF token.
 
 ## Mô phỏng payment
 
@@ -46,4 +76,4 @@ Các event nghiệp vụ được lưu cùng transaction thay đổi trạng th�
 
 ## Phạm vi của base code
 
-Đã có luồng nền cho giữ hàng, payment mock, xác nhận/thất bại, giải phóng reservation, refund mock và hết hạn; các nhánh cạnh tranh dùng conditional update theo DB clock. Các retry/backoff phân tán, lease worker bền vững, fault-injection API, đối soát payment theo lịch D-04 và tích hợp broker/provider thật vẫn cần được triển khai tiếp trước khi coi đây là hệ thống production.
+Đã có luồng nền cho giữ hàng, payment mock, xác nhận/thất bại, giải phóng reservation, refund mock và hết hạn; các nhánh cạnh tranh dùng conditional update theo DB clock. Increment RE-005 bổ sung session/authentication, role/ownership checks, audit, luồng fulfillment theo store và dọn retention cho đơn kết thúc. Chưa có client/web offline draft queue, retry/backoff đầy đủ, lease worker bền vững, cảnh báo quản trị qua kênh ngoài, fault-injection API, payment reconciliation theo lịch D-04, TLS termination hoặc tích hợp broker/provider thật. Hiệu năng 148 người dùng đồng thời và các ngưỡng p95/độ lỗi cần được xác minh bằng môi trường tải riêng trước khi coi là đạt.

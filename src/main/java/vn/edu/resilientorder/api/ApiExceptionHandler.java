@@ -1,5 +1,6 @@
 package vn.edu.resilientorder.api;
 
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -25,6 +26,15 @@ public class ApiExceptionHandler {
                 exception.getStatusCode(), exception.getReason()
         );
         problem.setTitle(exception.getStatusCode().toString());
+        return problem;
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    ProblemDetail integrityConflict(DataIntegrityViolationException exception) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+                HttpStatus.CONFLICT, "The requested account or resource already exists."
+        );
+        problem.setTitle("Conflict");
         return problem;
     }
 

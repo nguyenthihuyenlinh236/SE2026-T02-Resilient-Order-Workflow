@@ -7,9 +7,11 @@ import java.util.UUID;
 public record OrderResponse(
         UUID orderId,
         String status,
+        String fulfillmentStatus,
         String sagaStatus,
         String paymentStatus,
         String reservationStatus,
+        String storeId,
         Instant createdAt,
         Instant expireAt,
         String statusUrl,

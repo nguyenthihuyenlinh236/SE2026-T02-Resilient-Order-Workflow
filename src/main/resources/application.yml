@@ -7,11 +7,21 @@ spring:
     password: ${DB_PASSWORD:orders}
   flyway:
     enabled: true
+  session:
+    timeout: 30m
+    jdbc:
+      initialize-schema: never
   jackson:
     default-property-inclusion: non_null
 
 server:
   port: ${PORT:8080}
+  servlet:
+    session:
+      cookie:
+        http-only: true
+        secure: ${SESSION_COOKIE_SECURE:false}
+        same-site: strict
 
 management:
   endpoints:
@@ -22,9 +32,14 @@ management:
 app:
   order:
     ttl: ${ORDER_TTL:15m}
+    retention: ${ORDER_RETENTION:26d}
   workers:
     saga-delay: ${SAGA_WORKER_DELAY:1000}
     expiration-delay: ${EXPIRATION_WORKER_DELAY:5000}
     outbox-delay: ${OUTBOX_WORKER_DELAY:1000}
+    retention-delay: ${RETENTION_WORKER_DELAY:3600000}
   payment:
     simulated-outcome: ${PAYMENT_SIMULATED_OUTCOME:SUCCEEDED}
+  bootstrap:
+    admin-username: ${APP_BOOTSTRAP_ADMIN_USERNAME:}
+    admin-password: ${APP_BOOTSTRAP_ADMIN_PASSWORD:}
