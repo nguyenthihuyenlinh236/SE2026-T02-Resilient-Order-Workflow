@@ -266,63 +266,67 @@ end
 
 ```mermaid
 sequenceDiagram
-autonumber
-participant T as TTL Worker
-participant DB as Order DB
-participant I as Inventory Service
-participant P as Payment Service
-T->>DB: Quét Order PENDING đã hết hạn và EXPIRING có lease hết hạn
-DB-->>T: Danh sách ứng viên
-T->>DB: Đọc captureStatus và trạng thái Saga
-DB-->>T: Trạng thái hiện tại
-alt Capture đang UNKNOWN
-    T->>DB: Giữ nhánh đối soát hoặc RECONCILIATION_REQUIRED
-    Note over T,DB: Không tự ý refund, release hoặc kết thúc EXPIRED khi kết quả thanh toán chưa rõ
-else Chưa có capture thành công và đủ điều kiện hết hạn
-    T->>DB: Conditional claim PENDING -> EXPIRING
-    Note over T,DB: Ghi claimToken, claimedAt và leaseUntil cùng thao tác claim
-    DB-->>T: Claim thành công hoặc thất bại
-    alt Claim thất bại
-        T->>DB: Đọc trạng thái hiện tại
-        Note over T,DB: Không xử lý song song nếu worker khác đã nhận quyền
-    else Claim thành công
-        T->>DB: Đọc trạng thái Reservation
-        alt Reservation chưa được xác minh
-            T->>I: Query bằng reserve key
+    autonumber
+    participant T as TTL Worker
+    participant DB as Order DB
+    participant I as Inventory Service
+    participant P as Payment Service
+
+    T->>DB: Find expired PENDING orders
+    DB-->>T: Expired Order candidates
+    T->>DB: Read captureStatus and Saga state
+    DB-->>T: Current Order and Saga state
+
+    alt Capture status is UNKNOWN
+        T->>DB: Keep reconciliation pending
+        Note over T,DB: Do not refund or release based on an unknown payment result
+    else Capture is not successful
+        T->>DB: Claim expiration branch conditionally
+        DB-->>T: Claim result
+
+        alt Claim failed
+            T->>DB: Read current Order state
+        else Claim succeeded
+            T->>DB: Read Reservation status
+            T->>I: Query Reservation using reserve key
             I-->>T: Reservation status
-            T->>DB: Lưu kết quả truy vấn
+            alt Reservation is RESERVED
+                T->>I: Release using release key
+                I-->>T: Release result
+                T->>DB: Save verified release result
+            else Reservation is absent or RELEASED
+                T->>DB: Save that no release is required
+            end
+            T->>DB: Verify expiration completion conditions
+            T->>DB: Commit EXPIRED and OrderExpired Outbox if eligible
         end
-        alt Reservation đang RESERVED
-            T->>I: Release bằng release key
-            I-->>T: Kết quả release
-            T->>DB: Lưu kết quả release
-        else Reservation không tồn tại hoặc đã RELEASED
-            Note over T,I: Không tạo release không cần thiết
+    else Capture SUCCEEDED is verified
+        T->>DB: Claim expiration branch conditionally
+        DB-->>T: Claim result
+        alt Claim succeeded
+            T->>P: Refund using refund key
+            P-->>T: Refund result
+            T->>DB: Save refund status
+            alt Refund SUCCEEDED is verified
+                T->>I: Query Reservation using reserve key
+                I-->>T: Reservation status
+                alt Reservation is RESERVED
+                    T->>I: Release using release key
+                    I-->>T: Release result
+                    T->>DB: Save release result
+                else Reservation is absent or RELEASED
+                    T->>DB: No additional release required
+                end
+                T->>DB: Verify all completion conditions
+                T->>DB: Commit EXPIRED and OrderExpired Outbox if eligible
+            else Refund is UNKNOWN or FAILED
+                T->>DB: Keep expiration Saga incomplete
+                Note over T,DB: Do not mark Saga complete
+            end
+        else Claim failed
+            T->>DB: Read current Order state
         end
-        T->>DB: Kiểm tra đủ điều kiện kết thúc
-        T->>DB: Commit Order EXPIRED + Saga hoàn tất + OrderExpired Outbox
     end
-else Capture SUCCEEDED đã xác minh
-    T->>DB: Conditional claim nhánh hết hạn nếu Order vẫn đủ điều kiện
-    DB-->>T: Kết quả claim
-    alt Claim thành công
-        T->>P: Refund bằng refund key
-        P-->>T: Kết quả refund
-        T->>DB: Lưu refundStatus và trạng thái Saga
-        alt Refund SUCCEEDED đã xác minh
-            T->>DB: Kiểm tra Reservation và release nếu còn cần
-            T->>I: Query/Release bằng key ổn định khi cần
-            I-->>T: Kết quả đã xác minh
-            T->>DB: Kiểm tra mọi điều kiện kết thúc
-            T->>DB: Commit Order EXPIRED + Saga hoàn tất + OrderExpired Outbox
-        else Refund UNKNOWN hoặc FAILED
-            T->>DB: Giữ nhánh xử lý chưa hoàn tất
-            Note over T,DB: Không đánh dấu Saga hoàn tất; xử lý theo chính sách refund
-        end
-    else Claim thất bại
-        T->>DB: Đọc trạng thái hiện tại
-    end
-end
 ```
 
 ### Kết quả mong đợi
@@ -330,12 +334,10 @@ end
 - TTL mặc định là 15 phút; việc quét và lease tuân theo cấu hình dự án.
 - Điều kiện hết hạn được đánh giá bằng DB UTC time.
 - Chỉ một worker được quyền nhận nhánh hết hạn tại một thời điểm.
-- Thao tác claim phải được thực hiện có điều kiện; `claimToken`, `claimedAt` và `leaseUntil` được lưu nhất quán.
 - Reservation chưa được xác minh phải được truy vấn bằng `reserve key` trước khi quyết định release.
 - Nếu capture đã thành công, phải xử lý refund theo chính sách đã thống nhất và chỉ coi refund hoàn tất khi được xác minh.
 - Nếu refund hoặc release còn `UNKNOWN`/`FAILED`, không được đánh dấu Saga hoàn tất.
-- Worker khác chỉ tiếp quản khi lease hết hạn và phải đọc lại trạng thái trước khi thực hiện hành động.
-- Nếu nhánh khác đã nhận quyền xử lý Order, TTL Worker không được ghi đè trạng thái của nhánh đó.
+- Worker tiếp quản phải đọc lại trạng thái trước khi thực hiện hành động.
 - Chỉ chuyển sang `EXPIRED` khi thỏa mãn đầy đủ điều kiện trong State Machine và Saga Workflow.
 
 ## 8. Luồng 6 – Release thất bại hoặc kết quả release chưa rõ
@@ -466,47 +468,54 @@ end
 
 ```mermaid
 sequenceDiagram
-autonumber
-actor C as Customer
-participant O as Order Service
-participant DB as Order DB + Outbox
-participant I as Inventory Service
-participant P as Payment Service
-participant PUB as Outbox Publisher
-participant N as Notification Service
-participant IN as Consumer Inbox
-C->>O: Gửi yêu cầu + idempotency key
-O->>DB: Tra cứu idempotency key
-DB-->>O: Kết quả tra cứu
-alt Yêu cầu mới
-    O->>DB: Tạo Order + liên kết idempotency key
-    Note over O,DB: Commit Order và dữ liệu cần phục hồi
-    DB-->>O: Commit thành công
-    O-->>C: 202 Accepted + orderId + PENDING
-else Yêu cầu trùng
-    O-->>C: Trả lại orderId và trạng thái hiện tại
-end
-Note over O,I: Chỉ tiếp tục workflow khi cần; không tạo Reservation trùng
-O->>I: Reserve bằng reserve key ổn định
-I-->>O: Kết quả Reservation
-opt Order đủ điều kiện thanh toán
-    O->>P: Capture bằng capture key ổn định
-    P-->>O: Kết quả capture
-end
-O->>DB: Ghi trạng thái nghiệp vụ và event vào Outbox trong cùng transaction
-PUB->>DB: Đọc event chưa được đánh dấu đã gửi
-DB-->>PUB: Event + eventId
-PUB->>N: Phát event
-N->>IN: Kiểm tra và ghi nhận consumerName + eventId
-alt Event đã xử lý
-    IN-->>N: Đã tồn tại
-    N-->>PUB: Bỏ qua tác dụng nghiệp vụ trùng
-else Event mới
-    IN-->>N: Chưa tồn tại
-    N->>N: Xử lý event và gửi thông báo theo chính sách
-    N->>IN: Hoàn tất ghi nhận xử lý
-    N-->>PUB: Đã tiếp nhận event
-end
+    autonumber
+    actor C as Customer
+    participant O as Order Service
+    participant DB as Order DB + Outbox
+    participant I as Inventory Service
+    participant P as Payment Service
+    participant PUB as Outbox Publisher
+    participant N as Notification Service
+    participant IN as Consumer Inbox
+
+    C->>O: Submit request with idempotency key
+    O->>DB: Look up idempotency key
+    DB-->>O: Lookup result
+
+    alt New request
+        O->>DB: Create Order and store idempotency key
+        DB-->>O: Commit success
+        O-->>C: 202 Accepted with orderId and PENDING
+    else Duplicate request
+        O->>DB: Read existing Order
+        DB-->>O: Existing orderId and current status
+        O-->>C: Return existing orderId and status
+    end
+
+    O->>I: Reserve using stable reserve key
+    I-->>O: Reservation result
+    Note over O,I: Continue workflow only when required; do not create duplicate reservations
+
+    opt Order is eligible for payment
+        O->>P: Capture using stable capture key
+        P-->>O: Capture result
+    end
+
+    O->>DB: Commit business state and event to Outbox in one transaction
+    PUB->>DB: Read unpublished events
+    DB-->>PUB: Event and eventId
+    PUB->>N: Publish event
+    N->>IN: Check consumerName and eventId
+
+    alt Event already processed
+        IN-->>N: Duplicate detected
+        N-->>PUB: Skip duplicate business effect
+    else New event
+        IN-->>N: Event not found
+        N->>N: Process event and send notification by policy
+        N->>IN: Record successful processing
+        N-->>PUB: Acknowledge event
+    end
 ```
 
 ### Kết quả mong đợi
