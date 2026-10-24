@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
+  ChevronDown,
+  ChevronUp,
   CircleHelp,
   Clock3,
   LogOut,
@@ -89,6 +91,7 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
   ))
   const [isQueueSyncing, setIsQueueSyncing] = useState(false)
   const [removingOfflineOrder, setRemovingOfflineOrder] = useState('')
+  const [expandedOrderId, setExpandedOrderId] = useState(null)
   const queueSyncing = useRef(false)
 
   const loadOrders = useCallback(async (isRefresh = false) => {
@@ -412,19 +415,64 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
                 <strong>Chưa có đơn hàng nào</strong>
                 <p>Đơn hàng của bạn sẽ xuất hiện ở đây sau khi đặt.</p>
               </div>
-            ) : orders.map((order) => (
-              <article className="dashboard-order-row" key={order.orderId}>
-                <strong className="dashboard-order-id">#{order.orderId.slice(0, 8).toUpperCase()}</strong>
-                <div className="dashboard-products">
-                  {order.items.slice(0, 2).map((item) => (
-                    <span key={item.sku}>{item.sku} <small>×{item.quantity}</small></span>
-                  ))}
-                  {order.items.length > 2 && <small>+{order.items.length - 2} sản phẩm</small>}
-                </div>
-                <time dateTime={order.createdAt}>{formatDate(order.createdAt)}</time>
-                <OrderStatus status={order.status} />
-              </article>
-            ))}
+            ) : orders.map((order) => {
+              const isExpanded = expandedOrderId === order.orderId
+              const detailsId = `order-details-${order.orderId}`
+              const details = [
+                ['Trạng thái Saga', order.sagaStatus],
+                ['Thanh toán', order.paymentStatus],
+                ['Tồn kho', order.reservationStatus],
+                ['Giao hàng', order.fulfillmentStatus],
+                ['Cửa hàng', order.storeId],
+              ]
+
+              return (
+                <Fragment key={order.orderId}>
+                  <article className="dashboard-order-row">
+                    <button
+                      aria-controls={detailsId}
+                      aria-expanded={isExpanded}
+                      className="dashboard-order-id"
+                      onClick={() => setExpandedOrderId(isExpanded ? null : order.orderId)}
+                      type="button"
+                    >
+                      #{order.orderId.slice(0, 8).toUpperCase()}
+                      {isExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                    </button>
+                    <div className="dashboard-products">
+                      {order.items.slice(0, 2).map((item) => (
+                        <span key={item.sku}>{item.sku} <small>×{item.quantity}</small></span>
+                      ))}
+                      {order.items.length > 2 && <small>+{order.items.length - 2} sản phẩm</small>}
+                    </div>
+                    <time dateTime={order.createdAt}>{formatDate(order.createdAt)}</time>
+                    <OrderStatus status={order.status} />
+                  </article>
+                  {isExpanded && (
+                    <div className="dashboard-order-details" id={detailsId}>
+                      <div className="dashboard-order-detail-items">
+                        <strong>Sản phẩm trong đơn</strong>
+                        {order.items.map((item) => (
+                          <span key={item.sku}>{item.sku}<small>×{item.quantity}</small></span>
+                        ))}
+                      </div>
+                      <dl className="dashboard-order-detail-statuses">
+                        {details.map(([label, value]) => (
+                          <div key={label}>
+                            <dt>{label}</dt>
+                            <dd>{value ? value.replaceAll('_', ' ') : 'Chưa cập nhật'}</dd>
+                          </div>
+                        ))}
+                        <div>
+                          <dt>Hạn xử lý</dt>
+                          <dd>{formatDate(order.expireAt)}</dd>
+                        </div>
+                      </dl>
+                    </div>
+                  )}
+                </Fragment>
+              )
+            })}
           </div>
           <p className="dashboard-retention"><Clock3 size={13} /> Đơn hàng được lưu và hiển thị trong 26 ngày.</p>
         </section>

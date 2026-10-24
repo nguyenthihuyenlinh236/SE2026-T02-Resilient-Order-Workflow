@@ -474,8 +474,85 @@
 }
 
 .dashboard-order-id {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 4px;
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
+  color: #405747;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.dashboard-order-id:hover {
+  color: #668b6c;
+}
+
+.dashboard-order-id:focus-visible {
+  outline: 2px solid #668b6c;
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
+.dashboard-order-details {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: 20px;
+  padding: 16px;
+  border-bottom: 1px solid #f0f2ef;
+  background: #fbfcfa;
+}
+
+.dashboard-order-detail-items,
+.dashboard-order-detail-statuses {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  margin: 0;
+  color: #58665d;
+  font-size: 10px;
+}
+
+.dashboard-order-detail-items > strong {
+  margin-bottom: 2px;
   color: #405747;
   font-size: 10px;
+}
+
+.dashboard-order-detail-items > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dashboard-order-detail-items small {
+  color: #849087;
+}
+
+.dashboard-order-detail-statuses {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dashboard-order-detail-statuses > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.dashboard-order-detail-statuses dt {
+  color: #929c94;
+  font-size: 9px;
+}
+
+.dashboard-order-detail-statuses dd {
+  overflow-wrap: anywhere;
+  margin: 0;
+  color: #58665d;
+  text-transform: capitalize;
 }
 
 .dashboard-products {
@@ -697,5 +774,11 @@
 
   .dashboard-order-row {
     min-height: 58px;
+  }
+
+  .dashboard-order-details {
+    grid-template-columns: 1fr;
+    gap: 14px;
+    padding: 13px 11px;
   }
 }
