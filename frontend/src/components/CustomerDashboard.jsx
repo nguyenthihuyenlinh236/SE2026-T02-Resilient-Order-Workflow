@@ -81,6 +81,10 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
   const [orderError, setOrderError] = useState('')
   const [pendingOfflineCount, setPendingOfflineCount] = useState(0)
   const [queueNotice, setQueueNotice] = useState(null)
+  const [isOnline, setIsOnline] = useState(() => (
+    typeof navigator !== 'undefined' && navigator.onLine
+  ))
+  const [isQueueSyncing, setIsQueueSyncing] = useState(false)
   const queueSyncing = useRef(false)
 
   const loadOrders = useCallback(async (isRefresh = false) => {
@@ -99,6 +103,7 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
   const refreshOfflineQueue = useCallback(async (shouldSync = false) => {
     if (queueSyncing.current) return
     queueSyncing.current = true
+    setIsQueueSyncing(true)
 
     try {
       let result
@@ -140,6 +145,7 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
       })
     } finally {
       queueSyncing.current = false
+      setIsQueueSyncing(false)
     }
   }, [loadOrders, user.accountId])
 
@@ -187,12 +193,18 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
       })
 
       refreshOfflineQueue(navigator.onLine)
-      const handleOnline = () => refreshOfflineQueue(true)
+      const handleOnline = () => {
+        setIsOnline(true)
+        refreshOfflineQueue(true)
+      }
+      const handleOffline = () => setIsOnline(false)
       window.addEventListener('online', handleOnline)
+      window.addEventListener('offline', handleOffline)
 
       return () => {
         active = false
         window.removeEventListener('online', handleOnline)
+        window.removeEventListener('offline', handleOffline)
       }
   }, [onError, refreshOfflineQueue])
 
@@ -265,6 +277,15 @@ function CustomerDashboard({ user, onLogout, error, onError }) {
             <div className="dashboard-offline-notice" role="status">
               <Clock3 size={15} />
               <span>{pendingOfflineCount} đơn đang chờ đồng bộ từ thiết bị này.</span>
+              <button
+                className="dashboard-offline-retry"
+                disabled={!isOnline || isQueueSyncing}
+                onClick={() => refreshOfflineQueue(true)}
+                type="button"
+              >
+                <RefreshCw className={isQueueSyncing ? 'dashboard-spin' : ''} size={13} />
+                {isQueueSyncing ? 'Đang đồng bộ' : 'Thử lại'}
+              </button>
             </div>
           )}
           {queueNotice && (

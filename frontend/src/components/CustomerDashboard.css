@@ -235,6 +235,32 @@
   margin-top: 1px;
 }
 
+.dashboard-offline-retry {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: 5px;
+  margin: -2px 0 -2px auto;
+  padding: 5px 8px;
+  border: 1px solid #e4d8bf;
+  border-radius: 7px;
+  background: #fffdf8;
+  color: #785f3b;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.dashboard-offline-retry:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.dashboard-offline-retry svg {
+  margin-top: 0;
+}
+
 .dashboard-offline-notice.is-error {
   border-color: #f0d3d0;
   background: #fff0ee;
