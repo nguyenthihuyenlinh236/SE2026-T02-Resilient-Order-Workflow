@@ -1,5 +1,6 @@
 package vn.edu.resilientorder.api;
 
+import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
@@ -16,6 +17,7 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -62,7 +64,6 @@ class OrderControllerTest {
                 () -> controller.createOrder("k".repeat(201), request, customer)
         );
         assertEquals(HttpStatus.BAD_REQUEST, exception.getStatusCode());
-        assertEquals(HttpStatus.BAD_REQUEST, exception.getStatusCode());
         verify(orderService, never()).create(anyString(), any(), any());
     }
 
@@ -83,5 +84,48 @@ class OrderControllerTest {
         assertEquals("1", result.getHeaders().getFirst(HttpHeaders.RETRY_AFTER));
         assertEquals(response, result.getBody());
         verify(orderService).create("request-1", request, customer);
+    }
+
+    @Test
+    void listsOrdersForCustomerWithRequestedLimit() {
+        List<OrderResponse> orders = List.of();
+        when(orderService.listForCustomer(customer.id(), 10)).thenReturn(orders);
+
+        List<OrderResponse> result = controller.listOrders(customer, 10);
+
+        assertEquals(orders, result);
+        verify(orderService).listForCustomer(customer.id(), 10);
+    }
+
+    @Test
+    void rejectsStaffOrderListRequestBeforeCallingService() {
+        AuthenticatedUser staff = new AuthenticatedUser(
+                UUID.randomUUID(), "staff", AccountRole.STAFF, "DEMO-STORE"
+        );
+
+        ResponseStatusException exception = assertThrows(
+                ResponseStatusException.class,
+                () -> controller.listOrders(staff, 20)
+        );
+
+        assertEquals(HttpStatus.FORBIDDEN, exception.getStatusCode());
+        verify(orderService, never()).listForCustomer(any(), anyInt());
+    }
+
+    @Test
+    void getsOrderByIdAndPassesRequestContextToService() {
+        UUID orderId = UUID.randomUUID();
+        HttpServletRequest servletRequest = mock(HttpServletRequest.class);
+        OrderResponse response = new OrderResponse(
+                orderId, "PENDING", null, "RUNNING", null, null, "DEMO-STORE",
+                Instant.now(), Instant.now().plusSeconds(900),
+                "/api/v1/orders/" + orderId, List.of()
+        );
+        when(orderService.get(orderId, customer, servletRequest)).thenReturn(response);
+
+        OrderResponse result = controller.getOrder(orderId, customer, servletRequest);
+
+        assertEquals(response, result);
+        verify(orderService).get(orderId, customer, servletRequest);
     }
 }
