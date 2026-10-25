@@ -589,3 +589,89 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 - Các tiêu chí phù hợp với State Machine, Saga Workflow và Use Case.
 - Người 3 có thể chuyển tiêu chí thành test case mà không phải tự đoán hành vi nghiệp vụ.
 - Các ngưỡng cấu hình và mục tiêu hiệu năng cần được xác nhận với nhóm trước khi dùng làm kết quả nghiệm thu cuối cùng.
+
+
+## 16. Ma trận Contract Tests và Failure Injection
+
+Mục này xác định các kiểm thử cần được chuẩn bị trước khi bàn giao. Đây là phạm vi kiểm thử đề xuất; schema, endpoint, mã lỗi và payload cụ thể phải theo API/event contract được Dev thống nhất, không suy ra từ Acceptance Criteria.
+
+| ID | Loại kiểm thử | Điều kiện/kịch bản | Kết quả cần xác minh | Phụ trách đề xuất |
+|---|---|---|---|---|
+| CT-01 | Contract test | Order Service gọi Inventory Service để reserve/release | Request/response, trạng thái Reservation, idempotency key và lỗi khớp contract đã thống nhất | Dev + Tester |
+| CT-02 | Contract test | Order Service gọi Payment Service để capture/refund/query | Phân biệt `SUCCEEDED`, `FAILED`, `UNKNOWN`; timeout không bị diễn giải thành thất bại | Dev + Tester |
+| CT-03 | Event contract test | Order Service ghi `OrderConfirmed`/`OrderExpired` vào Outbox | Tên event, schema/payload, `eventId` và điều kiện phát event khớp contract; event chỉ được phát sau commit | Dev + Tester |
+| CT-04 | Consumer contract test | Consumer nhận cùng event nhiều lần | Deduplication theo `consumerName` + `eventId`; không tạo tác động nghiệp vụ trùng | Dev + Tester |
+| FI-01 | Failure injection | Transaction tạo Order rollback hoặc kết quả commit không rõ | Không trả xác nhận thành công sai; tra cứu bằng khóa ổn định trước khi thử lại; không tạo Order trùng | Dev + Tester |
+| FI-02 | Failure injection | Inventory đã commit Reservation nhưng phản hồi bị mất | Truy vấn theo khóa ổn định xác minh kết quả; retry không tạo Reservation trùng | Dev + Tester |
+| FI-03 | Failure injection | Payment đã capture nhưng phản hồi bị mất | Payment được đối soát bằng khóa capture ổn định; không tạo capture thứ hai và không coi `UNKNOWN` là `FAILED` | Dev + Tester |
+| FI-04 | Failure injection | Publisher chết sau khi publish nhưng trước khi đánh dấu event đã gửi | Outbox phát lại được; consumer chống xử lý trùng | Dev + Tester |
+| FI-05 | Failure injection | TTL Worker chết sau khi claim nhưng trước/sau khi gửi release | Lease hết hạn cho phép tiếp quản; release dùng khóa ổn định; không hoàn tất `EXPIRED` khi Reservation chưa được giải quyết | Dev + Tester |
+| FI-06 | Failure injection | Release/refund lỗi hoặc timeout liên tiếp vượt ngưỡng gửi | Đúng giới hạn 5 lần gửi gồm lần đầu, backoff, trạng thái Saga, cảnh báo và retry nền mỗi 60 giây theo quyết định đã thống nhất | Dev + Tester |
+| FI-07 | Failure injection | Service/worker khởi động lại khi Saga đang `RECONCILING` hoặc `COMPENSATING` | Công việc được phục hồi từ trạng thái bền vững; không phát sinh tác động nghiệp vụ trùng | Dev + Tester |
+| FI-08 | Failure injection | Capture thành công được xác minh sau khi Order đã `EXPIRED` | Order không được mở lại/CONFIRMED; refund muộn được theo dõi theo quyết định đã thống nhất; không phát `OrderConfirmed` | Dev + Tester |
+
+### 16.1. Điều kiện hoàn tất kiểm thử
+
+- Dev xác nhận các API/event contract được dùng làm cơ sở kiểm thử.
+- Tester chuyển các dòng phù hợp thành test case có ID, dữ liệu đầu vào, bước thực hiện, kết quả mong đợi và bằng chứng thực thi.
+- Mỗi failure-injection test ghi rõ điểm tiêm lỗi, trạng thái trước lỗi, hành vi mong đợi sau phục hồi và cách dọn dữ liệu kiểm thử.
+- Fault injection chỉ được bật trong môi trường kiểm thử được cho phép; mặc định tắt ở môi trường không dùng để kiểm thử.
+- Các kiểm thử chưa thể chạy do contract hoặc quyết định còn mở phải được đánh dấu `BLOCKED`/`PENDING`, không ghi là `PASS`.
+
+## 17. Danh sách tài liệu và đầu việc bàn giao cho Dev/Tester
+
+| Tài liệu/đầu việc | Tiếp tục hoàn thiện bởi | Kết quả bàn giao cần có | Trạng thái |
+|---|---|---|---|
+| `08-detailed-use-cases.md` | BA + Dev | Luồng chính, ngoại lệ và kết quả nghiệp vụ khớp với AC | Cần rà soát chéo |
+| `09-state-machine.md` | BA + Dev | Trạng thái Order/Saga, điều kiện chuyển và quyền nhận nhánh được thống nhất | Chờ xác nhận các điểm mở |
+| `10-saga-workflow-and-compensation.md` | Dev, BA rà soát | Chi tiết orchestration, retry, compensation, đối soát và recovery | Dev tiếp tục hoàn thiện |
+| `11-sequence-diagrams.md` | BA + Dev | Sơ đồ khớp với state machine, API/event contract và luồng lỗi | Cần rà soát chéo |
+| `12-acceptance-criteria.md` | BA + Tester | AC truy vết được và chuyển thành test case | Tài liệu BA; chờ review/handover |
+| API contracts giữa Order, Inventory và Payment | Dev | Request/response, mã lỗi, timeout, idempotency và cách query kết quả | Cần hoàn thiện/xác nhận |
+| Event contracts và Outbox/Inbox | Dev | Tên event, schema/payload, `eventId`, versioning, deduplication và chính sách phát lại | Cần hoàn thiện/xác nhận |
+| Test plan và test cases | Tester | Liên kết AC/CT/FI với test case, dữ liệu, kết quả và bằng chứng | Tester tiếp tục thực hiện |
+| **Recovery Runbook** | Dev + người phụ trách vận hành | Hướng dẫn nhận biết sự cố, tra cứu Order/Saga/Reservation/Payment/Outbox, retry an toàn, xử lý `UNKNOWN`, lease hết hạn, release/refund lỗi, cảnh báo và điều kiện can thiệp thủ công | Chưa xác nhận hoàn tất |
+| Test execution report | Tester | Kết quả pass/fail/blocked, bằng chứng, lỗi phát hiện và liên kết issue | Sau khi chạy test |
+
+Recovery Runbook phải phản ánh các thao tác thực tế mà hệ thống hỗ trợ. Không thực hiện retry thủ công, release hoặc refund bằng khóa mới nếu có nguy cơ tạo tác động nghiệp vụ trùng. Các lệnh vận hành, quyền truy cập và quy trình can thiệp cần được Dev/đội vận hành xác nhận.
+
+## 18. Trạng thái bàn giao và các điểm chờ xác nhận
+
+### 18.1. Trạng thái bàn giao hiện tại
+
+| Hạng mục | Trạng thái | Điều kiện để đóng |
+|---|---|---|
+| Acceptance Criteria cho các luồng chính | Đã soạn | BA/Dev/Tester rà soát và thống nhất |
+| Ma trận contract tests/failure injection | Đã xác định phạm vi trong tài liệu này | Dev xác nhận contract; Tester tạo và chạy test |
+| API/event contracts | Chờ xác nhận | Có schema, hành vi lỗi và quy tắc idempotency được thống nhất |
+| Recovery Runbook | Chưa xác nhận hoàn tất | Dev/đội vận hành hoàn thiện và rà soát |
+| Các quyết định nghiệp vụ/kiến trúc còn mở | Chờ xác nhận | Ghi quyết định cuối cùng và cập nhật các tài liệu liên quan |
+| Bàn giao Tester | Đang chờ hoàn thiện | Có test case, kết quả chạy và bằng chứng hoặc ghi rõ phần bị block |
+
+### 18.2. Danh sách điểm cần xác nhận
+
+| ID | Điểm cần xác nhận | Phụ trách đề xuất | Điều kiện đóng |
+|---|---|---|---|
+| OPEN-01 | Cách dùng `COMPENSATION_FAILED` cho Order và Saga; riêng nhánh hết hạn có giữ Order ở `EXPIRING` khi Saga compensation lỗi hay không | BA + Dev | `09-state-machine.md`, `10-saga-workflow-and-compensation.md` và AC thống nhất |
+| OPEN-02 | Capture thành công muộn sau khi Order đã `EXPIRED`, bao gồm cách Saga khởi chạy/theo dõi refund muộn | BA + Dev | Quyết định được ghi trong State Machine/Design Decisions và có test tương ứng |
+| OPEN-03 | Xử lý refund `FAILED` đã xác minh, quyền can thiệp thủ công và trạng thái cuối cùng | Dev + người phụ trách nghiệp vụ/vận hành | Có chính sách rõ, cảnh báo và hướng dẫn trong Runbook |
+| OPEN-04 | API/event schema, mã lỗi, timeout, idempotency và event version | Dev | Contract được thống nhất và dùng cho contract tests |
+| OPEN-05 | Mốc bắt đầu tính thời hạn lưu giữ 29 ngày và cách xử lý dữ liệu sau thời hạn | BA + Dev/đội dữ liệu | Chính sách lưu giữ xác định rõ theo từng loại dữ liệu |
+| OPEN-06 | Cách đo và ghi nhận mục tiêu phản hồi Change Request trong 14 giờ | BA/nhóm dự án | Quy trình nhóm xác định rõ thời điểm bắt đầu/kết thúc và nơi ghi nhận |
+
+Không đánh dấu các điểm `OPEN-*` là đã xác nhận chỉ vì chúng đã được mô tả trong AC. Khi nhóm đưa ra quyết định, cập nhật tài liệu nguồn và đổi trạng thái tương ứng tại đây.
+
+## 19. Điều kiện đóng Issue #7 / hoàn tất BA Handover
+
+Issue bàn giao chỉ nên được đánh dấu hoàn tất khi các điều kiện sau đã được kiểm tra:
+
+- [ ] Dev/Tester đã rà soát Acceptance Criteria và phản hồi các điểm chưa rõ.
+- [ ] Các luồng nghiệp vụ chính và các nhánh lỗi có điều kiện đầu vào, hành động kích hoạt và kết quả quan sát được.
+- [ ] Contract-test matrix được đối chiếu với API/event contract đã thống nhất.
+- [ ] Failure-injection scenarios có test case hoặc được ghi rõ là chưa thể chạy và lý do.
+- [ ] Recovery Runbook đã được Dev/đội vận hành hoàn thiện và rà soát.
+- [ ] Các điểm `OPEN-*` đã được quyết định hoặc được ghi nhận rõ là blocker không thuộc phạm vi đóng issue.
+- [ ] Các thay đổi liên quan đã được đồng bộ trong Use Cases, State Machine, Saga Workflow, Sequence Diagrams và Acceptance Criteria.
+- [ ] Tester có test case và ghi nhận trạng thái thực thi/bằng chứng; các test chưa chạy không bị ghi nhầm là pass.
+
+Trạng thái đề xuất tại thời điểm soạn tài liệu: **BA handover in progress**. Việc tài liệu có các tiêu chí không tự chứng minh rằng contract đã được chốt, Runbook đã hoàn thành hoặc kiểm thử đã chạy thành công.
