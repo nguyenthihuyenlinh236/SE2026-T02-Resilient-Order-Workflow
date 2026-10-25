@@ -8,13 +8,14 @@ import org.springframework.transaction.annotation.Transactional;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 @Service
 public class SagaOrchestrator {
     private final JdbcTemplate jdbc;
     private final OrderService orderService;
-    private final String simulatedPaymentOutcome;
+    private final CaptureStatus simulatedPaymentOutcome;
 
     public SagaOrchestrator(
             JdbcTemplate jdbc,
@@ -23,10 +24,7 @@ public class SagaOrchestrator {
     ) {
         this.jdbc = jdbc;
         this.orderService = orderService;
-        this.simulatedPaymentOutcome = simulatedPaymentOutcome.toUpperCase();
-        if (!List.of("SUCCEEDED", "FAILED", "UNKNOWN").contains(this.simulatedPaymentOutcome)) {
-            throw new IllegalArgumentException("app.payment.simulated-outcome must be SUCCEEDED, FAILED or UNKNOWN.");
-        }
+        this.simulatedPaymentOutcome = CaptureStatus.fromConfiguration(simulatedPaymentOutcome);
     }
 
     @Transactional
@@ -52,11 +50,11 @@ public class SagaOrchestrator {
             return;
         }
 
-        String paymentStatus = capturePayment(orderId);
-        if ("NOT_STARTED".equals(paymentStatus)) {
+        CaptureStatus paymentStatus = capturePayment(orderId);
+        if (paymentStatus == CaptureStatus.NOT_STARTED) {
             return;
         }
-        if ("UNKNOWN".equals(paymentStatus)) {
+        if (paymentStatus == CaptureStatus.UNKNOWN) {
             jdbc.update(
                     """
                     UPDATE order_sagas
@@ -68,7 +66,7 @@ public class SagaOrchestrator {
             );
             return;
         }
-        if ("FAILED".equals(paymentStatus)) {
+        if (paymentStatus == CaptureStatus.FAILED) {
             if (claim(orderId, "COMPENSATING")) {
                 releaseReservation(orderId);
                 completeFailure(orderId);
@@ -212,18 +210,18 @@ public class SagaOrchestrator {
         return status;
     }
 
-    private String capturePayment(UUID orderId) {
+    private CaptureStatus capturePayment(UUID orderId) {
         List<PaymentRow> existing = jdbc.query(
                 "SELECT id, capture_status FROM payments WHERE order_id = ?",
                 (rs, rowNum) -> new PaymentRow(
-                        rs.getObject("id", UUID.class), rs.getString("capture_status")
+                        rs.getObject("id", UUID.class), CaptureStatus.fromDatabase(rs.getString("capture_status"))
                 ),
                 orderId
         );
         Instant now = databaseNow();
         if (existing.isEmpty()) {
             if (!isBeforeExpiration(orderId)) {
-                return "NOT_STARTED";
+                return CaptureStatus.NOT_STARTED;
             }
             UUID paymentId = UUID.randomUUID();
             jdbc.update(
@@ -233,16 +231,16 @@ public class SagaOrchestrator {
                     VALUES (?, ?, ?, ?, 'NOT_REQUIRED', ?, ?)
                     """,
                     paymentId, orderId, "payment:capture:" + orderId + ":v1",
-                    simulatedPaymentOutcome, Timestamp.from(now), Timestamp.from(now)
+                    simulatedPaymentOutcome.name(), Timestamp.from(now), Timestamp.from(now)
             );
             return simulatedPaymentOutcome;
         }
 
         PaymentRow payment = existing.get(0);
-        if ("UNKNOWN".equals(payment.status()) && !"UNKNOWN".equals(simulatedPaymentOutcome)) {
+        if (payment.status() == CaptureStatus.UNKNOWN && simulatedPaymentOutcome != CaptureStatus.UNKNOWN) {
             jdbc.update(
                     "UPDATE payments SET capture_status = ?, updated_at = ? WHERE id = ? AND capture_status = 'UNKNOWN'",
-                    simulatedPaymentOutcome, Timestamp.from(now), payment.id()
+                    simulatedPaymentOutcome.name(), Timestamp.from(now), payment.id()
             );
             return simulatedPaymentOutcome;
         }
@@ -382,6 +380,33 @@ public class SagaOrchestrator {
     private record ReservationRow(String status) {
     }
 
-    private record PaymentRow(UUID id, String status) {
+    private record PaymentRow(UUID id, CaptureStatus status) {
+    }
+
+    private enum CaptureStatus {
+        SUCCEEDED,
+        FAILED,
+        UNKNOWN,
+        NOT_STARTED;
+
+        private static CaptureStatus fromConfiguration(String value) {
+            return switch (value.toUpperCase(Locale.ROOT)) {
+                case "SUCCEEDED" -> SUCCEEDED;
+                case "FAILED" -> FAILED;
+                case "UNKNOWN" -> UNKNOWN;
+                default -> throw new IllegalArgumentException(
+                        "app.payment.simulated-outcome must be SUCCEEDED, FAILED or UNKNOWN."
+                );
+            };
+        }
+
+        private static CaptureStatus fromDatabase(String value) {
+            return switch (value) {
+                case "SUCCEEDED" -> SUCCEEDED;
+                case "FAILED" -> FAILED;
+                case "UNKNOWN" -> UNKNOWN;
+                default -> throw new IllegalStateException("Unsupported payment capture status: " + value);
+            };
+        }
     }
 }
