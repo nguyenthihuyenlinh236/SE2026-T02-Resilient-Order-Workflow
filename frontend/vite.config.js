@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': 'http://localhost:8080',
+      '/offline-order-queue.js': 'http://localhost:8080',
     },
   },
 })
