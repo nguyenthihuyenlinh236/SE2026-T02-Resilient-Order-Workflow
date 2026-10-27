@@ -468,7 +468,7 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 ### AC-10.1 – Không vượt tồn kho
 
 **Given**
-- Có tối đa 155 người dùng hoạt động đồng thời.
+- Có tối đa 115 người dùng hoạt động đồng thời.
 - Nhiều yêu cầu đặt cùng sản phẩm.
 
 **When**
@@ -534,17 +534,17 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 - Fault injection mặc định tắt ngoài môi trường được cấu hình cho kiểm thử.
 - Sau khi fault injection kết thúc, hệ thống có thể phục hồi các công việc bị gián đoạn.
 
-### AC-11.3 – Lưu giữ dữ liệu 29 ngày
+### AC-11.3 – Lưu giữ dữ liệu 28 ngày
 
 **Given**
 - Order, Saga, kết quả Reservation/Payment, Outbox/Inbox và log kiểm toán thuộc phạm vi lưu giữ đã được xác định.
-- Chính sách lưu giữ đã chỉ rõ mốc bắt đầu tính 29 ngày cho từng loại dữ liệu.
+- Chính sách lưu giữ đã chỉ rõ mốc bắt đầu tính 28 ngày cho từng loại dữ liệu.
 
 **When**
 - Dữ liệu được lưu trong hệ thống và tiến trình dọn dẹp dữ liệu chạy.
 
 **Then**
-- Dữ liệu thuộc phạm vi bắt buộc không bị xóa trước khi hết thời hạn lưu giữ 29 ngày tính từ mốc đã thống nhất.
+- Dữ liệu thuộc phạm vi bắt buộc không bị xóa trước khi hết thời hạn lưu giữ 28 ngày tính từ mốc đã thống nhất.
 - Chính sách nêu rõ dữ liệu nào được xóa, ẩn danh hoặc lưu tiếp sau thời hạn; không suy ra rằng mọi dữ liệu phải xóa đúng tại ngày thứ 29 nếu chính sách chưa quy định.
 - Việc dọn dẹp không xóa dữ liệu cần thiết để điều tra Saga chưa hoàn tất, đối soát Payment hoặc chứng minh kết quả nghiệp vụ.
 
