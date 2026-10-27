@@ -67,7 +67,7 @@ Các chuyển trạng thái Order hợp lệ:
 - `COMPENSATING → FAILED`
 - `EXPIRING → EXPIRED`
 
-Không có chuyển `EXPIRING → COMPENSATION_FAILED` hoặc `COMPENSATION_FAILED → EXPIRING`.
+Order không có trạng thái `COMPENSATION_FAILED`; trạng thái này chỉ thuộc Saga. Khi Saga ở `COMPENSATION_FAILED`, Order giữ `COMPENSATING` ở nhánh thất bại hoặc `EXPIRING` ở nhánh hết hạn.
 
 ### 3.2. Sơ đồ trạng thái Order
 
@@ -456,7 +456,7 @@ Không suy ra trạng thái Order chỉ từ tên trạng thái Saga.
 | F-04 | `FAILED → CONFIRMED` | Đơn thất bại không được xác nhận lại. | D-01; INV-05 |
 | F-05 | `FAILED → COMPENSATING` | Nhánh thất bại đã kết thúc; không mở lại Order để bù trừ. | D-01; D-03 |
 | F-06 | `EXPIRING → CONFIRMED` | Nhánh hết hạn đã thắng; nếu capture thành công được phát hiện thì phải xử lý refund theo D-05. | D-01.2; D-05 |
-| F-07 | `EXPIRING → COMPENSATION_FAILED` | Order ở nhánh hết hạn phải giữ `EXPIRING` khi release/refund lỗi tạm thời vượt ngưỡng; Saga mới là `COMPENSATION_FAILED`. | D-03.2 |
+| F-07 | Chốt `EXPIRED` khi release/refund bắt buộc chưa hoàn tất | Order phải giữ `EXPIRING`; Saga ghi `COMPENSATION_FAILED` hoặc `RECONCILIATION_REQUIRED` và tiếp tục xử lý. | D-03.2; D-05; D-06.2 |
 | F-08 | `COMPENSATING → EXPIRING` | Nhánh thất bại đã claim không được đổi sang nhánh hết hạn. | D-01; D-03.2 |
 | F-09 | `COMPENSATING → CONFIRMED` | Không xác nhận đơn sau khi nhánh thất bại đã claim. | D-01; INV-05 |
 | F-10 | Capture `UNKNOWN → FAILED` do timeout hoặc hết lịch đối soát | Timeout không chứng minh capture thất bại. Chỉ Payment Service được xác minh kết quả thất bại. | D-04; P-06 |
@@ -543,7 +543,7 @@ Mỗi kiểm thử phải ghi lại trạng thái Order, Saga, Payment và Reser
 | SM-07 | Capture `IN_PROGRESS` tại thời điểm hết hạn | Order `PENDING`; `now() >= expireAt`; capture chưa timeout. | TTL Worker được claim `EXPIRING`; không gửi lệnh tiến mới; kết quả capture được đối soát theo nhánh hết hạn. | T-04; INV-06 | UC-06; NFR-07 |
 | SM-08 | Xác nhận và hết hạn xảy ra đồng thời | Order `PENDING`, worker xác nhận và TTL Worker chạy gần `expireAt`. | Chỉ một conditional update thắng; Order không thể vừa `CONFIRMED` vừa `EXPIRING`/`EXPIRED`. | T-01, T-04; INV-01, INV-06 | UC-03, UC-06; NFR-02 |
 | SM-09 | Reservation `UNKNOWN` trong nhánh hết hạn | Order đã claim `EXPIRING`; kết quả reserve chưa rõ. | Saga `RECONCILING`; tra cứu theo khóa reserve trước khi release; chưa chốt `EXPIRED` nếu điều kiện chưa đạt. | V-03, V-04; INV-03 | UC-06, UC-07; NFR-05 |
-| SM-10 | Release/refund lỗi tạm thời vượt 5 lần ở nhánh thất bại | Order `COMPENSATING`; release/refund trả lỗi tạm thời đã xác định. | Order `COMPENSATION_FAILED`; Saga `COMPENSATION_FAILED`; retry nền mỗi 60 giây. | T-06, S-07, S-08; INV-09 | UC-04, UC-08; NFR-04 |
+| SM-10 | Release/refund lỗi tạm thời vượt 5 lần ở nhánh thất bại | Order `COMPENSATING`; release/refund trả lỗi tạm thời đã xác định. | Order giữ `COMPENSATING`; Saga `COMPENSATION_FAILED`; retry nền mỗi 60 giây. | S-07, S-08; INV-09 | UC-04, UC-08; NFR-04 |
 | SM-11 | Release/refund lỗi tạm thời vượt 5 lần ở nhánh hết hạn | Order `EXPIRING`; release/refund lỗi tạm thời đã xác định. | Order vẫn `EXPIRING`; Saga `COMPENSATION_FAILED`; retry nền mỗi 60 giây. | D-03.2; INV-09 | UC-06, UC-08; NFR-04 |
 | SM-12 | Refund timeout | Capture `SUCCEEDED`; refund `IN_PROGRESS`, sau đó timeout. | Refund `UNKNOWN`; Saga `RECONCILING`; không chốt `EXPIRED` khi refund bắt buộc chưa rõ. | R-05; S-09; INV-03, INV-08 | UC-07, UC-11; NFR-05 |
 | SM-13 | Refund vẫn `UNKNOWN` sau lịch đối soát | Refund `UNKNOWN`; đã chạy đủ 30 lần truy vấn. | Saga `RECONCILIATION_REQUIRED`; refund vẫn `UNKNOWN`; không gửi refund với khóa mới. | S-05; INV-03, INV-07 | UC-07; NFR-05 |
@@ -601,7 +601,7 @@ Các tài liệu `10-saga-workflow-and-compensation.md`, `11-sequence-diagrams.m
 ### 14.1. Danh sách kiểm bàn giao
 
 - [ ] Order có đúng 6 trạng thái: `PENDING`, `CONFIRMED`, `COMPENSATING`, `EXPIRING`, `FAILED`, `EXPIRED`.
-- [ ] Chỉ triển khai các chuyển trạng thái Order được liệt kê trong mục 3; không có `EXPIRING → COMPENSATION_FAILED` hoặc `COMPENSATION_FAILED → EXPIRING`.
+- [ ] Chỉ triển khai các chuyển trạng thái Order được liệt kê trong mục 3; `COMPENSATION_FAILED` chỉ được dùng làm trạng thái Saga, không phải trạng thái Order.
 - [ ] Ba nhánh cạnh tranh từ `PENDING` dùng conditional update và kiểm tra số dòng bị tác động.
 - [ ] Điều kiện xác nhận Order được kiểm tra trong cùng câu lệnh cập nhật; Order, Saga và domain event được ghi trong cùng transaction theo đề xuất T-01.
 - [ ] TTL Worker sử dụng đồng hồ DB UTC, `expireAt`, `claimToken`, `claimedAt`, `leaseUntil` và cơ chế tiếp quản worker hết lease.
