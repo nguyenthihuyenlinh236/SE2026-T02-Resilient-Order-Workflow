@@ -569,7 +569,7 @@ Mỗi kiểm thử phải ghi lại trạng thái Order, Saga, Payment và Reser
 | T-02, T-03 | UC-02, UC-03, UC-04 | FR-03, FR-04, FR-07 | BR-02, BR-04 | EC-01, EC-02 | D-01; NFR-02 |
 | T-04 | UC-06 | FR-15 | BR-07, BR-10, BR-13 | EC-04, EC-06, EC-11 | D-01.2, D-01.5, D-06; NFR-02, NFR-07 |
 | T-05 | UC-04 | FR-07, FR-08, FR-12 | BR-04, BR-08 | EC-02, EC-09 | D-03, D-05; NFR-01 |
-| T-06, T-07 | UC-04, UC-08 | FR-12, FR-13 | BR-08, BR-10 | EC-09 | D-03.2; NFR-04, NFR-08 |
+| S-07, S-08 | UC-04, UC-08 | FR-12, FR-13 | BR-08, BR-10 | EC-09 | D-03.2; NFR-04, NFR-08 |
 | T-08 | UC-06, UC-11 | FR-08, FR-12, FR-15 | BR-07, BR-08, BR-13 | EC-11 | D-05, D-06.2; NFR-07 |
 | Saga `RECONCILING`, `RECONCILIATION_REQUIRED` | UC-07 | FR-05, FR-11, FR-14 | BR-07, BR-10 | EC-03, EC-04, EC-05 | D-04; NFR-05; Q-02, Q-03 |
 | Idempotency và phục hồi | UC-08, UC-10 | FR-06, FR-13 | BR-03, BR-08, BR-11 | EC-06, EC-07 | D-02, D-06, D-08; NFR-03, NFR-04 |
