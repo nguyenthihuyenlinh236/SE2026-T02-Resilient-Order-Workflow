@@ -4,7 +4,7 @@
 
 Tài liệu xác định các yêu cầu phi chức năng (Non-Functional Requirements – NFR) cho APP-08 – Resilient Order Workflow. Trọng tâm là Reliability, tính nhất quán của trạng thái Order, khả năng phục hồi Saga, chống xử lý trùng, độ bền dữ liệu và khả năng kiểm chứng khi xảy ra lỗi tích hợp.
 
-Trong tài liệu này, Reliability tập trung vào **tính đúng của xử lý nghiệp vụ và khả năng phục hồi sau lỗi**. Mục tiêu tính sẵn sàng như uptime hoặc MTTR chưa được đề bài quy định; cần làm rõ với giảng viên theo câu hỏi Q-06 tại Mục 7.
+Trong tài liệu này, Reliability tập trung vào **tính đúng của xử lý nghiệp vụ và khả năng phục hồi sau lỗi**.
 
 Phạm vi áp dụng gồm:
 
@@ -16,20 +16,18 @@ Phạm vi áp dụng gồm:
 - TTL Worker / Expiration Scheduler.
 - API tạo đơn, truy vấn trạng thái và các cơ chế kiểm thử lỗi.
 
-Yêu cầu được phân biệt theo nguồn và mức độ xác nhận: (1) ràng buộc cố định từ đề bài APP-08/RE-006; (2) yêu cầu/giả định kỹ thuật do nhóm suy ra để đáp ứng Reliability; (3) ngưỡng mục tiêu đề xuất cần được xác nhận trước khi dùng làm tiêu chí nghiệm thu chính thức. Không trình bày ngưỡng đề xuất như yêu cầu đã được giảng viên phê duyệt.
-
 ## 2. Ràng buộc cố định
 
 | ID | Ràng buộc | Giá trị | Ý nghĩa |
 |---|---|---|---|
-| NFR-C01 | Người dùng hoạt động đồng thời | 115 người dùng | Phải có kịch bản kiểm chứng tính đúng và hiệu năng dưới tải mục tiêu. |
+| NFR-C01 | Người dùng hoạt động đồng thời | 155 người dùng | Phải có kịch bản kiểm chứng tính đúng và hiệu năng dưới tải mục tiêu. |
 | NFR-C02 | Thời gian lưu dữ liệu | 28 ngày | Phải xác định phạm vi dữ liệu và mốc bắt đầu tính thời hạn lưu giữ. |
 | NFR-C03 | Thời gian phản hồi Change Request | 14 giờ | Phải có cách đánh giá ảnh hưởng và theo dõi thời gian phản hồi. |
 | NFR-C04 | Thuộc tính chất lượng trọng tâm | Reliability | Khi một thành phần gặp lỗi, hệ thống tiếp tục an toàn, khôi phục hoặc bù trừ. |
 | NFR-C05 | Ưu tiên rủi ro | Rủi ro tích hợp cao hơn rủi ro giao diện | Kiểm thử tích hợp được thực hiện và xử lý trước kiểm thử giao diện. |
 | NFR-C06 | Người dùng trọng tâm | Người dùng lần đầu, chưa quen công nghệ | Trạng thái và thông báo dành cho khách hàng phải dễ hiểu, không làm lộ trạng thái kỹ thuật nội bộ. |
 
-**Lưu ý về tải:** 115 người dùng hoạt động đồng thời không đồng nghĩa với 115 giao dịch mỗi giây. Thông lượng thực tế phụ thuộc thời gian suy nghĩ của người dùng, số yêu cầu trong mỗi phiên và thời gian phản hồi. Kịch bản tải phải nêu rõ các giả định này.
+**Lưu ý về tải:** 155 người dùng hoạt động đồng thời không đồng nghĩa với 155 giao dịch mỗi giây. Thông lượng thực tế phụ thuộc thời gian suy nghĩ của người dùng, số yêu cầu trong mỗi phiên và thời gian phản hồi. Kịch bản tải phải nêu rõ các giả định này.
 
 ## 3. Danh sách yêu cầu phi chức năng
 
@@ -72,12 +70,12 @@ Mọi so sánh thời gian dùng một nguồn duy nhất là đồng hồ cơ s
 1. Chạy ít nhất 1.000 lượt kiểm thử cạnh tranh; **mỗi lượt sử dụng một Order mới**. Trong mỗi lượt, ba nhánh xác nhận, hết hạn và thất bại cùng tranh chấp chuyển trạng thái từ `PENDING`; chỉ một conditional update thành công.
 2. Trong dữ liệu kiểm thử, không có Order vừa `CONFIRMED` vừa `EXPIRED`.
 3. Không có chuyển trạng thái từ `EXPIRING` hoặc `EXPIRED` trở lại `CONFIRMED`.
-4. Nhánh xác nhận chỉ thành công khi reservation đã xác minh `RESERVED`, payment đã xác minh `SUCCEEDED` (không phải `UNKNOWN`), Order còn `PENDING` và `now() < expireAt` theo DB clock trong cùng câu lệnh cập nhật (D-01.1). Trường hợp payment hoàn tất trước `expireAt` nhưng chỉ được xác minh sau `expireAt` xử lý theo D-01.4 (chờ Q-01).
+4. Nhánh xác nhận chỉ thành công khi reservation đã xác minh `RESERVED`, payment đã xác minh `SUCCEEDED` (không phải `UNKNOWN`), Order còn `PENDING` và `now() < expireAt` theo DB clock trong cùng câu lệnh cập nhật (D-01.1). Trường hợp payment hoàn tất trước `expireAt` nhưng chỉ được xác minh sau `expireAt` xử lý theo D-01.4.
 5. Nhánh hết hạn chỉ claim khi `currentTime >= expireAt`, payment không ở `UNKNOWN`, và conditional update từ `PENDING` sang `EXPIRING` thành công.
 6. Nhánh thất bại chỉ claim khi điều kiện thất bại nghiệp vụ đã được xác minh và conditional update từ `PENDING` sang `COMPENSATING` thành công.
 7. Kiểm tra log và dữ liệu lưu trữ để xác nhận mọi quyết định so sánh thời gian sử dụng DB clock UTC.
 
-**Truy vết:** FR-09, FR-12, FR-15; BR-01, BR-07, BR-12, BR-13; EC-02, EC-05, EC-06, EC-11; D-01, D-05, D-06; A-15, Q-01.
+**Truy vết:** FR-09, FR-12, FR-15; BR-01, BR-07, BR-12, BR-13; EC-02, EC-05, EC-06, EC-11; D-01, D-05, D-06; A-15.
 
 ### NFR-03 – Idempotency và chống xử lý trùng
 
@@ -142,12 +140,12 @@ Khi một lệnh thanh toán hoặc reservation timeout, hệ thống phải ph�
 1. Khi payment trả `UNKNOWN`, hệ thống không tự giải phóng reservation hoặc hoàn tiền chỉ dựa trên timeout.
 2. Payment được truy vấn lại bằng định danh giao dịch và khóa idempotency ổn định.
 3. Lịch đối soát theo D-04 được cấu hình và kiểm thử: mỗi 5 giây trong 60 giây đầu, sau đó mỗi 30 giây đến mốc 10 phút, tổng tối đa 30 lần truy vấn trong 10 phút.
-4. Nếu vẫn không xác định được kết quả sau giới hạn đối soát, hệ thống chuyển sang trạng thái cần đối soát thủ công, lưu nguyên nhân và phát cảnh báo. Cách can thiệp thủ công: xem Q-02 trong `06-design-decisions.md`.
+4. Nếu vẫn không xác định được kết quả sau giới hạn đối soát, hệ thống chuyển sang trạng thái cần đối soát thủ công, lưu nguyên nhân và phát cảnh báo.
 5. Khi Inventory timeout, hệ thống truy vấn reservation bằng định danh ổn định trước khi quyết định gửi lại lệnh hoặc bù trừ.
 6. Khi trạng thái payment được xác định, Saga tiếp tục theo kết quả thực tế; không mặc định thất bại chỉ vì hết thời gian chờ.
 7. `expireAt` không tự được gia hạn do payment chưa rõ kết quả.
 
-**Truy vết:** FR-05, FR-06, FR-07, FR-08, FR-12, FR-13, FR-14, FR-15; BR-07, BR-08, BR-10, BR-13; EC-03, EC-04, EC-05, EC-09, EC-11; D-03, D-04, D-05, D-06; Q-02.
+**Truy vết:** FR-05, FR-06, FR-07, FR-08, FR-12, FR-13, FR-14, FR-15; BR-07, BR-08, BR-10, BR-13; EC-03, EC-04, EC-05, EC-09, EC-11; D-03, D-04, D-05, D-06.
 
 ### NFR-06 – Độ bền dữ liệu và Outbox
 
@@ -210,25 +208,25 @@ Hệ thống phải lưu thông tin đủ để truy vết Order/Saga, xác đ�
 
 **Truy vết:** FR-12, FR-13, FR-14, FR-15; BR-10, BR-12, BR-13; EC-03, EC-06, EC-08, EC-09, EC-11; D-03, D-04, D-05, D-06, D-08.
 
-### NFR-09a – Tính đúng dưới tải 115 người dùng đồng thời
+### NFR-09a – Tính đúng dưới tải 155 người dùng đồng thời
 
 **Mức ưu tiên:** Must
 
 **Yêu cầu**
 
-Dưới tải mục tiêu 115 người dùng đồng thời, hệ thống phải duy trì các bất biến nghiệp vụ ngay cả khi có đặt hàng đồng thời trên sản phẩm tồn kho thấp và có chèn lỗi theo D-08.
+Dưới tải mục tiêu 155 người dùng đồng thời, hệ thống phải duy trì các bất biến nghiệp vụ ngay cả khi có đặt hàng đồng thời trên sản phẩm tồn kho thấp và có chèn lỗi theo D-08.
 
 **Tiêu chí kiểm chứng**
 
 1. Trong toàn bộ kịch bản kiểm thử, số lần giữ hàng vượt tồn khả dụng bằng 0.
 2. Số Order tạo ra nhiều giao dịch thu tiền do retry hoặc message duplicate bằng 0.
 3. Số Order vừa `CONFIRMED` vừa `EXPIRED` bằng 0.
-4. Reservation mồ côi là reservation `RESERVED` mà Order tương ứng đã `FAILED` hoặc `EXPIRED`, hoặc không có Order tương ứng. Sau khi kết thúc chèn lỗi và quá thời gian retry nền tối đa (đề xuất 5 phút), số reservation mồ côi bằng 0. Reservation của Order đang `EXPIRING`, `COMPENSATING` hoặc chờ đối soát `UNKNOWN` (D-04.2, Q-03) không tính là mồ côi.
+4. Reservation mồ côi là reservation `RESERVED` mà Order tương ứng đã `FAILED` hoặc `EXPIRED`, hoặc không có Order tương ứng. Sau khi kết thúc chèn lỗi và quá thời gian retry nền tối đa (đề xuất 5 phút), số reservation mồ côi bằng 0. Reservation của Order đang `EXPIRING`, `COMPENSATING` hoặc chờ đối soát `UNKNOWN` (D-04.2) không tính là mồ côi.
 5. Thực hiện kịch bản có nhiều yêu cầu đặt mua đồng thời cùng một sản phẩm với tồn khả dụng thấp; kiểm tra tổng số lượng được giữ không vượt số lượng khả dụng.
 6. Chèn các lỗi hỗ trợ trong D-08 và kiểm tra lại cả bốn bất biến trên.
 7. Lưu số người dùng đồng thời, thời gian chạy, dữ liệu tồn kho ban đầu, số yêu cầu, lỗi được chèn và kết quả truy vấn kiểm chứng.
 
-**Truy vết:** FR-03, FR-04, FR-06, FR-07, FR-08, FR-09, FR-12, FR-13, FR-14, FR-15; BR-01, BR-02, BR-03, BR-05, BR-08, BR-13; EC-01, EC-02, EC-04, EC-05, EC-06, EC-07, EC-09, EC-11; D-01, D-02, D-03, D-05, D-06, D-08; D-04.2; Q-03.
+**Truy vết:** FR-03, FR-04, FR-06, FR-07, FR-08, FR-09, FR-12, FR-13, FR-14, FR-15; BR-01, BR-02, BR-03, BR-05, BR-08, BR-13; EC-01, EC-02, EC-04, EC-05, EC-06, EC-07, EC-09, EC-11; D-01, D-02, D-03, D-05, D-06, D-08; D-04.2.
 
 ### NFR-09b – Hiệu năng dưới tải
 
@@ -236,7 +234,7 @@ Dưới tải mục tiêu 115 người dùng đồng thời, hệ thống phải
 
 **Yêu cầu**
 
-Với 115 người dùng/tác vụ đồng thời, thời gian phản hồi p95 mục tiêu của các API tạo đơn và tra cứu đơn không vượt quá 5,0 giây. Đây là tham số cố định của đề bài. Các ngưỡng bổ sung như tỷ lệ lỗi 5xx và độ trễ theo từng endpoint là ngưỡng đề xuất của nhóm, cần được xác nhận riêng.
+Với 155 người dùng/tác vụ đồng thời, thời gian phản hồi p95 mục tiêu của các API tạo đơn và tra cứu đơn không vượt quá 5,0 giây. Đây là tham số cố định của đề bài. Các ngưỡng bổ sung như tỷ lệ lỗi 5xx và độ trễ theo từng endpoint là ngưỡng đề xuất của nhóm, cần được xác nhận riêng.
 
 **Tiêu chí kiểm chứng**
 
@@ -248,7 +246,7 @@ Với 115 người dùng/tác vụ đồng thời, thời gian phản hồi p95 
    - `POST /api/v1/orders`: p95 không quá 5.000 ms (5,0 giây).
    - `GET /api/v1/orders/{orderId}`: p95 không quá 5.000 ms (5,0 giây).
    - Tỷ lệ phản hồi 5xx không quá 1%.
-6. Điều kiện đo đề xuất: 115 người dùng/tác vụ đồng thời, think time 5–10 giây; thông lượng tham khảo khoảng 11–23 yêu cầu/giây. Thông lượng thực tế phải được đo và báo cáo, không suy ra chỉ từ số người dùng.
+6. Điều kiện đo đề xuất: 155 người dùng/tác vụ đồng thời, think time 5–10 giây; thông lượng tham khảo khoảng 11–23 yêu cầu/giây. Thông lượng thực tế phải được đo và báo cáo, không suy ra chỉ từ số người dùng.
 
 **Truy vết:** FR-01, FR-09, FR-10, FR-11, FR-14, FR-15; BR-09, BR-10, BR-12, BR-13; EC-03, EC-04, EC-06, EC-08, EC-10, EC-11; D-03, D-06, D-07, D-08.
 
@@ -258,21 +256,21 @@ Với 115 người dùng/tác vụ đồng thời, thời gian phản hồi p95 
 
 **Yêu cầu**
 
-Dữ liệu phục vụ xử lý, truy vết, chống trùng và đối soát phải được lưu giữ theo ràng buộc 28 ngày. Mốc tính thời hạn lưu giữ đề xuất là thời điểm Order đạt trạng thái cuối, theo câu hỏi mở Q-04.
+Dữ liệu phục vụ xử lý, truy vết, chống trùng và đối soát phải được lưu giữ theo ràng buộc 28 ngày. Mốc tính thời hạn lưu giữ đề xuất là thời điểm Order đạt trạng thái cuối.
 
 Order/Saga chưa kết thúc hoặc đang compensation không bị xóa chỉ vì đã quá 28 ngày kể từ khi tạo đơn. Khóa idempotency, bản ghi inbox và outbox phải được giữ ít nhất 28 ngày và không ngắn hơn khoảng retry/phát lại tối đa được cấu hình, nhằm tránh xử lý lại duplicate sau khi bản ghi chống trùng đã bị xóa.
 
 **Tiêu chí kiểm chứng**
 
 1. Xác định rõ các loại dữ liệu áp dụng: Order, Saga, payment reference, reservation reference, Outbox, inbox, idempotency key và log kiểm toán.
-2. Theo đề xuất Q-04, xác minh mốc bắt đầu tính 28 ngày là thời điểm Order đạt trạng thái cuối; nhóm cần xác nhận trước khi nghiệm thu.
+2. Xác minh mốc bắt đầu tính 28 ngày là thời điểm Order đạt trạng thái cuối; nhóm cần xác nhận trước khi nghiệm thu.
 3. Order/Saga chưa kết thúc hoặc đang compensation không bị xóa trong quá trình xử lý, kể cả khi thời gian từ `createdAt` đã vượt 28 ngày.
 4. Khóa idempotency, inbox và outbox có thời hạn lưu giữ ít nhất 28 ngày và không ngắn hơn khoảng retry/phát lại tối đa được cấu hình.
 5. Kiểm thử gửi lại sự kiện trong thời hạn chống trùng và xác nhận consumer không tạo tác dụng phụ lặp.
 6. **Đề xuất phạm vi dữ liệu thanh toán:** hệ thống chỉ lưu tham chiếu thanh toán giả lập (`paymentId`, trạng thái, số tiền, khóa idempotency); không lưu số thẻ, mã xác thực hay dữ liệu thanh toán thật. Dev/BA xác nhận phạm vi lưu dữ liệu này.
 7. Có bằng chứng về cấu hình lưu giữ, truy vấn dữ liệu và kết quả kiểm tra vòng đời dữ liệu.
 
-**Truy vết:** FR-06, FR-08, FR-10, FR-12, FR-13, FR-14, FR-15; BR-08, BR-10, BR-11, BR-12, BR-13; EC-06, EC-07, EC-08, EC-09, EC-11; D-02, D-03, D-04, D-05, D-06; Q-04.
+**Truy vết:** FR-06, FR-08, FR-10, FR-12, FR-13, FR-14, FR-15; BR-08, BR-10, BR-11, BR-12, BR-13; EC-06, EC-07, EC-08, EC-09, EC-11; D-02, D-03, D-04, D-05, D-06.
 
 ### NFR-11 – Khả năng bảo trì và phản hồi thay đổi
 
@@ -288,10 +286,9 @@ Tài liệu và quy trình phân tích phải giúp nhóm đánh giá ảnh hư�
 2. Các giả định chưa được xác nhận được ghi riêng, có người chịu trách nhiệm xác nhận và không được trình bày như quyết định đã chốt.
 3. Với một Change Request mẫu, nhóm lập được danh sách các FR, BR, EC, UC, AC, service và sơ đồ chịu ảnh hưởng.
 4. Ghi lại thời điểm nhận yêu cầu, thời điểm hoàn tất đánh giá ảnh hưởng và kết quả đánh giá.
-5. Nhóm thực hiện bài tập Change Request mẫu và báo cáo thời gian thực tế; ý nghĩa chính xác của “phản hồi trong 14 giờ” được làm rõ tại Q-05.
-6. Khi có thay đổi trạng thái, API hoặc event contract, ma trận truy vết chỉ ra được các tài liệu và kiểm thử cần xem xét.
+5. Khi có thay đổi trạng thái, API hoặc event contract, ma trận truy vết chỉ ra được các tài liệu và kiểm thử cần xem xét.
 
-**Truy vết:** FR-01 đến FR-15; BR-01 đến BR-13; EC-01 đến EC-11; D-01 đến D-08; Q-05.
+**Truy vết:** FR-01 đến FR-15; BR-01 đến BR-13; EC-01 đến EC-11; D-01 đến D-08.
 
 ### NFR-12 – Dễ sử dụng cho người dùng lần đầu
 
@@ -353,7 +350,7 @@ Các tham số cần cấu hình hoặc điều khiển gồm TTL, chu kỳ qué
 
 ## 4. Bảng ngưỡng đề xuất
 
-Các giá trị trong bảng dưới đây là **ngưỡng đề xuất của nhóm**, không phải ràng buộc đã được đề bài quy định. Dev đánh giá tính khả thi và cách đo; BA xác nhận tính phù hợp với yêu cầu; Tester kiểm chứng sau khi tiêu chí được chốt.
+Các giá trị trong bảng dưới đây là **ngưỡng đề xuất của nhóm**, không phải ràng buộc đã được đề bài quy định.
 
 | NFR | Chỉ số | Ngưỡng đề xuất | Điều kiện hoặc ngoại lệ |
 |---|---|---|---|
@@ -366,10 +363,10 @@ Các giá trị trong bảng dưới đây là **ngưỡng đề xuất của nh
 | NFR-06 | Độ trễ phát sự kiện | p95 ≤ 2 giây | Không có lỗi, tải bình thường. |
 | NFR-07 | Thời gian claim Order quá hạn | ≤ 10 giây | Luồng bình thường, payment không `UNKNOWN`; không tính worker đang giữ claim bị crash. |
 | NFR-09a | Thời gian chờ để coi hệ thống đã ổn định khi đếm reservation mồ côi | 5 phút sau khi kết thúc chèn lỗi | Ngưỡng đề xuất cho thời gian retry nền tối đa. |
-| NFR-09b | `POST /api/v1/orders` | p95 ≤ 5.000 ms (5,0 giây) | 115 người dùng/tác vụ đồng thời; think time 5–10 giây. |
-| NFR-09b | `GET /api/v1/orders/{orderId}` | p95 ≤ 5.000 ms (5,0 giây) | 115 người dùng/tác vụ đồng thời; think time 5–10 giây. |
+| NFR-09b | `POST /api/v1/orders` | p95 ≤ 5.000 ms (5,0 giây) | 155 người dùng/tác vụ đồng thời; think time 5–10 giây. |
+| NFR-09b | `GET /api/v1/orders/{orderId}` | p95 ≤ 5.000 ms (5,0 giây) | 155 người dùng/tác vụ đồng thời; think time 5–10 giây. |
 | NFR-09b | Tỷ lệ phản hồi 5xx | ≤ 1% | Đo trên tổng số phản hồi trong cùng kịch bản tải đã công bố. |
-| NFR-09b | Tải tham khảo | Khoảng 11–23 yêu cầu/giây | Ước lượng từ 115 người dùng và think time 5–10 giây; thông lượng thực tế được đo và báo cáo. |
+| NFR-09b | Tải tham khảo | Khoảng 11–23 yêu cầu/giây | Ước lượng từ 155 người dùng và think time 5–10 giây; thông lượng thực tế được đo và báo cáo. |
 | NFR-12 | Số người dùng thử | ≥ 5 người dùng lần đầu | Hoặc đánh giá theo kịch bản. |
 
 ## 5. Ma trận ưu tiên
@@ -403,7 +400,7 @@ Các giá trị trong bảng dưới đây là **ngưỡng đề xuất của nh
 | Outbox | Crash sau publish trước khi đánh dấu đã phát | Bản ghi Outbox, lịch phát lại, kết quả consumer |
 | TTL | Hết hạn, hai worker tranh chấp, payment UNKNOWN | `expireAt`, claim, lease, chuyển trạng thái, reservation/payment result |
 | Compensation | Release/refund timeout hoặc thất bại | Lịch sử retry, kết quả xác minh, trạng thái cuối và cảnh báo |
-| Tính đúng dưới tải | 115 người dùng, tồn kho thấp, đặt đồng thời và chèn lỗi | Tồn kho, reservation, giao dịch payment, trạng thái Order và kết quả kiểm tra bất biến |
+| Tính đúng dưới tải | 155 người dùng, tồn kho thấp, đặt đồng thời và chèn lỗi | Tồn kho, reservation, giao dịch payment, trạng thái Order và kết quả kiểm tra bất biến |
 | Hiệu năng | Tải bình thường và một service bị chậm | Cấu hình môi trường, latency p95, tỷ lệ lỗi, throughput, độ trễ Saga/Outbox |
 | Lưu giữ dữ liệu | Truy vấn dữ liệu và chống trùng trong thời hạn lưu giữ | Cấu hình retention, mốc thời gian, kết quả truy vấn và kiểm thử duplicate |
 | Dễ sử dụng | Người dùng lần đầu đọc trạng thái và thông báo | Kịch bản đánh giá, lỗi hiểu sai và kết quả đánh giá |
@@ -411,66 +408,3 @@ Các giá trị trong bảng dưới đây là **ngưỡng đề xuất của nh
 | Change Request | Thay đổi một quy tắc nghiệp vụ mẫu | Thời gian tiếp nhận/đánh giá, ma trận ảnh hưởng và tài liệu/kiểm thử liên quan |
 
 **Thứ tự kiểm thử theo NFR-C05:** Kiểm thử tích hợp giữa các service, idempotency, Outbox, TTL và compensation phải được chạy và xử lý trước kiểm thử giao diện. Việc kiểm thử giao diện không thay thế bằng chứng về tính đúng của các luồng tích hợp.
-
-## 7. Điểm cần thống nhất trước nghiệm thu
-
-1. **Các ngưỡng đề xuất:** xác nhận hoặc điều chỉnh các ngưỡng tại Mục 4, gồm thời gian xử lý TTL, thời gian phục hồi, độ trễ Outbox, latency API, tỷ lệ lỗi, số lượt kiểm thử cạnh tranh, số lần gửi lại và thời gian chờ xác định reservation mồ côi.
-2. **Phạm vi lưu giữ – Q-04:** xác nhận các loại dữ liệu thuộc thời hạn 28 ngày và mốc tính từ khi Order đạt trạng thái cuối; xác nhận cách xử lý Order/Saga chưa kết thúc và thời gian lưu khóa chống trùng.
-3. **Retry và đối soát:** Dev xác nhận tính khả thi của retry/backoff theo D-03 và lịch đối soát theo D-04; BA rà soát quy tắc nghiệp vụ; Tester kiểm chứng các giá trị sau khi chốt.
-4. **Nguồn thời gian:** xác nhận dùng DB clock UTC theo D-01, A-15 và Q-01, bao gồm cách xử lý trường hợp payment hoàn tất trước `expireAt` nhưng chỉ được xác minh sau `expireAt`.
-5. **Trạng thái hiển thị:** xác nhận bảng ánh xạ thông điệp khách hàng và việc API có trả trường `displayMessage` bên cạnh `status` hay không; tiêu chí không tuyên bố thành công hoặc thất bại khi payment `UNKNOWN` vẫn là Must.
-6. **Kiểm thử tải 115 người dùng:** thống nhất môi trường, công cụ, think time, thời lượng chạy, cách tính lỗi và dữ liệu bằng chứng.
-7. **Ý nghĩa của 14 giờ – Q-05:** hỏi giảng viên xem “phản hồi Change Request trong 14 giờ” là hoàn tất đánh giá ảnh hưởng hay hoàn tất thực hiện thay đổi.
-8. **Tính sẵn sàng – Q-06:** hỏi giảng viên xem có yêu cầu mục tiêu uptime hoặc MTTR hay không; hiện tại Reliability trong tài liệu này tập trung vào tính đúng và khả năng phục hồi, chưa có mục tiêu uptime/MTTR được quy định.
-9. **Can thiệp thủ công – Q-02:** xác nhận người chịu trách nhiệm, quy trình xử lý và cách ghi nhận kết quả khi payment vẫn chưa xác định sau giới hạn đối soát.
-10. **Reservation mồ côi – Q-03:** xác nhận cách phân loại reservation chờ đối soát `UNKNOWN` và ngưỡng thời gian retry nền dùng để xác định hệ thống đã ổn định.
-
-## 8. Phân loại nguồn, ưu tiên và khả năng kiểm chứng
-
-### 8.1. Quy ước phân loại nguồn
-
-- **Ràng buộc đề bài:** dữ kiện cố định của APP-08/RE-006. Chỉ thay đổi khi có yêu cầu sửa đề bài được xác nhận.
-- **Yêu cầu kỹ thuật suy ra:** yêu cầu do nhóm xác định để bảo đảm Reliability, nhất quán, idempotency và phục hồi. Cần được rà soát theo kiến trúc/contract; không được mô tả là trích dẫn nguyên văn từ giảng viên.
-- **Giả định hoặc ngưỡng đề xuất:** con số, phương pháp đo hoặc hành vi chưa được quy định trong đề bài. Phải có trạng thái chờ xác nhận và không dùng để kết luận nghiệm thu chính thức trước khi được chốt.
-
-Nguồn hiện có cho các ràng buộc cố định là bộ dữ kiện đề bài APP-08/RE-006 đã giao cho dự án. Tài liệu này không khẳng định có email, biên bản hoặc phê duyệt riêng từ giảng viên nếu chưa được cung cấp trong repository.
-
-### 8.2. Ma trận phân loại NFR
-
-| ID/nhóm | Phân loại nguồn | Nguồn/cơ sở | Ưu tiên | Trạng thái xác nhận |
-|---|---|---|---|---|
-| NFR-C01 / NFR-09a | Ràng buộc đề bài về 115 người dùng; phương pháp tải và tiêu chí bất biến là yêu cầu kỹ thuật suy ra | Bộ dữ kiện APP-08/RE-006; kiểm thử tích hợp là ưu tiên do rủi ro tích hợp cao | Must cho tính đúng; hiệu năng đo riêng tại NFR-09b | Số người dùng cố định; kịch bản đo cần công bố giả định |
-| NFR-C02 / NFR-10 | Ràng buộc đề bài về thời hạn 28 ngày; phạm vi dữ liệu và mốc bắt đầu là giả định cần chốt | Bộ dữ kiện APP-08/RE-006; Q-04 | Must | Thời hạn cố định; phạm vi và mốc tính còn mở |
-| NFR-C03 / NFR-11 | Ràng buộc đề bài về 14 giờ; định nghĩa điểm bắt đầu/kết thúc là giả định cần chốt | Bộ dữ kiện APP-08/RE-006; Q-05 | Must | Thời hạn cố định; ý nghĩa “phản hồi” còn mở |
-| NFR-C04 / NFR-01 | Thuộc tính chất lượng được nêu trong đề bài; các tiêu chí cụ thể là yêu cầu kỹ thuật suy ra | Reliability: xử lý an toàn và phục hồi khi thành phần lỗi | Must | Thuộc tính cố định; ngưỡng thời gian cụ thể là đề xuất |
-| NFR-C05 | Ràng buộc đề bài | Rủi ro tích hợp cao hơn rủi ro giao diện | Must đối với thứ tự ưu tiên kiểm thử tích hợp | Cố định |
-| NFR-C06 / NFR-12 | Đối tượng người dùng là ràng buộc đề bài; các tiêu chí usability và số người dùng thử là đề xuất | Người dùng lần đầu, chưa quen công nghệ | Should; tiêu chí không thông báo sai khi payment UNKNOWN là Must | Đối tượng cố định; phương pháp đánh giá cần chốt |
-| NFR-02 | Yêu cầu kỹ thuật suy ra | Bất biến trạng thái Order/Saga, thời gian DB UTC, phân xử cạnh tranh | Must | Cần kiểm chứng bằng test cạnh tranh |
-| NFR-03 | Yêu cầu kỹ thuật suy ra | Idempotency và ngăn tác dụng phụ lặp | Must | Cần kiểm chứng bằng test gửi lặp và payload xung đột |
-| NFR-04 | Yêu cầu kỹ thuật suy ra; RPO/thời gian phục hồi là ngưỡng đề xuất | Phục hồi sau crash/restart | Must về khả năng phục hồi; ngưỡng định lượng chờ xác nhận | Chưa có bằng chứng thực thi |
-| NFR-05 | Yêu cầu kỹ thuật suy ra | Payment/Reservation UNKNOWN và reconciliation | Must | Lịch đối soát cần được chốt theo quyết định liên quan |
-| NFR-06 | Yêu cầu kỹ thuật suy ra; p95 Outbox là ngưỡng đề xuất | Atomic Outbox và consumer deduplication | Must về tính bền vững; ngưỡng p95 chờ xác nhận | Chưa có bằng chứng đo |
-| NFR-07 | Yêu cầu kỹ thuật suy ra; TTL/scan/lease là cấu hình dự án | Expiration và compensation an toàn | Must | Cấu hình hiện là đề xuất được tham chiếu trong Design Decisions |
-| NFR-08 | Yêu cầu kỹ thuật suy ra | Quan sát, truy vết và audit cho lỗi tích hợp | Must | Cần xác nhận trường log/metric và kiểm thử |
-| NFR-09b | Ngưỡng hiệu năng đề xuất | p95 API ≤ 5,0 giây là tham số cố định; tỷ lệ 5xx và throughput là chỉ số bổ sung | Must cho p95; các chỉ số bổ sung chờ xác nhận | |
-| NFR-13 | Giả định/đề xuất của nhóm | Cấu hình kiểm thử, fault injection, đồng hồ giả và reset dữ liệu | Must cho khả năng kiểm thử lặp lại | Cần Dev xác nhận cách triển khai và Tester xác minh |
-
-### 8.3. Cách đo và bằng chứng tối thiểu
-
-| Chỉ số/tiêu chí | Cách kiểm chứng | Bằng chứng phải lưu | Điều kiện kết luận |
-|---|---|---|---|
-| Bất biến Reliability và trạng thái | Chèn lỗi tại các điểm tích hợp; kiểm tra Order, Saga, Payment, Reservation | Log có correlation ID, trạng thái trước/sau, kết quả truy vấn và test report | Không có trạng thái mâu thuẫn hoặc side effect lặp; ngoại lệ UNKNOWN được theo dõi |
-| Tính đúng dưới 115 người dùng đồng thời | Chạy kịch bản tải đã công bố, gồm tồn kho thấp và các request cạnh tranh | Công cụ/cấu hình, thời lượng, think time, throughput thực đo, lỗi, dữ liệu trước/sau | Không vi phạm bất biến; kết quả hiệu năng báo riêng với kết quả tính đúng |
-| API p95 và tỷ lệ 5xx | Đo POST /api/v1/orders và GET /api/v1/orders/{orderId} trên cùng cửa sổ đo | Phân vị latency, số request, số lỗi, môi trường và cấu hình tải | p95 từng API không quá 5.000 ms; tỷ lệ 5xx ≤ 1% chỉ là ngưỡng đề xuất cho đến khi xác nhận |
-| Phục hồi sau restart/crash | Khởi động lại service/worker ở điểm fault injection đã định nghĩa | Thời điểm lỗi, thời điểm tiếp tục xử lý, trạng thái bền vững và log | Không mất dữ liệu đã commit trong phạm vi kiểm thử; thời gian phục hồi chỉ được đánh giá theo ngưỡng đã chốt |
-| Retention 28 ngày | Kiểm tra chính sách và mô phỏng thời gian/fixture dữ liệu theo từng loại bản ghi | Danh mục dữ liệu, mốc bắt đầu, cấu hình retention và kết quả truy vấn | Không xóa sớm dữ liệu bắt buộc; không xóa Saga chưa kết thúc; mốc tính phải được xác nhận |
-| Change Request 14 giờ | Thực hiện bài tập thay đổi có timestamp bắt đầu/kết thúc rõ ràng | Yêu cầu thay đổi, thời điểm tiếp nhận, đánh giá tác động và phản hồi | Chỉ kết luận sau khi định nghĩa “phản hồi” được xác nhận |
-| Usability cho người dùng lần đầu | Thử theo kịch bản và hỏi người dùng diễn giải trạng thái | Kịch bản, lỗi hiểu sai, phản hồi và kết quả | Không thông báo payment UNKNOWN như thành công/thất bại; ngưỡng số người thử là đề xuất |
-
-### 8.4. Quy tắc chốt Must/Should
-
-1. **Must** dùng cho ràng buộc cố định của đề bài và các bất biến cần thiết để đáp ứng Reliability, tránh thanh toán/giữ hàng trùng hoặc chuyển trạng thái mâu thuẫn.
-2. **Should** dùng cho mục tiêu cải thiện chất lượng chưa được đề bài quy định, như ngưỡng latency và trải nghiệm sử dụng, trừ khi có quyết định chính thức nâng mức ưu tiên.
-3. Một NFR có thể chứa cả yêu cầu Must và ngưỡng định lượng đề xuất. Mức Must của yêu cầu nền không tự động biến ngưỡng đề xuất thành cam kết nghiệm thu.
-4. Không đánh dấu NFR đã đạt chỉ vì có tiêu chí đo; cần có kết quả kiểm thử/đo thực tế kèm bằng chứng.
-5. Các điểm Q-04, Q-05, Q-06 và các ngưỡng ở Mục 4 phải được giữ trạng thái mở cho đến khi có quyết định được ghi nhận. Sau khi chốt, cập nhật tài liệu nguồn, Acceptance Criteria và test plan cùng một thay đổi có truy vết.
