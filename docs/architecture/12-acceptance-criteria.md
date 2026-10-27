@@ -503,6 +503,20 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 **Then**
 - Chỉ một nhánh nhận quyền chuyển trạng thái từ `PENDING`.
 - Order không thể vừa `CONFIRMED` vừa `EXPIRED`.
+
+### AC-10.4 – Mục tiêu p95 dưới tải
+
+**Given**
+- Môi trường kiểm thử được cấu hình với 115 người dùng/tác vụ đồng thời.
+- Script tải chạy đủ thời lượng và ghi nhận thời gian phản hồi của API.
+
+**When**
+- Hệ thống xử lý các yêu cầu tạo đơn `POST /api/v1/orders` và tra cứu đơn `GET /api/v1/orders/{orderId}`.
+
+**Then**
+- p95 của từng endpoint không vượt quá 5.000 ms (5,0 giây).
+- Báo cáo ghi rõ số người dùng đồng thời, thời lượng, số mẫu đo, p95 từng endpoint và tỷ lệ phản hồi 5xx.
+- Không kết luận đạt mục tiêu tải nếu chưa chạy đủ 115 người dùng/tác vụ đồng thời trong thời lượng kiểm thử đã quy định.
 - Order đã ở `FAILED` hoặc `EXPIRED` không được chuyển lại `CONFIRMED`.
 
 ## 13. AC-11 – Khả năng cấu hình và kiểm thử
