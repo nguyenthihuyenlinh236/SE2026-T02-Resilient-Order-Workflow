@@ -452,6 +452,7 @@ FR-11, FR-12, FR-13, FR-14 · BR-08, BR-10, BR-11, BR-12 · EC-03 đến EC-11 �
 | A-14 | Có định danh khách hàng/client để dùng `UNIQUE(customerId, idempotencyKey)`; nếu không thì dùng `UNIQUE(idempotencyKey)` | Chờ xác nhận |
 | A-15 | Dùng một nguồn thời gian duy nhất (đồng hồ DB, UTC) trong conditional update; TTL, backoff, lease cấu hình được cho test | Chờ xác nhận |
 | A-16 | Worker gia hạn được lease khi đang xử lý và quét được Order `EXPIRING` có lease hết hạn | Chờ xác nhận |
+| A-17 | Refund capture thành công muộn có thể được quản lý bằng tác vụ compensation/refund bền vững riêng mà không mở lại Saga COMPLETED; schema và recovery khả thi | Chờ xác nhận |
 
 ---
 
@@ -474,3 +475,55 @@ FR-11, FR-12, FR-13, FR-14 · BR-08, BR-10, BR-11, BR-12 · EC-03 đến EC-11 �
 | T-13 | Kiểm thử worker tiếp quản khi lease hết hạn và gia hạn lease khi còn xử lý | Chờ xác nhận |
 
 ---
+
+
+## 6. Các câu hỏi nghiệp vụ còn mở – Issue #3
+
+> **Trạng thái:** Các mục Q-01, Q-02, Q-03, Q-07 và Q-08 dưới đây là phương án BA khuyến nghị, chưa được xem là quyết định cuối cùng cho đến khi các bên có trách nhiệm xác nhận. Phần này đặt trực tiếp trong tài liệu quyết định thiết kế để tránh tách rời quyết định khỏi các D-01–D-08 liên quan.
+
+### Q-01 – Payment hoàn tất trước hạn nhưng chỉ được xác minh sau hạn
+
+- **Phương án đề xuất:** Giữ quy tắc D-01.1/D-01.4 hiện tại: chỉ xác nhận Order khi payment đã được xác minh SUCCEEDED, Order còn PENDING, reservation là RESERVED và cập nhật có điều kiện thắng trước expireAt theo đồng hồ DB UTC. Nếu xác minh sau hạn, không mở lại/không xác nhận Order; xử lý nhánh hết hạn và refund nếu đã thu tiền.
+- **Lý do và đánh đổi:** Quy tắc xác định, nhất quán và không phụ thuộc timestamp của provider chưa được xác minh độ tin cậy; đổi lại có thể bất lợi nếu capture thực tế xảy ra trước hạn nhưng phản hồi đến muộn.
+- **Cần xác nhận:** Nhóm/giảng viên chấp nhận chính sách này; Dev (Người 2) xác nhận khả năng cung cấp timestamp capture đáng tin cậy theo A-04; Tester (Người 3) kiểm thử race và capture trước hạn/xác minh sau hạn theo T-12.
+- **Tài liệu liên quan:** D-01.1, D-01.4, A-04, T-12, 09-state-machine.md Q-01/SM-21.
+- **Trạng thái:** Chờ nhóm/giảng viên và Dev xác nhận.
+
+### Q-02 – Can thiệp thủ công khi Saga ở RECONCILIATION_REQUIRED
+
+- **Phương án đề xuất:** Tạo hàng đợi cảnh báo/tác vụ cần can thiệp, gắn orderId, sagaId, operation, idempotency key, lỗi cuối, thời điểm thử gần nhất và audit trail. Nhóm/giảng viên chỉ định vai trò owner/tiếp nhận; không tự gán một cá nhân chưa được phân công.
+- **Quy tắc vận hành:** Người xử lý phải tra cứu trạng thái có thẩm quyền từ Payment/Inventory; không suy diễn thất bại từ timeout hoặc log thiếu bằng chứng. Không gửi capture/refund/release mới, không đổi key khi kết quả cũ còn UNKNOWN. Chỉ đóng tác vụ khi payment/refund/reservation đã được xác minh và trạng thái Order/Saga/Outbox nhất quán; nếu chưa xác minh được thì giữ mở và escalation theo quy trình được phê duyệt. Ghi người xử lý, thời điểm, bằng chứng và quyết định; không ghi credential/dữ liệu nhạy cảm.
+- **Cần xác nhận:** BA (Người 1) chốt runbook và tiêu chí đóng; Dev (Người 2) chốt nơi lưu/hiển thị queue và API tra cứu; nhóm/giảng viên chỉ định vai trò owner; Tester (Người 3) kiểm thử tác vụ không mất sau restart.
+- **Tài liệu liên quan:** D-04, D-05, NFR-05, 09-state-machine.md S-05/S-06/S-13.
+- **Trạng thái:** Chờ BA/Dev và nhóm xác nhận.
+
+### Q-03 – Reservation khi payment UNKNOWN kéo dài
+
+- **Phương án đề xuất:** Giữ reservation cho đến khi payment được xác minh; sau lịch đối soát chính, chuyển Saga sang RECONCILIATION_REQUIRED, phát cảnh báo và tiếp tục truy vấn nền mỗi 5 phút theo D-04.2. Không tự release reservation, refund hoặc chốt Order EXPIRED chỉ vì TTL đã qua khi payment còn UNKNOWN.
+- **Lý do và đánh đổi:** Tránh tình huống khách đã bị thu tiền nhưng mất hàng/đơn bị hủy; đổi lại reservation có thể bị giữ lâu và giảm lượng hàng khả dụng. Cần cảnh báo và quy trình escalation theo Q-02.
+- **Cần xác nhận:** Nhóm/giảng viên chấp nhận đánh đổi; Dev xác nhận khả năng query payment/reservation và giám sát; Tester xác minh không release/refund trong toàn bộ khoảng UNKNOWN theo T-10.
+- **Tài liệu liên quan:** D-04.2/D-04.3, BR-07, BR-13, NFR-05, 09-state-machine.md Q-03.
+- **Trạng thái:** Chờ nhóm/giảng viên, Dev và Tester xác nhận.
+
+### Q-07 – Capture thành công muộn sau khi Order EXPIRED và Saga COMPLETED
+
+- **Phương án đề xuất:** Giữ Order ở EXPIRED và không mở lại Saga COMPLETED. Theo dõi refund muộn bằng bản ghi tác vụ compensation/refund bền vững riêng, liên kết orderId, sagaId, paymentId và idempotency key. Tác vụ có trạng thái riêng (ví dụ PENDING, IN_PROGRESS, UNKNOWN, SUCCEEDED, FAILED_REQUIRES_REVIEW) và không làm thay đổi kết quả Order đã chốt.
+- **Lý do và đánh đổi:** Giữ ý nghĩa terminal của Saga COMPLETED, đồng thời có thể retry/audit refund muộn. Cần Dev thiết kế schema và recovery; không được triển khai một luồng compensation song song thiếu kiểm soát.
+- **Cần xác nhận:** Dev (Người 2) đánh giá schema/migration, recovery và khả năng thực thi; BA xác nhận ngữ nghĩa; Tester kiểm thử capture đến muộn, refund timeout, restart và duplicate. Nếu nhóm chọn phương án hiện có trong state machine (COMPLETED → COMPENSATING), phải ghi rõ đây là ngoại lệ được phê duyệt và cập nhật invariant/trạng thái liên quan.
+- **Tài liệu liên quan:** D-05.4, A-17, 09-state-machine.md S-11/SM-20, 10-saga-workflow-and-compensation.md, API/event contract.
+- **Trạng thái:** Chờ Dev và BA xác nhận; cần đồng bộ state machine sau khi chốt.
+
+### Q-08 – Refund đã được xác minh FAILED
+
+- **Phương án đề xuất:** Chuyển Saga sang RECONCILIATION_REQUIRED/manual review; không tự động tạo idempotency key v2. Chỉ cho phép lệnh refund mới với key phiên bản mới khi: (1) provider xác nhận refund cũ thất bại cuối cùng và chưa tạo refund; (2) capture và số tiền còn phải hoàn đã được xác minh; (3) có phê duyệt của người có thẩm quyền được ghi audit; và (4) lệnh mới tham chiếu refund cũ, không vượt tổng số tiền đã capture.
+- **Lý do:** Dùng lại key cũ có thể chỉ trả lại kết quả thất bại đã lưu; tạo key mới khi chưa xác minh có thể hoàn tiền hai lần. Nếu không chứng minh được refund cũ chưa thực hiện, không gửi lệnh mới mà tiếp tục đối soát/escalate.
+- **Cần xác nhận:** Dev (Người 2) xác nhận semantics của mock/provider, unique key và giới hạn tổng refund; BA chốt policy vận hành; Tester kiểm thử refund FAILED, UNKNOWN, duplicate và key v2 sau phê duyệt.
+- **Tài liệu liên quan:** D-02, D-05, 09-state-machine.md S-13/R-04/R-07, FR-08, BR-08.
+- **Trạng thái:** Chờ Dev và BA xác nhận.
+
+### Điều kiện hoàn tất Issue #3
+
+- [x] Đã ghi phương án đề xuất, lý do/đánh đổi, owner/người xác nhận và tài liệu/test liên quan cho Q-01, Q-02, Q-03, Q-07, Q-08 ngay trong file này.
+- [ ] Nhóm/giảng viên xác nhận chính sách Q-01 và Q-03, đồng thời chỉ định vai trò owner cho Q-02.
+- [ ] Dev xác nhận tính khả thi của Q-07/Q-08 và các giả định A-02/A-03/A-04/A-05/A-10/A-17 liên quan; Tester xác nhận các kịch bản kiểm thử.
+- [ ] Sau khi có phê duyệt, đồng bộ 09-state-machine.md, Saga workflow, API/event contract và acceptance tests; ghi người/ngày phê duyệt. Chỉ đóng Issue #3 sau khi các xác nhận và cập nhật cần thiết đã hoàn tất.
