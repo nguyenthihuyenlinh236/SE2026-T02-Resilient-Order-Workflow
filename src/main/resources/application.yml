@@ -32,7 +32,7 @@ management:
 app:
   order:
     ttl: ${ORDER_TTL:15m}
-    retention: ${ORDER_RETENTION:26d}
+    retention: ${ORDER_RETENTION:28d}
   workers:
     saga-delay: ${SAGA_WORKER_DELAY:1000}
     expiration-delay: ${EXPIRATION_WORKER_DELAY:5000}
