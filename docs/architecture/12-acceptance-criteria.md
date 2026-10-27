@@ -592,7 +592,7 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 | Tính nhất quán dưới tải | UC-01, UC-02, UC-03, UC-06 | FR-03, FR-06, FR-09, NFR-C01, NFR-02 | Non-functional Requirements, State Machine |
 | Lưu giữ dữ liệu và phản hồi Change Request | Áp dụng quy trình W2 | NFR-C02, NFR-C03 | Non-functional Requirements |
 
-**Lưu ý:** Tên trạng thái `COMPENSATION_FAILED` cần được dùng rõ theo từng đối tượng. Trong State Machine, Order có trạng thái này; Saga cũng có trạng thái này. Với nhánh hết hạn, Order giữ `EXPIRING` trong khi Saga ghi nhận compensation lỗi. Cần giữ quy tắc này nhất quán giữa `09-state-machine.md`, `10-saga-workflow-and-compensation.md` và tiêu chí tương ứng ở đây.
+**Quy ước trạng thái:** `COMPENSATION_FAILED` chỉ là trạng thái của Saga, không phải của Order. Khi bù trừ nhánh thất bại vượt ngưỡng retry, Order giữ `COMPENSATING`; khi bù trừ nhánh hết hạn vượt ngưỡng retry, Order giữ `EXPIRING`. Trong cả hai trường hợp, Saga chuyển `COMPENSATION_FAILED` và tiếp tục retry nền theo D-03.2. Quy ước này áp dụng thống nhất với `09-state-machine.md` và `10-saga-workflow-and-compensation.md`.
 
 ## 15. Điều kiện hoàn thành
 
