@@ -504,31 +504,7 @@ Các khóa trên là đề xuất thiết kế cần Người 2 xác nhận. Khi
 - **Không tính là mồ côi trong thời gian xử lý:** reservation thuộc Order `EXPIRING` hoặc `COMPENSATING` hoặc đang chờ đối soát kết quả `UNKNOWN`.
 - **Yêu cầu theo dõi:** các trường hợp đang xử lý phải có tiến triển Saga hoặc cảnh báo vận hành theo NFR-08; không được bỏ mặc reservation không có dấu vết xử lý.
 
-## 11. Quy tắc thời gian và cấu hình
-
-| Tham số | Giá trị đề xuất | Quy tắc |
-|---|---|---|
-| TTL của Order | 15 phút | `expireAt = createdAt + TTL`. |
-| Đồng hồ nghiệp vụ | DB UTC | Dùng đồng hồ cơ sở dữ liệu để so sánh thời gian. |
-| Chu kỳ quét hết hạn | 5 giây | TTL Worker tìm Order quá hạn đủ điều kiện claim. |
-| Lease của worker | 30 giây | Claim ghi `claimToken`, `claimedAt`, `leaseUntil` trong cùng câu lệnh. |
-| Gia hạn lease | Khi worker vẫn xử lý | Gia hạn lease khi còn xử lý; worker khác có thể tiếp quản khi lease hết hạn. |
-| Đối soát | 30 lần trong 10 phút | 12 lần mỗi 5 giây, sau đó 18 lần mỗi 30 giây; tiếp tục truy vấn nền mỗi 5 phút nếu cần. |
-| Retry release/refund khi lỗi tạm thời | Backoff 1, 2, 4, 8 giây; vượt ngưỡng thì retry nền mỗi 60 giây | Không dùng `RECONCILIATION_REQUIRED` cho lỗi tạm thời đã xác định. |
-| Retry Outbox/Notification | Backoff 1, 2, 4, 8, 16, 32, 60 giây; sau đó mỗi 60 giây | Giữ định danh ổn định; không bỏ event hoặc thông báo chỉ vì lỗi gửi. |
-
-### 11.1. Lưu ý kỹ thuật cho Người 2
-
-- Các điều kiện dạng `capture_status <> 'UNKNOWN'` sẽ không đạt khi cột là `NULL` theo logic SQL ba giá trị. Đặt cột trạng thái `NOT NULL DEFAULT 'NOT_STARTED'` hoặc dùng biểu thức phù hợp như `IS DISTINCT FROM` nếu DB hỗ trợ.
-- Một số DB, bao gồm PostgreSQL, trả `CURRENT_TIMESTAMP` theo thời điểm bắt đầu transaction. So sánh `expireAt` và `leaseUntil` cần giờ tại thời điểm thực thi câu lệnh; Người 2 chọn hàm thời gian phù hợp với DB, ví dụ `clock_timestamp()` trên PostgreSQL. Pseudo-SQL dùng tên logic `db_now()`.
-- Cần thống nhất các bản trạng thái cục bộ của Order Service với kết quả đã xác minh từ Inventory Service và Payment Service; không dùng truy vấn xuyên DB để kiểm tra điều kiện chuyển trạng thái.
-- Cho phép cấu hình hoặc điều khiển bằng fake clock đối với TTL, chu kỳ quét, lease, backoff và lịch đối soát để kiểm thử không phải chờ thời gian thực.
-
-Không gia hạn `expireAt` vì capture `UNKNOWN`, lỗi dịch vụ hoặc hệ thống ngừng hoạt động. Nếu Order đã quá hạn và capture `UNKNOWN`, giữ Order `PENDING` cho đến khi kết quả đủ rõ để quyết định; không claim `EXPIRING` trong khi capture còn `UNKNOWN`.
-
-Các tham số trên là đề xuất cần Người 2 xác nhận theo D-08.4 và NFR-13.
-
-## 12. Bộ kiểm thử state machine
+## 11. Bộ kiểm thử state machine
 
 Mỗi kiểm thử phải ghi lại trạng thái Order, Saga, Payment và Reservation trước/sau, đồng thời xác minh không vi phạm bất biến. Các trường hợp liên quan đến Q-01 và Q-07 được đánh dấu là hành vi đề xuất chờ xác nhận.
 
@@ -561,7 +537,7 @@ Mỗi kiểm thử phải ghi lại trạng thái Order, Saga, Payment và Reser
 | SM-25 | paymentId không thuộc Order hoặc số tiền không khớp | Order `PENDING`; Reservation `RESERVED`; capture `SUCCEEDED` nhưng paymentId không thuộc Order hoặc số tiền không khớp tổng đơn. | Conditional update trả 0 dòng; Order không chuyển `CONFIRMED`; ghi nhận lý do kiểm tra thất bại để điều tra. | T-01; INV-02, INV-06 | UC-03; FR-09; D-01.1; NFR-02 |
 | SM-26 | Refund `FAILED` đã xác minh | Capture `SUCCEEDED`; refund đã được Payment Service xác minh `FAILED`. | Saga `RECONCILIATION_REQUIRED`; không gửi refund lại bằng cùng khóa idempotency; phát cảnh báo và chờ quyết định theo Q-02, Q-08. | R-04, R-07, S-13; INV-07, INV-08 | UC-07, UC-11; Q-02; Q-08 |
 
-## 13. Bảng truy vết
+## 12. Bảng truy vết
 
 | Nhóm chuyển trạng thái / bất biến | UC | FR | BR | EC | Quyết định / NFR |
 |---|---|---|---|---|---|
@@ -593,42 +569,3 @@ Tên tài liệu liên quan:
 - `10-saga-workflow-and-compensation.md`
 - `11-sequence-diagrams.md`
 - `12-acceptance-criteria.md`
-
-Các tài liệu `10-saga-workflow-and-compensation.md`, `11-sequence-diagrams.md` và `12-acceptance-criteria.md` nằm trong `docs/architecture/`. Các tham chiếu FR, BR, EC, UC, D, A, Q và NFR cần được đối chiếu với nội dung tương ứng trước khi chốt thiết kế.
-
-## 14. Tiêu chí bàn giao và điểm cần xác nhận
-
-### 14.1. Danh sách kiểm bàn giao
-
-- [ ] Order có đúng 6 trạng thái: `PENDING`, `CONFIRMED`, `COMPENSATING`, `EXPIRING`, `FAILED`, `EXPIRED`.
-- [ ] Chỉ triển khai các chuyển trạng thái Order được liệt kê trong mục 3; `COMPENSATION_FAILED` chỉ được dùng làm trạng thái Saga, không phải trạng thái Order.
-- [ ] Ba nhánh cạnh tranh từ `PENDING` dùng conditional update và kiểm tra số dòng bị tác động.
-- [ ] Điều kiện xác nhận Order được kiểm tra trong cùng câu lệnh cập nhật; Order, Saga và domain event được ghi trong cùng transaction theo đề xuất T-01.
-- [ ] TTL Worker sử dụng đồng hồ DB UTC, `expireAt`, `claimToken`, `claimedAt`, `leaseUntil` và cơ chế tiếp quản worker hết lease.
-- [ ] Không gửi lệnh tiến mới sau khi Order rời `PENDING`; xử lý được lệnh đang bay hoàn tất muộn.
-- [ ] Capture và refund có trạng thái riêng; `UNKNOWN` không bị coi là thất bại.
-- [ ] Reservation `UNKNOWN` được truy vấn theo khóa reserve/release ổn định trước khi quyết định hành động tiếp theo.
-- [ ] Lịch đối soát dùng chung cho reserve, capture, release và refund.
-- [ ] Lỗi tạm thời release/refund vượt ngưỡng chuyển Saga sang `COMPENSATION_FAILED`; Order giữ `EXPIRING` trong nhánh hết hạn.
-- [ ] Refund `FAILED` đã xác minh không tự retry bằng cùng khóa; xử lý theo Q-08.
-- [ ] Outbox giữ event khi publish thất bại; eventId ổn định; consumer có cơ chế chống trùng.
-- [ ] Notification retry không làm thay đổi trạng thái Order và không có `DEAD_LETTER`.
-- [ ] Bộ kiểm thử có đủ các trường hợp SM-01 đến SM-26, bao gồm cạnh tranh worker, crash, timeout, lệnh đến muộn và phục hồi.
-- [ ] Kiểm thử xác minh các bất biến INV-01 đến INV-10 và quy tắc Reservation mồ côi.
-- [ ] Các điểm chưa xác nhận được đánh dấu rõ, không tự coi là quyết định đã chốt.
-
-### 14.2. Các điểm cần xác nhận
-
-| ID | Nội dung cần xác nhận | Căn cứ | Người quyết định | Trạng thái |
-|---|---|---|---|---|
-| Q-01 | Khi capture thực tế hoàn tất trước `expireAt` nhưng chỉ được xác minh sau hạn, tiêu chí xác nhận Order dựa trên thời điểm hoàn tất thực tế hay thời điểm xác minh. Phương án hiện tại không xác nhận Order sau hạn và thực hiện refund. | D-01.4; A-04 | Nhóm; có thể hỏi giảng viên | Chờ xác nhận |
-| Q-02 | Quy trình can thiệp thủ công khi Saga ở `RECONCILIATION_REQUIRED`, gồm người chịu trách nhiệm và điều kiện kết thúc xử lý. | D-04 | Người 2 và Người 1 | Chờ xác nhận |
-| Q-03 | Chính sách giữ reservation khi kết quả thanh toán chưa rõ và Saga đã ở `RECONCILIATION_REQUIRED`. | D-04; NFR-05 | Nhóm | Chờ xác nhận |
-| Q-07 | Cho phép Saga chuyển `COMPLETED → COMPENSATING` chỉ để xử lý refund muộn khi Order vẫn `EXPIRED`. | D-05.4; A-17 | Người 2 và Người 1 | Chờ xác nhận |
-| Q-08 | Refund bị xác minh thất bại thì xử lý thế nào: chuyển thủ công, hay cho phép phát lệnh với khóa phiên bản mới (`v2`)? | R-04; R-07; D-02 | Người 2 và Người 1 | Chờ xác nhận |
-| — | Tên trạng thái, tên event, cấu trúc lưu trữ và trách nhiệm ghi dữ liệu của từng service. | Mục 1–7 | Người 2 | Chờ xác nhận |
-| — | Mô hình lưu riêng capture/refund status và cách lưu Reservation `UNKNOWN`, gồm `unknownOperation`. | Mục 5–6 | Người 2 | Chờ xác nhận |
-| — | Cách lưu `claimToken`, `claimedAt`, `leaseUntil`, gia hạn lease và tiếp quản khi worker chết. | T-04; D-06 | Người 2 | Chờ xác nhận |
-| — | Việc kiểm tra `paymentId` thuộc đúng Order và số tiền capture khớp tổng đơn; điều kiện số tiền chỉ áp dụng nếu mô hình dữ liệu có giá. | T-01; D-01.1 | Người 2 | Chờ xác nhận |
-| — | Bản kết quả đã xác minh của Reservation và capture lưu trong DB Order Service để kiểm tra T-01, T-04, T-08 mà không truy vấn chéo DB. | T-01; D-02 | Người 2 | Chờ xác nhận |
-| — | Hàm thời gian phù hợp với DB để so sánh `expireAt` và `leaseUntil` tại thời điểm thực thi. | Mục 11.1 | Người 2 | Chờ xác nhận |
