@@ -10,7 +10,18 @@ Tài liệu phân tích nghiệp vụ cho hệ thống mô phỏng quy trình x�
 | [02-functional-requirements.md](02-functional-requirements.md) | Danh sách yêu cầu chức năng FR-01 đến FR-15 |
 | [03-business-rules.md](03-business-rules.md) | Quy tắc nghiệp vụ BR-01 đến BR-13 |
 | [04-failure-scenarios.md](04-failure-scenarios.md) | Danh sách tình huống lỗi EC-01 đến EC-11 |
-| [05-use-cases.md](05-use-cases.md) | Use case tổng quát, bao gồm Expire Order / TTL Cleanup |
+| [05-use-cases.md](05-use-cases.md) | Use case tổng quát UC-01 đến UC-06 |
+| [06-design-decisions.md](06-design-decisions.md) | Quyết định thiết kế D-01 đến D-08 và các câu hỏi cần xác nhận |
+| [07-non-functional-requirements.md](07-non-functional-requirements.md) | Yêu cầu phi chức năng, ngưỡng đo và ma trận phân loại nguồn |
+| [08-detailed-use-cases.md](08-detailed-use-cases.md) | Đặc tả chi tiết UC-01 đến UC-11 và ma trận truy vết |
+
+## Tài liệu kiến trúc liên quan
+
+- [State Machine](../architecture/09-state-machine.md)
+- [Saga Workflow and Compensation](../architecture/10-saga-workflow-and-compensation.md)
+- [Sequence Diagrams](../architecture/11-sequence-diagrams.md)
+- [Acceptance Criteria](../architecture/12-acceptance-criteria.md)
+- [API and Event Contract Draft](../architecture/14-api-event-contract-draft.md)
 
 ## Phạm vi
 
