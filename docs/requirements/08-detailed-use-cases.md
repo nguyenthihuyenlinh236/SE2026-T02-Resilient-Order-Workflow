@@ -350,7 +350,7 @@ Bù trừ thành công đưa Order về `FAILED` và Saga `hoàn tất`. Bù tr�
 | UC-04-A không có tác động | COMPENSATING → FAILED | đang chạy → hoàn tất | chưa có giao dịch → chưa có giao dịch | REJECTED → REJECTED |
 | UC-04-B release lỗi | COMPENSATING → COMPENSATING | đang chạy → COMPENSATION_FAILED | — → — | RESERVED → chưa xác minh |
 | UC-04-C refund lỗi | COMPENSATING → COMPENSATING | đang chạy → COMPENSATION_FAILED | SUCCEEDED (refund chưa rõ/FAILED) → SUCCEEDED (refund FAILED/chưa rõ) | RELEASED → RELEASED |
-| UC-04-D crash | COMPENSATING/COMPENSATION_FAILED → tiếp tục xử lý | trạng thái lưu → tiếp tục xử lý | trạng thái capture lưu → xác minh lại | trạng thái lưu → xác minh lại |
+| UC-04-D crash | COMPENSATING → tiếp tục xử lý | trạng thái lưu/COMPENSATION_FAILED → tiếp tục xử lý | trạng thái capture lưu → xác minh lại | trạng thái lưu → xác minh lại |
 | UC-04-E capture chưa rõ | COMPENSATING → COMPENSATING | đang chạy → RECONCILING | UNKNOWN → UNKNOWN | RESERVED → RESERVED |
 
 ### 7.7. Sự kiện
@@ -602,7 +602,7 @@ Công việc được khôi phục từ dữ liệu bền vững trong giới h�
 | UC-08-C | trạng thái kết thúc → không đổi | hoàn tất → hoàn tất | — → — | — → — |
 | UC-08-D | EXPIRING → tiếp tục xử lý | đang chạy → tiếp tục xử lý | — → — | RESERVED → xác minh, RELEASED nếu cần |
 | UC-08-E, còn lịch | — → không đổi | đang chạy → RECONCILING | UNKNOWN → UNKNOWN | chưa xác minh → chưa xác minh |
-| UC-08-F, compensation vượt ngưỡng | COMPENSATING/EXPIRING → COMPENSATION_FAILED | đang chạy → COMPENSATION_FAILED | trạng thái capture → không đổi | trạng thái đã xác minh → không đổi |
+| UC-08-F, compensation vượt ngưỡng | COMPENSATING/EXPIRING → giữ nguyên Order status | đang chạy → COMPENSATION_FAILED | trạng thái capture → không đổi | trạng thái đã xác minh → không đổi |
 | UC-08-F, Payment cạn lịch | Order hiện tại → không đổi | RECONCILING → RECONCILIATION_REQUIRED | UNKNOWN → UNKNOWN | trạng thái đã xác minh → không đổi |
 
 ### 11.7. Sự kiện
@@ -660,7 +660,7 @@ Chỉ đọc dữ liệu; không thay đổi trạng thái nghiệp vụ.
 | UC-09-B | PENDING → PENDING | đang chạy → đang chạy | — → — | — → — |
 | UC-09-C | PENDING → PENDING | RECONCILING/RECONCILIATION_REQUIRED → không đổi | UNKNOWN → UNKNOWN | RESERVED → RESERVED |
 | UC-09-D | EXPIRING → EXPIRING | đang chạy/COMPENSATION_FAILED → không đổi | trạng thái đã xác minh → không đổi | trạng thái đã xác minh → không đổi |
-| UC-09-E | COMPENSATING/COMPENSATION_FAILED → không đổi | đang chạy/COMPENSATION_FAILED → không đổi | — → — | — → — |
+| UC-09-E | COMPENSATING → không đổi | đang chạy/COMPENSATION_FAILED → không đổi | — → — | — → — |
 | UC-09-F | FAILED → FAILED | hoàn tất → hoàn tất | — → — | — → — |
 | UC-09-G | EXPIRED → EXPIRED | hoàn tất → hoàn tất | — → — | RELEASED → RELEASED |
 | UC-09-H | CONFIRMED → CONFIRMED | hoàn tất → hoàn tất | SUCCEEDED → SUCCEEDED | RESERVED → RESERVED |
