@@ -578,7 +578,7 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 | Tính nhất quán dưới tải | UC-01, UC-02, UC-03, UC-06 | FR-03, FR-06, FR-09, NFR-C01, NFR-02 | Non-functional Requirements, State Machine |
 | Lưu giữ dữ liệu và phản hồi Change Request | Áp dụng quy trình W2 | NFR-C02, NFR-C03 | Non-functional Requirements |
 
-**Lưu ý khi chốt với nhóm:** Tên trạng thái `COMPENSATION_FAILED` cần được dùng rõ theo từng đối tượng. Trong State Machine, Order có trạng thái này; Saga cũng có trạng thái này. Với nhánh hết hạn, Order giữ `EXPIRING` trong khi Saga ghi nhận compensation lỗi. Cần giữ quy tắc này nhất quán giữa `09-state-machine.md`, `10-saga-workflow-and-compensation.md` và tiêu chí tương ứng ở đây.
+**Lưu ý:** Tên trạng thái `COMPENSATION_FAILED` cần được dùng rõ theo từng đối tượng. Trong State Machine, Order có trạng thái này; Saga cũng có trạng thái này. Với nhánh hết hạn, Order giữ `EXPIRING` trong khi Saga ghi nhận compensation lỗi. Cần giữ quy tắc này nhất quán giữa `09-state-machine.md`, `10-saga-workflow-and-compensation.md` và tiêu chí tương ứng ở đây.
 
 ## 15. Điều kiện hoàn thành
 
@@ -617,63 +617,4 @@ Mục này xác định các kiểm thử cần được chuẩn bị trước k
 - Mỗi failure-injection test ghi rõ điểm tiêm lỗi, trạng thái trước lỗi, hành vi mong đợi sau phục hồi và cách dọn dữ liệu kiểm thử.
 - Fault injection chỉ được bật trong môi trường kiểm thử được cho phép; mặc định tắt ở môi trường không dùng để kiểm thử.
 - Các kiểm thử chưa thể chạy do contract hoặc quyết định còn mở phải được đánh dấu `BLOCKED`/`PENDING`, không ghi là `PASS`.
-
-## 17. Danh sách tài liệu và đầu việc bàn giao cho Dev/Tester
-
-| Tài liệu/đầu việc | Tiếp tục hoàn thiện bởi | Kết quả bàn giao cần có | Trạng thái |
-|---|---|---|---|
-| `08-detailed-use-cases.md` | BA, Dev | Luồng chính, ngoại lệ và kết quả nghiệp vụ khớp với AC | Cần rà soát chéo |
-| `09-state-machine.md` | BA, Dev | Trạng thái Order/Saga, điều kiện chuyển và quyền nhận nhánh được thống nhất | Chờ xác nhận các điểm mở |
-| `10-saga-workflow-and-compensation.md` | Dev; BA rà soát nghiệp vụ | Chi tiết orchestration, retry, compensation, đối soát và recovery | Dev tiếp tục hoàn thiện |
-| `11-sequence-diagrams.md` | BA, Dev | Sơ đồ khớp với state machine, API/event contract và luồng lỗi | Cần rà soát chéo |
-| `12-acceptance-criteria.md` | BA, Tester | AC truy vết được và chuyển thành test case | Tài liệu BA; chờ review/handover |
-| API contracts giữa Order, Inventory và Payment | Dev | Request/response, mã lỗi, timeout, idempotency và cách query kết quả | Cần hoàn thiện/xác nhận |
-| Event contracts và Outbox/Inbox | Dev | Tên event, schema/payload, `eventId`, versioning, deduplication và chính sách phát lại | Cần hoàn thiện/xác nhận |
-| Test plan và test cases | Tester | Liên kết AC/CT/FI với test case, dữ liệu, kết quả và bằng chứng | Tester tiếp tục thực hiện |
-| **Recovery Runbook** | Dev và vai trò vận hành được phân công | Hướng dẫn nhận biết sự cố, tra cứu Order/Saga/Reservation/Payment/Outbox, retry an toàn, xử lý `UNKNOWN`, lease hết hạn, release/refund lỗi, cảnh báo và điều kiện can thiệp thủ công | Chưa xác nhận hoàn tất |
-| Test execution report | Tester | Kết quả pass/fail/blocked, bằng chứng, lỗi phát hiện và liên kết issue | Sau khi chạy test |
-
-Recovery Runbook phải phản ánh các thao tác thực tế mà hệ thống hỗ trợ. Không thực hiện retry thủ công, release hoặc refund bằng khóa mới nếu có nguy cơ tạo tác động nghiệp vụ trùng. Các lệnh vận hành, quyền truy cập và quy trình can thiệp cần được Dev/đội vận hành xác nhận.
-
-## 18. Trạng thái bàn giao và các điểm chờ xác nhận
-
-Trạng thái được quản lý theo bằng chứng và đầu ra, không theo tên cá nhân. `Đã soạn` chỉ xác nhận tài liệu đã được viết; không đồng nghĩa với contract đã được phê duyệt, kiểm thử đã chạy hoặc hệ thống đã đáp ứng tiêu chí.
-
-### 18.1. Trạng thái bàn giao hiện tại
-
-| Hạng mục | Trạng thái | Điều kiện để đóng |
-|---|---|---|
-| Acceptance Criteria cho các luồng chính | Đã soạn | BA/Dev/Tester rà soát và thống nhất |
-| Ma trận contract tests/failure injection | Đã xác định phạm vi trong tài liệu này | Dev xác nhận contract; Tester tạo và chạy test |
-| API/event contracts | Chờ xác nhận | Có schema, hành vi lỗi và quy tắc idempotency được thống nhất |
-| Recovery Runbook | Chưa xác nhận hoàn tất | Dev/đội vận hành hoàn thiện và rà soát |
-| Các quyết định nghiệp vụ/kiến trúc còn mở | Chờ xác nhận | Ghi quyết định cuối cùng và cập nhật các tài liệu liên quan |
-| Bàn giao Tester | Đang chờ hoàn thiện | Có test case, kết quả chạy và bằng chứng hoặc ghi rõ phần bị block |
-
-### 18.2. Danh sách điểm cần xác nhận
-
-| ID | Điểm cần xác nhận | Phụ trách đề xuất | Điều kiện đóng |
-|---|---|---|---|
-| OPEN-01 | Cách dùng `COMPENSATION_FAILED` cho Order và Saga; riêng nhánh hết hạn có giữ Order ở `EXPIRING` khi Saga compensation lỗi hay không | BA + Dev | `09-state-machine.md`, `10-saga-workflow-and-compensation.md` và AC thống nhất |
-| OPEN-02 | Capture thành công muộn sau khi Order đã `EXPIRED`, bao gồm cách Saga khởi chạy/theo dõi refund muộn | BA + Dev | Quyết định được ghi trong State Machine/Design Decisions và có test tương ứng |
-| OPEN-03 | Xử lý refund `FAILED` đã xác minh, quyền can thiệp thủ công và trạng thái cuối cùng | Dev, BA và vai trò vận hành được phân công | Có chính sách rõ, cảnh báo và hướng dẫn trong Runbook |
-| OPEN-04 | API/event schema, mã lỗi, timeout, idempotency và event version | Dev | Contract được thống nhất và dùng cho contract tests |
-| OPEN-05 | Mốc bắt đầu tính thời hạn lưu giữ 29 ngày và cách xử lý dữ liệu sau thời hạn | BA, Dev và vai trò quản trị dữ liệu | Chính sách lưu giữ xác định rõ theo từng loại dữ liệu |
-| OPEN-06 | Cách đo và ghi nhận mục tiêu phản hồi Change Request trong 14 giờ | BA và quản lý dự án | Quy trình nhóm xác định rõ thời điểm bắt đầu/kết thúc và nơi ghi nhận |
-
-Không đánh dấu các điểm `OPEN-*` là đã xác nhận chỉ vì chúng đã được mô tả trong AC. Mỗi điểm chỉ được chuyển trạng thái khi có quyết định được ghi lại, tài liệu nguồn được cập nhật và kiểm thử liên quan được bổ sung nếu cần. Ghi rõ trạng thái `OPEN`, `RESOLVED` hoặc `BLOCKED`, cùng liên kết tới quyết định/bằng chứng; không gán quyết định cho một cá nhân cụ thể.
-
-## 19. Điều kiện đóng Issue #7 / hoàn tất BA Handover
-
-Issue bàn giao chỉ nên được đánh dấu hoàn tất khi các điều kiện sau đã được kiểm tra:
-
-- [ ] Dev/Tester đã rà soát Acceptance Criteria và phản hồi các điểm chưa rõ.
-- [ ] Các luồng nghiệp vụ chính và các nhánh lỗi có điều kiện đầu vào, hành động kích hoạt và kết quả quan sát được.
-- [ ] Contract-test matrix được đối chiếu với API/event contract đã thống nhất.
-- [ ] Failure-injection scenarios có test case hoặc được ghi rõ là chưa thể chạy và lý do.
-- [ ] Recovery Runbook đã được Dev/đội vận hành hoàn thiện và rà soát.
-- [ ] Các điểm `OPEN-*` đã được quyết định hoặc được ghi nhận rõ là blocker không thuộc phạm vi đóng issue.
-- [ ] Các thay đổi liên quan đã được đồng bộ trong Use Cases, State Machine, Saga Workflow, Sequence Diagrams và Acceptance Criteria.
-- [ ] Tester có test case và ghi nhận trạng thái thực thi/bằng chứng; các test chưa chạy không bị ghi nhầm là pass.
-
-**Trạng thái hiện tại: `HANDOVER_IN_PROGRESS`.** Tài liệu AC và ma trận CT/FI đã được chuẩn bị; việc bàn giao chưa được xem là hoàn tất cho đến khi contract được xác nhận, Recovery Runbook được rà soát, test case có liên kết truy vết và kết quả chạy được ghi nhận. Các kiểm thử chưa chạy phải giữ trạng thái `PENDING` hoặc `BLOCKED`; không suy diễn trạng thái `PASS` từ việc tài liệu đã tồn tại.
+ được xác nhận, Recovery Runbook được rà soát, test case có liên kết truy vết và kết quả chạy được ghi nhận. Các kiểm thử chưa chạy phải giữ trạng thái `PENDING` hoặc `BLOCKED`; không suy diễn trạng thái `PASS` từ việc tài liệu đã tồn tại.
