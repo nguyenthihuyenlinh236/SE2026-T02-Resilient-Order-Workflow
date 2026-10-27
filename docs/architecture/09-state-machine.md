@@ -34,7 +34,7 @@ Tên trạng thái, tên sự kiện, cấu trúc lưu trữ và trách nhiệm 
 
 | Đối tượng | Các trạng thái | Service sở hữu và ghi trạng thái |
 |---|---|---|
-| Order | `PENDING`, `CONFIRMED`, `COMPENSATING`, `COMPENSATION_FAILED`, `EXPIRING`, `FAILED`, `EXPIRED` | Order Service |
+| Order | `PENDING`, `CONFIRMED`, `COMPENSATING`, `EXPIRING`, `FAILED`, `EXPIRED` | Order Service |
 | Saga | `RUNNING`, `RECONCILING`, `RECONCILIATION_REQUIRED`, `COMPENSATING`, `COMPENSATION_FAILED`, `COMPLETED` | Order Service / Saga Orchestrator theo thiết kế cần Người 2 xác nhận |
 | Payment capture | `NOT_STARTED`, `IN_PROGRESS`, `SUCCEEDED`, `FAILED`, `UNKNOWN` | Payment Service sở hữu kết quả; Order Service lưu bản kết quả đã xác minh |
 | Payment refund | `NOT_REQUIRED`, `NOT_STARTED`, `IN_PROGRESS`, `SUCCEEDED`, `FAILED`, `UNKNOWN` | Payment Service sở hữu kết quả; Order Service lưu bản kết quả đã xác minh |
@@ -48,14 +48,13 @@ Order Service không đọc trực tiếp bảng nội bộ của Inventory Serv
 
 ### 3.1. Định nghĩa trạng thái
 
-Order có đúng 7 trạng thái.
+Order có đúng 6 trạng thái.
 
 | Trạng thái | Ý nghĩa | Loại |
 |---|---|---|
 | `PENDING` | Order được tạo và đang chờ hoàn tất các điều kiện xác nhận. | Ban đầu |
 | `CONFIRMED` | Reservation đã được xác minh `RESERVED`, capture đã được xác minh `SUCCEEDED` và Order được xác nhận trước hạn. | Kết thúc |
 | `COMPENSATING` | Nhánh thất bại đã thắng; hệ thống đang xử lý các hành động bù trừ bắt buộc. | Đang xử lý |
-| `COMPENSATION_FAILED` | Nhánh bù trừ gặp lỗi tạm thời vượt ngưỡng retry. Chỉ chuyển đến từ `COMPENSATING`. | Lỗi có thể retry |
 | `EXPIRING` | TTL Worker đã claim nhánh hết hạn; hệ thống đang xác minh và xử lý release/refund cần thiết. | Đang xử lý |
 | `FAILED` | Nhánh thất bại đã hoàn tất các hành động bù trừ bắt buộc. | Kết thúc |
 | `EXPIRED` | Nhánh hết hạn đã hoàn tất các điều kiện bắt buộc để kết thúc Order. | Kết thúc |
@@ -66,8 +65,6 @@ Các chuyển trạng thái Order hợp lệ:
 - `PENDING → COMPENSATING`
 - `PENDING → EXPIRING`
 - `COMPENSATING → FAILED`
-- `COMPENSATING → COMPENSATION_FAILED`
-- `COMPENSATION_FAILED → COMPENSATING`
 - `EXPIRING → EXPIRED`
 
 Không có chuyển `EXPIRING → COMPENSATION_FAILED` hoặc `COMPENSATION_FAILED → EXPIRING`.
@@ -81,8 +78,6 @@ stateDiagram-v2
     PENDING --> COMPENSATING: Nhánh thất bại thắng
     PENDING --> EXPIRING: Claim hết hạn
     COMPENSATING --> FAILED: Bù trừ hoàn tất
-    COMPENSATING --> COMPENSATION_FAILED: Lỗi bù trừ
-    COMPENSATION_FAILED --> COMPENSATING: Retry nền
     EXPIRING --> EXPIRED: Hết hạn đủ điều kiện
 ```
 
@@ -97,8 +92,6 @@ Ba nhánh cạnh tranh từ `PENDING` là `CONFIRMED`, `COMPENSATING` và `EXPIR
 | T-03 | `PENDING → COMPENSATING` | Capture thất bại. | Order vẫn `PENDING`; capture `FAILED` đã được Payment Service xác minh. | Claim nhánh thất bại trước khi release reservation hoặc thực hiện bù trừ khác. | Không phát domain event; có thể phát cảnh báo vận hành. | Order Service | UC-02, UC-03, UC-04; FR-03, FR-04, FR-07; BR-02, BR-04; EC-01, EC-02; D-01; NFR-02 |
 | T-04 | `PENDING → EXPIRING` | TTL Worker phát hiện Order quá hạn. | DB UTC `now() >= expireAt`; capture khác `UNKNOWN`; Order vẫn `PENDING`. | Claim bằng conditional update; ghi `claimToken`, `claimedAt`, `leaseUntil`; lease mặc định 30 giây. | Không phát domain event; có thể phát cảnh báo vận hành. | TTL Worker | UC-06; FR-15; BR-07, BR-10, BR-13; EC-04, EC-06, EC-11; D-01.2, D-01.5, D-06; NFR-02, NFR-07 |
 | T-05 | `COMPENSATING → FAILED` | Bù trừ hoàn tất. | Reservation đã release hoặc được xác minh không tồn tại; capture/refund đã đủ rõ; mọi bù trừ bắt buộc đã được xác minh. | Ghi Order `FAILED`; hoàn tất Saga; ghi domain event trong cùng transaction. | `OrderFailed` | Order Service | UC-04; FR-07, FR-08, FR-12; BR-04, BR-08; EC-02, EC-09; D-03, D-05; NFR-01 |
-| T-06 | `COMPENSATING → COMPENSATION_FAILED` | Release/refund gặp lỗi tạm thời vượt ngưỡng gửi. | Đã gửi quá 5 lần; lỗi được xác định là tạm thời, không phải kết quả `UNKNOWN`. | Ghi trạng thái lỗi; Saga `COMPENSATION_FAILED`; phát cảnh báo và retry nền mỗi 60 giây. | Không phát domain event; có thể phát cảnh báo vận hành. | Order Service / Saga Orchestrator | UC-04, UC-08; FR-12, FR-13; BR-08, BR-10; EC-09; D-03.2; NFR-04, NFR-08 |
-| T-07 | `COMPENSATION_FAILED → COMPENSATING` | Đến lịch retry nền. | Hành động bù trừ chưa hoàn tất; dùng cùng khóa idempotency. | Chuyển lại `COMPENSATING`; tiếp tục xử lý release/refund. | Không phát domain event; có thể phát cảnh báo vận hành. | Order Service / Saga Orchestrator | UC-04, UC-08; FR-12, FR-13; BR-08, BR-10; EC-09; D-03.2; NFR-04, NFR-08 |
 | T-08 | `EXPIRING → EXPIRED` | Các điều kiện hết hạn đã được xác minh đầy đủ. | `claimToken` khớp; lease chưa hết hạn; capture/refund không phải `UNKNOWN` hoặc `IN_PROGRESS`; reservation `RELEASED` hoặc đã xác minh không tồn tại; nếu capture `SUCCEEDED` thì refund `SUCCEEDED`. | Ghi Order `EXPIRED`, Saga `COMPLETED`, Outbox trong cùng transaction. | `OrderExpired` | TTL Worker / Order Service | UC-06, UC-11; FR-08, FR-12, FR-15; BR-07, BR-08, BR-13; EC-11; D-05, D-06.2; NFR-07 |
 
 Các điều kiện về Reservation và capture được kiểm tra trên bản đã xác minh do Order Service lưu trong DB của chính nó (ví dụ bản trạng thái trên bảng Saga), không truy vấn chéo DB của Inventory Service hoặc Payment Service. Người 2 xác nhận cấu trúc lưu trữ này.
@@ -447,7 +440,6 @@ Không suy ra trạng thái Order chỉ từ tên trạng thái Saga.
 |---|---|---|
 | `PENDING` | `RUNNING`, `RECONCILING`, `RECONCILIATION_REQUIRED` | Luồng đặt hàng đang chạy hoặc kết quả hành động chưa rõ, kể cả khi đã quá `expireAt`. Nếu capture là `UNKNOWN`, giữ Order `PENDING` và không claim sang `EXPIRING`. |
 | `COMPENSATING` | `COMPENSATING`, `RECONCILING`, `RECONCILIATION_REQUIRED` | Đang xử lý nhánh thất bại hoặc đối soát kết quả bù trừ. |
-| `COMPENSATION_FAILED` | `COMPENSATION_FAILED` | Nhánh bù trừ thất bại tạm thời và đang chờ retry nền. |
 | `EXPIRING` | `COMPENSATING`, `RECONCILING`, `RECONCILIATION_REQUIRED`, `COMPENSATION_FAILED` | Đang xử lý nhánh hết hạn. Nếu capture/refund chưa rõ, Saga đối soát; nếu release/refund lỗi tạm thời vượt ngưỡng, Saga là `COMPENSATION_FAILED` nhưng Order vẫn `EXPIRING`. |
 | `CONFIRMED` | `COMPLETED` | Đơn đã được xác nhận với reservation và capture thành công đã xác minh. |
 | `FAILED` | `COMPLETED` | Nhánh thất bại đã hoàn tất các hành động bù trừ bắt buộc. |
@@ -465,8 +457,8 @@ Không suy ra trạng thái Order chỉ từ tên trạng thái Saga.
 | F-05 | `FAILED → COMPENSATING` | Nhánh thất bại đã kết thúc; không mở lại Order để bù trừ. | D-01; D-03 |
 | F-06 | `EXPIRING → CONFIRMED` | Nhánh hết hạn đã thắng; nếu capture thành công được phát hiện thì phải xử lý refund theo D-05. | D-01.2; D-05 |
 | F-07 | `EXPIRING → COMPENSATION_FAILED` | Order ở nhánh hết hạn phải giữ `EXPIRING` khi release/refund lỗi tạm thời vượt ngưỡng; Saga mới là `COMPENSATION_FAILED`. | D-03.2 |
-| F-08 | `COMPENSATION_FAILED → EXPIRING` | Không có chuyển ngược từ nhánh thất bại bù trừ sang nhánh hết hạn. | D-01; D-03.2 |
-| F-09 | `COMPENSATION_FAILED → CONFIRMED` | Không xác nhận đơn sau khi bù trừ đã thất bại. | D-01; INV-05 |
+| F-08 | `COMPENSATING → EXPIRING` | Nhánh thất bại đã claim không được đổi sang nhánh hết hạn. | D-01; D-03.2 |
+| F-09 | `COMPENSATING → CONFIRMED` | Không xác nhận đơn sau khi nhánh thất bại đã claim. | D-01; INV-05 |
 | F-10 | Capture `UNKNOWN → FAILED` do timeout hoặc hết lịch đối soát | Timeout không chứng minh capture thất bại. Chỉ Payment Service được xác minh kết quả thất bại. | D-04; P-06 |
 | F-11 | Refund `UNKNOWN → SUCCEEDED` do timeout | Chưa có bằng chứng refund thành công. | D-04; R-06 |
 | F-12 | Reservation `UNKNOWN → RELEASED` do timeout | Chưa xác minh Inventory Service đã giải phóng reservation. | D-01.5; D-04; V-08 |
@@ -509,7 +501,7 @@ Các khóa trên là đề xuất thiết kế cần Người 2 xác nhận. Khi
 
 - **Vi phạm ngay:** Order `FAILED` hoặc `EXPIRED` nhưng reservation vẫn `RESERVED`. Order `CONFIRMED` có reservation `RESERVED` là trạng thái đúng, không phải mồ côi.
 - **Order không tồn tại:** nếu reservation không có Order tương ứng, chỉ đánh dấu vi phạm khi đã qua 5 phút kể từ thời điểm kết thúc chèn lỗi kiểm thử.
-- **Không tính là mồ côi trong thời gian xử lý:** reservation thuộc Order `EXPIRING`, `COMPENSATING`, `COMPENSATION_FAILED` hoặc đang chờ đối soát kết quả `UNKNOWN`.
+- **Không tính là mồ côi trong thời gian xử lý:** reservation thuộc Order `EXPIRING` hoặc `COMPENSATING` hoặc đang chờ đối soát kết quả `UNKNOWN`.
 - **Yêu cầu theo dõi:** các trường hợp đang xử lý phải có tiến triển Saga hoặc cảnh báo vận hành theo NFR-08; không được bỏ mặc reservation không có dấu vết xử lý.
 
 ## 11. Quy tắc thời gian và cấu hình
@@ -608,7 +600,7 @@ Các tài liệu `10-saga-workflow-and-compensation.md`, `11-sequence-diagrams.m
 
 ### 14.1. Danh sách kiểm bàn giao
 
-- [ ] Order có đúng 7 trạng thái: `PENDING`, `CONFIRMED`, `COMPENSATING`, `COMPENSATION_FAILED`, `EXPIRING`, `FAILED`, `EXPIRED`.
+- [ ] Order có đúng 6 trạng thái: `PENDING`, `CONFIRMED`, `COMPENSATING`, `EXPIRING`, `FAILED`, `EXPIRED`.
 - [ ] Chỉ triển khai các chuyển trạng thái Order được liệt kê trong mục 3; không có `EXPIRING → COMPENSATION_FAILED` hoặc `COMPENSATION_FAILED → EXPIRING`.
 - [ ] Ba nhánh cạnh tranh từ `PENDING` dùng conditional update và kiểm tra số dòng bị tác động.
 - [ ] Điều kiện xác nhận Order được kiểm tra trong cùng câu lệnh cập nhật; Order, Saga và domain event được ghi trong cùng transaction theo đề xuất T-01.
