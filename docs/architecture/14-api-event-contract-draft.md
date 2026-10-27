@@ -327,4 +327,3 @@ Tên event trong bảng là tên đề xuất, không khẳng định đã đư�
 - Chỉ đưa dữ liệu cá nhân cần thiết vào event; ưu tiên `accountId`/reference thay vì sao chép hồ sơ người dùng.
 - API không được để lộ sự tồn tại của đơn thuộc tài khoản khác. Audit log ghi sự kiện từ chối theo chính sách hiện hành.
 - Các event và idempotency records phải tuân thủ chính sách retention; không xóa dữ liệu đang cần cho Saga, refund hoặc reconciliation.
-**Lưu ý:** Các dấu hoàn thành trên phản ánh phạm vi tài liệu BA của bản nháp, không phải xác nhận rằng mọi endpoint, event, broker hoặc hành vi đề xuất đã được triển khai hay kiểm thử trong mã nguồn.
