@@ -349,7 +349,7 @@ Bù trừ thành công đưa Order về `FAILED` và Saga `hoàn tất`. Bù tr�
 | Bù trừ thành công | COMPENSATING → FAILED | đang chạy → hoàn tất | FAILED hoặc SUCCEEDED → kết quả capture không đổi | RESERVED → RELEASED |
 | UC-04-A không có tác động | COMPENSATING → FAILED | đang chạy → hoàn tất | chưa có giao dịch → chưa có giao dịch | REJECTED → REJECTED |
 | UC-04-B release lỗi | COMPENSATING → COMPENSATING | đang chạy → COMPENSATION_FAILED | — → — | RESERVED → chưa xác minh |
-| UC-04-C refund lỗi | COMPENSATING → COMPENSATION_FAILED | đang chạy → COMPENSATION_FAILED | SUCCEEDED (refund chưa rõ/FAILED) → SUCCEEDED (refund FAILED/chưa rõ) | RELEASED → RELEASED |
+| UC-04-C refund lỗi | COMPENSATING → COMPENSATING | đang chạy → COMPENSATION_FAILED | SUCCEEDED (refund chưa rõ/FAILED) → SUCCEEDED (refund FAILED/chưa rõ) | RELEASED → RELEASED |
 | UC-04-D crash | COMPENSATING/COMPENSATION_FAILED → tiếp tục xử lý | trạng thái lưu → tiếp tục xử lý | trạng thái capture lưu → xác minh lại | trạng thái lưu → xác minh lại |
 | UC-04-E capture chưa rõ | COMPENSATING → COMPENSATING | đang chạy → RECONCILING | UNKNOWN → UNKNOWN | RESERVED → RESERVED |
 
