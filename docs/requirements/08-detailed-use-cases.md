@@ -640,7 +640,7 @@ Client có `orderId` hoặc `statusUrl`. Trigger là `GET /api/v1/orders/{orderI
 - **UC-09-B — Order PENDING:** hiển thị đang xử lý.
 - **UC-09-C — Payment UNKNOWN:** hiển thị đang xác minh thanh toán; không báo thất bại chỉ vì timeout.
 - **UC-09-D — Order EXPIRING:** hiển thị đang xử lý hết hạn, chưa thông báo đã hết hạn cho đến khi trạng thái `EXPIRED` được commit.
-- **UC-09-E — COMPENSATING/COMPENSATION_FAILED:** hiển thị đang xử lý sự cố; không báo bù trừ hoàn tất khi chưa xác minh.
+- **UC-09-E — Order `COMPENSATING`, Saga `COMPENSATION_FAILED`:** hiển thị đang xử lý sự cố; không báo bù trừ hoàn tất khi chưa xác minh.
 - **UC-09-F — Order FAILED:** trả thông điệp thất bại theo NFR-12.
 - **UC-09-G — Order EXPIRED:** trả trạng thái hết hạn.
 - **UC-09-H — Order CONFIRMED:** trả trạng thái xác nhận chỉ khi đã lưu bền vững.
