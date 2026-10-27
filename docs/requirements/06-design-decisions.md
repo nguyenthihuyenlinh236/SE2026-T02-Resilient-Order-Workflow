@@ -429,5 +429,3 @@ Endpoint điều khiển fault (nếu có) là API nội bộ của profile test
 #### Truy vết
 
 FR-11, FR-12, FR-13, FR-14 · BR-08, BR-10, BR-11, BR-12 · EC-03 đến EC-11 · UC-02 đến UC-06.
-
-- [ ] Sau khi có phê duyệt, đồng bộ 09-state-machine.md, Saga workflow, API/event contract và acceptance tests; ghi người/ngày phê duyệt. Chỉ đóng Issue #3 sau khi xác nhận và cập nhật cần thiết hoàn tất.
