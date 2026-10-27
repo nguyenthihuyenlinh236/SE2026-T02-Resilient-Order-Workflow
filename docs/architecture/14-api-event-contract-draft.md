@@ -1,9 +1,5 @@
 # 14 – API and Event Contract Draft
 
-> **Trạng thái:** Bản nháp BA để Dev/Tester review; chưa phải OpenAPI/AsyncAPI đã chốt.  
-> **Phạm vi:** APP-08 – Resilient Order Workflow (Java/Spring Boot, PostgreSQL; Inventory, Payment và Notification hiện được mô phỏng trong cùng ứng dụng).  
-> **Nguồn đối chiếu:** `OrderController`, `AuthController`, `StaffOrderController`, `AdminAccountController`, `02-functional-requirements.md`, `03-business-rules.md`, `06-design-decisions.md`, `09-state-machine.md`, `10-saga-workflow-and-compensation.md`, `11-sequence-diagrams.md` và `12-acceptance-criteria.md`.
-
 ## 1. Mục tiêu và quy ước
 
 Tài liệu thống nhất ở mức nghiệp vụ các API, command và event cần thiết để triển khai Saga/Outbox, retry, idempotency, hết hạn đơn và đối soát. Những endpoint được xác nhận có trong mã nguồn hiện tại được đánh dấu **Implemented**; command/event nội bộ được đề xuất được đánh dấu **Proposed**. Không suy ra rằng command/event đề xuất đã có API HTTP hoặc broker thật.
@@ -331,43 +327,3 @@ Tên event trong bảng là tên đề xuất, không khẳng định đã đư�
 - Chỉ đưa dữ liệu cá nhân cần thiết vào event; ưu tiên `accountId`/reference thay vì sao chép hồ sơ người dùng.
 - API không được để lộ sự tồn tại của đơn thuộc tài khoản khác. Audit log ghi sự kiện từ chối theo chính sách hiện hành.
 - Các event và idempotency records phải tuân thủ chính sách retention; không xóa dữ liệu đang cần cho Saga, refund hoặc reconciliation.
-
-## 8. Việc Dev cần chốt trước khi đóng hợp đồng
-
-| ID | Câu hỏi cần xác nhận | Đầu ra cần có |
-|---|---|---|
-| DEV-01 | Có dùng HTTP nội bộ, gọi trực tiếp trong ứng dụng hay message broker cho Inventory/Payment/Notification? | Component/deployment diagram và transport contract |
-| DEV-02 | Chốt schema chuẩn của `OrderResponse`, `ProblemDetail` và các lỗi validation/CSRF/authorization | OpenAPI spec và ví dụ response thực tế |
-| DEV-03 | Phạm vi duy nhất của `Idempotency-Key`, thời gian lưu key và fingerprint payload | DB constraint, retention và test duplicate/conflict |
-| DEV-04 | Chốt `commandId`, `eventId`, `correlationId`, `causationId`, aggregate version | Schema envelope và quy tắc tracing |
-| DEV-05 | Chốt canonical state/event names, đặc biệt `UNKNOWN`, `COMPENSATION_FAILED`, `RECONCILIATION_REQUIRED`, `OrderExpired` | Cập nhật state machine, enum và tài liệu đồng bộ |
-| DEV-06 | Cách tra cứu capture/refund/reservation sau timeout; tính chất idempotent của provider/mock | Interface và contract tests |
-| DEV-07 | Chốt amount/currency, rounding, refund một phần/toàn phần và đối chiếu payment muộn | Payment contract và business rules |
-| DEV-08 | Chọn broker, topic/exchange, partition key, delivery semantics, retry, DLQ và schema registry nếu có | AsyncAPI/broker configuration |
-| DEV-09 | Chốt event ordering/versioning và Inbox deduplication | Consumer contract và test duplicate/out-of-order |
-| DEV-10 | Chốt claim token/lease, retry/backoff, lịch reconciliation, TTL và DB clock | Cấu hình worker và test recovery/race |
-| DEV-11 | Xác nhận luồng fulfillment `RECEIVED -> PREPARING -> DELIVERED` và quyền Staff/store | API contract và authorization tests |
-| DEV-12 | Chốt SLA cho notification, lỗi provider và xử lý thủ công | NFR/operational runbook |
-
-## 9. Truy vết và kiểm thử nghiệm thu
-
-| Hợp đồng | Requirement/rule liên quan | Kiểm thử tối thiểu |
-|---|---|---|
-| Tạo Order và GET trạng thái | FR-01, FR-02, FR-14; BR-03, BR-11 | 202; thiếu key; duplicate cùng payload; cùng key khác payload; timeout sau commit |
-| Reserve/release | FR-03, FR-04, FR-07; BR-02, BR-05, BR-08 | đủ/thiếu hàng; timeout sau side effect; duplicate reserve/release; reserve đến muộn |
-| Capture/query/refund | FR-05, FR-06, FR-08; BR-03, BR-07, BR-08 | SUCCEEDED, FAILED, UNKNOWN; query sau timeout; refund duplicate; capture muộn |
-| TTL/expiry | FR-09, FR-15; BR-01, BR-13; D-01 | expiry vs confirm race; payment UNKNOWN; release/refund chưa hoàn tất; không terminal sớm |
-| Outbox/event/notification | FR-10, FR-13; BR-09, BR-12 | crash sau publish trước mark; duplicate event; notification down/recovery |
-| Auth/Staff/Admin | Yêu cầu bảo mật và phân quyền hiện hành | role sai; truy cập đơn người khác/store khác; CSRF thiếu/sai; session hết hạn |
-| Recovery/reconciliation | FR-11 đến FR-14; BR-10 | restart worker; lease hết hạn; retry/backoff; event out-of-order |
-
-### Điều kiện hoàn thành bản nháp
-
-- [x] Liệt kê API HTTP hiện có và phân biệt với command/event nội bộ đề xuất.
-- [x] Mô tả payload đầu vào/đầu ra chính và lỗi quan trọng.
-- [x] Định nghĩa nguyên tắc idempotency, duplicate/conflict và `UNKNOWN`.
-- [x] Bao gồm event envelope, danh mục event và ví dụ payload.
-- [x] Có danh sách câu hỏi rõ ràng để Dev chốt schema, message format và broker integration.
-- [ ] Dev xác nhận các quyết định còn mở; chuyển bản nháp thành OpenAPI/AsyncAPI chính thức nếu cần.
-
-**Lưu ý:** Các dấu hoàn thành trên phản ánh phạm vi tài liệu BA của bản nháp, không phải xác nhận rằng mọi endpoint, event, broker hoặc hành vi đề xuất đã được triển khai hay kiểm thử trong mã nguồn.
