@@ -19,7 +19,7 @@ Các tên dưới đây là **đề xuất**; tên cuối cùng được chốt 
 
 | Loại trạng thái | Giá trị dùng trong file này |
 |---|---|
-| Order | `PENDING`, `EXPIRING`, `COMPENSATING`, `COMPENSATION_FAILED`, `CONFIRMED`, `FAILED`, `EXPIRED` |
+| Order | `PENDING`, `EXPIRING`, `COMPENSATING`, `CONFIRMED`, `FAILED`, `EXPIRED` |
 | Payment | `SUCCEEDED`, `FAILED`, `UNKNOWN`; "chưa thanh toán" nghĩa là chưa có bản ghi capture |
 | Reservation | `RESERVED`, `RELEASED`, `REJECTED`; "chưa xác minh" nghĩa là kết quả reserve chưa rõ |
 | Saga (bổ sung) | `COMPENSATION_FAILED`, `RECONCILIATION_REQUIRED` |
@@ -164,7 +164,7 @@ Giá trị áp dụng cho cấu hình demo, **cấu hình được** (xem D-08.4
 
 **D-03.2. Trạng thái Order khi compensation lỗi.**
 
-- Nhánh thất bại (payment `FAILED`): Order `COMPENSATING`; vượt ngưỡng release thì Order chuyển `COMPENSATION_FAILED` (vẫn retry nền, chưa phải trạng thái cuối).
+- Nhánh thất bại (payment `FAILED`): Order giữ `COMPENSATING`; nếu release/refund gặp lỗi tạm thời vượt ngưỡng retry, Saga chuyển sang `COMPENSATION_FAILED` và tiếp tục retry nền.
 - Nhánh hết hạn: Order **giữ `EXPIRING`** (để không mất thông tin đang xử lý hết hạn); trạng thái lỗi nằm ở Saga (`COMPENSATION_FAILED`). Order chỉ sang `EXPIRED` khi đủ điều kiện D-06.2.
 
 **D-03.3. Độ bền.** Bộ đếm retry, thời điểm thử kế tiếp và trạng thái vượt ngưỡng phải lưu bền vững để tiếp tục sau khi service restart.
