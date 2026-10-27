@@ -245,10 +245,10 @@ Với 115 người dùng/tác vụ đồng thời, thời gian phản hồi p95 
 3. Chạy tối thiểu hai nhóm kịch bản: không chèn lỗi và chèn độ trễ tại một service phụ thuộc.
 4. Báo cáo cấu hình môi trường, cấu hình tải, dữ liệu kiểm thử, thời gian chạy, số yêu cầu và kết quả đo.
 5. Theo ngưỡng đề xuất:
-   - `POST /api/v1/orders`: p95 không quá 500 ms.
-   - `GET /api/v1/orders/{orderId}`: p95 không quá 300 ms.
+   - `POST /api/v1/orders`: p95 không quá 5.000 ms (5,0 giây).
+   - `GET /api/v1/orders/{orderId}`: p95 không quá 5.000 ms (5,0 giây).
    - Tỷ lệ phản hồi 5xx không quá 1%.
-6. Điều kiện đo đề xuất: 115 người dùng đồng thời, think time 5–10 giây, thông lượng dự kiến khoảng 11–23 yêu cầu/giây; thông lượng thực tế phải được đo và báo cáo. Thông lượng thực tế phải được báo cáo từ kết quả chạy, không suy ra chỉ từ số người dùng.
+6. Điều kiện đo đề xuất: 115 người dùng/tác vụ đồng thời, think time 5–10 giây; thông lượng tham khảo khoảng 11–23 yêu cầu/giây. Thông lượng thực tế phải được đo và báo cáo, không suy ra chỉ từ số người dùng.
 
 **Truy vết:** FR-01, FR-09, FR-10, FR-11, FR-14, FR-15; BR-09, BR-10, BR-12, BR-13; EC-03, EC-04, EC-06, EC-08, EC-10, EC-11; D-03, D-06, D-07, D-08.
 
