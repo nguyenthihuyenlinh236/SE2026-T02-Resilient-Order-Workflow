@@ -57,9 +57,9 @@ class RetentionWorkerTest {
         UUID recentOrder = UUID.randomUUID();
         UUID unfinishedOrder = UUID.randomUUID();
         Instant now = Instant.now();
-        insertOrder(oldOrder, now.minusSeconds(27L * 24 * 60 * 60), "EXPIRED");
-        insertOrder(recentOrder, now.minusSeconds(25L * 24 * 60 * 60), "CONFIRMED");
-        insertOrder(unfinishedOrder, now.minusSeconds(27L * 24 * 60 * 60), "PENDING");
+        insertOrder(oldOrder, now.minusSeconds(29L * 24 * 60 * 60), "EXPIRED");
+        insertOrder(recentOrder, now.minusSeconds(27L * 24 * 60 * 60), "CONFIRMED");
+        insertOrder(unfinishedOrder, now.minusSeconds(29L * 24 * 60 * 60), "PENDING");
         UUID eventId = UUID.randomUUID();
         jdbc.update("INSERT INTO outbox_events (id, aggregate_id) VALUES (?, ?)", eventId, oldOrder);
         jdbc.update(
@@ -78,8 +78,8 @@ class RetentionWorkerTest {
                 VALUES (1, ?, 'old-session', 'ACCESS_DENIED_THRESHOLD', ?, ?)
                 """,
                 UUID.randomUUID(),
-                Timestamp.from(now.minusSeconds(27L * 24 * 60 * 60)),
-                Timestamp.from(now.minusSeconds(26L * 24 * 60 * 60))
+                Timestamp.from(now.minusSeconds(29L * 24 * 60 * 60)),
+                Timestamp.from(now.minusSeconds(28L * 24 * 60 * 60))
         );
         jdbc.update(
                 """
@@ -88,10 +88,10 @@ class RetentionWorkerTest {
                 VALUES (2, ?, 'pending-session', 'ACCESS_DENIED_THRESHOLD', ?)
                 """,
                 UUID.randomUUID(),
-                Timestamp.from(now.minusSeconds(27L * 24 * 60 * 60))
+                Timestamp.from(now.minusSeconds(29L * 24 * 60 * 60))
         );
 
-        new RetentionWorker(jdbc, java.time.Duration.ofDays(26)).purgeExpiredRecords();
+        new RetentionWorker(jdbc, java.time.Duration.ofDays(28)).purgeExpiredRecords();
 
         assertEquals(0, count("orders", oldOrder));
         assertEquals(1, count("orders", recentOrder));
