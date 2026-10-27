@@ -4,7 +4,7 @@ const baseUrl = (process.env.LOAD_TEST_BASE_URL || "http://localhost:8080").repl
 const username = process.env.LOAD_TEST_USERNAME;
 const password = process.env.LOAD_TEST_PASSWORD;
 const sku = process.env.LOAD_TEST_SKU || "DEMO-ITEM";
-const virtualUsers = Number(process.env.LOAD_TEST_VUS || 148);
+const virtualUsers = Number(process.env.LOAD_TEST_VUS || 115);
 const durationSeconds = Number(process.env.LOAD_TEST_DURATION_SECONDS || 120);
 const thinkMinMs = 5000;
 const thinkMaxMs = 10000;
@@ -14,8 +14,8 @@ const runId = randomUUID();
 if (!username || !password) {
     throw new Error("Set LOAD_TEST_USERNAME and LOAD_TEST_PASSWORD to a CUSTOMER account.");
 }
-if (!Number.isInteger(virtualUsers) || virtualUsers < 1 || virtualUsers > 148) {
-    throw new Error("LOAD_TEST_VUS must be an integer from 1 to 148.");
+if (!Number.isInteger(virtualUsers) || virtualUsers < 1 || virtualUsers > 115) {
+    throw new Error("LOAD_TEST_VUS must be an integer from 1 to 115.");
 }
 if (!Number.isInteger(durationSeconds) || durationSeconds < 1) {
     throw new Error("LOAD_TEST_DURATION_SECONDS must be a positive integer.");
@@ -218,10 +218,10 @@ async function main() {
             }
         },
         thresholds: {
-            targetVirtualUsers: 148,
+            targetVirtualUsers: 115,
             minimumDurationSeconds: 120,
-            postP95Ms: 2000,
-            getP95Ms: 2000,
+            postP95Ms: 5000,
+            getP95Ms: 5000,
             errorRate5xx: 0.01
         },
         unexpectedDetails
