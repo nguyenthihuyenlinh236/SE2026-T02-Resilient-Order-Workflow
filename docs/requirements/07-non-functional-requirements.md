@@ -16,7 +16,7 @@ Phạm vi áp dụng gồm:
 - TTL Worker / Expiration Scheduler.
 - API tạo đơn, truy vấn trạng thái và các cơ chế kiểm thử lỗi.
 
-Các yêu cầu trong tài liệu này được dùng để định hướng thiết kế, lập Acceptance Criteria và xây dựng kiểm thử. Các ngưỡng chưa được đề bài quy định được ghi là **ngưỡng đề xuất**, chờ Người 2 và Người 3 xác nhận trước khi sử dụng làm tiêu chí nghiệm thu chính thức.
+Yêu cầu được phân biệt theo nguồn và mức độ xác nhận: (1) ràng buộc cố định từ đề bài APP-08/RE-006; (2) yêu cầu/giả định kỹ thuật do nhóm suy ra để đáp ứng Reliability; (3) ngưỡng mục tiêu đề xuất cần được xác nhận trước khi dùng làm tiêu chí nghiệm thu chính thức. Không trình bày ngưỡng đề xuất như yêu cầu đã được giảng viên phê duyệt.
 
 ## 2. Ràng buộc cố định
 
@@ -269,7 +269,7 @@ Order/Saga chưa kết thúc hoặc đang compensation không bị xóa chỉ v�
 3. Order/Saga chưa kết thúc hoặc đang compensation không bị xóa trong quá trình xử lý, kể cả khi thời gian từ `createdAt` đã vượt 29 ngày.
 4. Khóa idempotency, inbox và outbox có thời hạn lưu giữ ít nhất 29 ngày và không ngắn hơn khoảng retry/phát lại tối đa được cấu hình.
 5. Kiểm thử gửi lại sự kiện trong thời hạn chống trùng và xác nhận consumer không tạo tác dụng phụ lặp.
-6. **Đề xuất phạm vi dữ liệu thanh toán:** hệ thống chỉ lưu tham chiếu thanh toán giả lập (`paymentId`, trạng thái, số tiền, khóa idempotency); không lưu số thẻ, mã xác thực hay dữ liệu thanh toán thật. Người 2 xác nhận phạm vi lưu dữ liệu này.
+6. **Đề xuất phạm vi dữ liệu thanh toán:** hệ thống chỉ lưu tham chiếu thanh toán giả lập (`paymentId`, trạng thái, số tiền, khóa idempotency); không lưu số thẻ, mã xác thực hay dữ liệu thanh toán thật. Dev/BA xác nhận phạm vi lưu dữ liệu này.
 7. Có bằng chứng về cấu hình lưu giữ, truy vấn dữ liệu và kết quả kiểm tra vòng đời dữ liệu.
 
 **Truy vết:** FR-06, FR-08, FR-10, FR-12, FR-13, FR-14, FR-15; BR-08, BR-10, BR-11, BR-12, BR-13; EC-06, EC-07, EC-08, EC-09, EC-11; D-02, D-03, D-04, D-05, D-06; Q-04.
@@ -301,7 +301,7 @@ Tài liệu và quy trình phân tích phải giúp nhóm đánh giá ảnh hư�
 
 Trạng thái và thông báo hướng đến khách hàng phải dễ hiểu đối với người dùng lần đầu, không làm lộ tên trạng thái kỹ thuật nội bộ và không tuyên bố thanh toán thành công khi kết quả còn `UNKNOWN`.
 
-API truy vấn trạng thái được đề xuất trả thêm trường `displayMessage` bên cạnh `status`. Người 2 cần xác nhận trường này có phù hợp với thiết kế API hay không.
+API truy vấn trạng thái có thể trả thêm trường `displayMessage` bên cạnh `status`; đây là đề xuất thiết kế, cần được đối chiếu với API/event contract trước khi chốt.
 
 **Bảng ánh xạ trạng thái nội bộ sang thông điệp khách hàng**
 
@@ -347,13 +347,13 @@ Các tham số cần cấu hình hoặc điều khiển gồm TTL, chu kỳ qué
 5. Kiểm thử bao phủ các chế độ lỗi và điểm crash quy định trong D-08, bao gồm `BEFORE_COMMIT`, `AFTER_COMMIT_BEFORE_RESPONSE`, `AFTER_PUBLISH_BEFORE_MARK` và `AFTER_CLAIM_BEFORE_RELEASE`.
 6. Có thể reset cấu hình fault injection và dữ liệu kiểm thử về trạng thái xác định giữa các lượt chạy.
 7. Các kiểm thử xác nhận cấu hình sau reset không còn fault injection tồn dư và dữ liệu của lượt trước không ảnh hưởng kết quả lượt sau.
-8. Cách triển khai đồng hồ giả, reset dữ liệu và reset cấu hình được Người 2 xác nhận; Người 3 kiểm chứng trong bộ kiểm thử.
+8. Cách triển khai đồng hồ giả, reset dữ liệu và reset cấu hình cần được Dev xác nhận và Tester kiểm chứng trong bộ kiểm thử.
 
 **Truy vết:** FR-11, FR-12, FR-13, FR-14, FR-15; BR-07, BR-08, BR-10, BR-12, BR-13; EC-03, EC-04, EC-06, EC-07, EC-08, EC-09, EC-11; D-03, D-04, D-06, D-08.2, D-08.4; T-02, T-05, T-08.
 
 ## 4. Bảng ngưỡng đề xuất
 
-Các giá trị trong bảng dưới đây là **ngưỡng đề xuất, chờ Người 2 và Người 3 xác nhận**, chưa phải yêu cầu chính thức cho đến khi được thống nhất.
+Các giá trị trong bảng dưới đây là **ngưỡng đề xuất của nhóm**, không phải ràng buộc đã được đề bài quy định. Dev đánh giá tính khả thi và cách đo; BA xác nhận tính phù hợp với yêu cầu; Tester kiểm chứng sau khi tiêu chí được chốt.
 
 | NFR | Chỉ số | Ngưỡng đề xuất | Điều kiện hoặc ngoại lệ |
 |---|---|---|---|
@@ -416,7 +416,7 @@ Các giá trị trong bảng dưới đây là **ngưỡng đề xuất, chờ N
 
 1. **Các ngưỡng đề xuất:** xác nhận hoặc điều chỉnh các ngưỡng tại Mục 4, gồm thời gian xử lý TTL, thời gian phục hồi, độ trễ Outbox, latency API, tỷ lệ lỗi, số lượt kiểm thử cạnh tranh, số lần gửi lại và thời gian chờ xác định reservation mồ côi.
 2. **Phạm vi lưu giữ – Q-04:** xác nhận các loại dữ liệu thuộc thời hạn 29 ngày và mốc tính từ khi Order đạt trạng thái cuối; xác nhận cách xử lý Order/Saga chưa kết thúc và thời gian lưu khóa chống trùng.
-3. **Retry và đối soát:** xác nhận retry/backoff theo D-03 và lịch đối soát theo D-04; các giá trị đề xuất chờ Người 2 và Người 3 review.
+3. **Retry và đối soát:** Dev xác nhận tính khả thi của retry/backoff theo D-03 và lịch đối soát theo D-04; BA rà soát quy tắc nghiệp vụ; Tester kiểm chứng các giá trị sau khi chốt.
 4. **Nguồn thời gian:** xác nhận dùng DB clock UTC theo D-01, A-15 và Q-01, bao gồm cách xử lý trường hợp payment hoàn tất trước `expireAt` nhưng chỉ được xác minh sau `expireAt`.
 5. **Trạng thái hiển thị:** xác nhận bảng ánh xạ thông điệp khách hàng và việc API có trả trường `displayMessage` bên cạnh `status` hay không; tiêu chí không tuyên bố thành công hoặc thất bại khi payment `UNKNOWN` vẫn là Must.
 6. **Kiểm thử tải 155 người dùng:** thống nhất môi trường, công cụ, think time, thời lượng chạy, cách tính lỗi và dữ liệu bằng chứng.
@@ -424,3 +424,53 @@ Các giá trị trong bảng dưới đây là **ngưỡng đề xuất, chờ N
 8. **Tính sẵn sàng – Q-06:** hỏi giảng viên xem có yêu cầu mục tiêu uptime hoặc MTTR hay không; hiện tại Reliability trong tài liệu này tập trung vào tính đúng và khả năng phục hồi, chưa có mục tiêu uptime/MTTR được quy định.
 9. **Can thiệp thủ công – Q-02:** xác nhận người chịu trách nhiệm, quy trình xử lý và cách ghi nhận kết quả khi payment vẫn chưa xác định sau giới hạn đối soát.
 10. **Reservation mồ côi – Q-03:** xác nhận cách phân loại reservation chờ đối soát `UNKNOWN` và ngưỡng thời gian retry nền dùng để xác định hệ thống đã ổn định.
+
+## 8. Phân loại nguồn, ưu tiên và khả năng kiểm chứng
+
+### 8.1. Quy ước phân loại nguồn
+
+- **Ràng buộc đề bài:** dữ kiện cố định của APP-08/RE-006. Chỉ thay đổi khi có yêu cầu sửa đề bài được xác nhận.
+- **Yêu cầu kỹ thuật suy ra:** yêu cầu do nhóm xác định để bảo đảm Reliability, nhất quán, idempotency và phục hồi. Cần được rà soát theo kiến trúc/contract; không được mô tả là trích dẫn nguyên văn từ giảng viên.
+- **Giả định hoặc ngưỡng đề xuất:** con số, phương pháp đo hoặc hành vi chưa được quy định trong đề bài. Phải có trạng thái chờ xác nhận và không dùng để kết luận nghiệm thu chính thức trước khi được chốt.
+
+Nguồn hiện có cho các ràng buộc cố định là bộ dữ kiện đề bài APP-08/RE-006 đã giao cho dự án. Tài liệu này không khẳng định có email, biên bản hoặc phê duyệt riêng từ giảng viên nếu chưa được cung cấp trong repository.
+
+### 8.2. Ma trận phân loại NFR
+
+| ID/nhóm | Phân loại nguồn | Nguồn/cơ sở | Ưu tiên | Trạng thái xác nhận |
+|---|---|---|---|---|
+| NFR-C01 / NFR-09a | Ràng buộc đề bài về 155 người dùng; phương pháp tải và tiêu chí bất biến là yêu cầu kỹ thuật suy ra | Bộ dữ kiện APP-08/RE-006; kiểm thử tích hợp là ưu tiên do rủi ro tích hợp cao | Must cho tính đúng; hiệu năng đo riêng tại NFR-09b | Số người dùng cố định; kịch bản đo cần công bố giả định |
+| NFR-C02 / NFR-10 | Ràng buộc đề bài về thời hạn 29 ngày; phạm vi dữ liệu và mốc bắt đầu là giả định cần chốt | Bộ dữ kiện APP-08/RE-006; Q-04 | Must | Thời hạn cố định; phạm vi và mốc tính còn mở |
+| NFR-C03 / NFR-11 | Ràng buộc đề bài về 14 giờ; định nghĩa điểm bắt đầu/kết thúc là giả định cần chốt | Bộ dữ kiện APP-08/RE-006; Q-05 | Must | Thời hạn cố định; ý nghĩa “phản hồi” còn mở |
+| NFR-C04 / NFR-01 | Thuộc tính chất lượng được nêu trong đề bài; các tiêu chí cụ thể là yêu cầu kỹ thuật suy ra | Reliability: xử lý an toàn và phục hồi khi thành phần lỗi | Must | Thuộc tính cố định; ngưỡng thời gian cụ thể là đề xuất |
+| NFR-C05 | Ràng buộc đề bài | Rủi ro tích hợp cao hơn rủi ro giao diện | Must đối với thứ tự ưu tiên kiểm thử tích hợp | Cố định |
+| NFR-C06 / NFR-12 | Đối tượng người dùng là ràng buộc đề bài; các tiêu chí usability và số người dùng thử là đề xuất | Người dùng lần đầu, chưa quen công nghệ | Should; tiêu chí không thông báo sai khi payment UNKNOWN là Must | Đối tượng cố định; phương pháp đánh giá cần chốt |
+| NFR-02 | Yêu cầu kỹ thuật suy ra | Bất biến trạng thái Order/Saga, thời gian DB UTC, phân xử cạnh tranh | Must | Cần kiểm chứng bằng test cạnh tranh |
+| NFR-03 | Yêu cầu kỹ thuật suy ra | Idempotency và ngăn tác dụng phụ lặp | Must | Cần kiểm chứng bằng test gửi lặp và payload xung đột |
+| NFR-04 | Yêu cầu kỹ thuật suy ra; RPO/thời gian phục hồi là ngưỡng đề xuất | Phục hồi sau crash/restart | Must về khả năng phục hồi; ngưỡng định lượng chờ xác nhận | Chưa có bằng chứng thực thi |
+| NFR-05 | Yêu cầu kỹ thuật suy ra | Payment/Reservation UNKNOWN và reconciliation | Must | Lịch đối soát cần được chốt theo quyết định liên quan |
+| NFR-06 | Yêu cầu kỹ thuật suy ra; p95 Outbox là ngưỡng đề xuất | Atomic Outbox và consumer deduplication | Must về tính bền vững; ngưỡng p95 chờ xác nhận | Chưa có bằng chứng đo |
+| NFR-07 | Yêu cầu kỹ thuật suy ra; TTL/scan/lease là cấu hình dự án | Expiration và compensation an toàn | Must | Cấu hình hiện là đề xuất được tham chiếu trong Design Decisions |
+| NFR-08 | Yêu cầu kỹ thuật suy ra | Quan sát, truy vết và audit cho lỗi tích hợp | Must | Cần xác nhận trường log/metric và kiểm thử |
+| NFR-09b | Ngưỡng hiệu năng đề xuất | p95 API, tỷ lệ 5xx và throughput dưới tải | Should | Chưa phải yêu cầu chính thức; cần chốt môi trường và cách đo |
+| NFR-13 | Giả định/đề xuất của nhóm | Cấu hình kiểm thử, fault injection, đồng hồ giả và reset dữ liệu | Must cho khả năng kiểm thử lặp lại | Cần Dev xác nhận cách triển khai và Tester xác minh |
+
+### 8.3. Cách đo và bằng chứng tối thiểu
+
+| Chỉ số/tiêu chí | Cách kiểm chứng | Bằng chứng phải lưu | Điều kiện kết luận |
+|---|---|---|---|
+| Bất biến Reliability và trạng thái | Chèn lỗi tại các điểm tích hợp; kiểm tra Order, Saga, Payment, Reservation | Log có correlation ID, trạng thái trước/sau, kết quả truy vấn và test report | Không có trạng thái mâu thuẫn hoặc side effect lặp; ngoại lệ UNKNOWN được theo dõi |
+| Tính đúng dưới 155 người dùng đồng thời | Chạy kịch bản tải đã công bố, gồm tồn kho thấp và các request cạnh tranh | Công cụ/cấu hình, thời lượng, think time, throughput thực đo, lỗi, dữ liệu trước/sau | Không vi phạm bất biến; kết quả hiệu năng báo riêng với kết quả tính đúng |
+| API p95 và tỷ lệ 5xx | Đo POST /api/v1/orders và GET /api/v1/orders/{orderId} trên cùng cửa sổ đo | Phân vị latency, số request, số lỗi, môi trường và cấu hình tải | Chỉ so với 500 ms/300 ms/1% sau khi các ngưỡng đề xuất được xác nhận |
+| Phục hồi sau restart/crash | Khởi động lại service/worker ở điểm fault injection đã định nghĩa | Thời điểm lỗi, thời điểm tiếp tục xử lý, trạng thái bền vững và log | Không mất dữ liệu đã commit trong phạm vi kiểm thử; thời gian phục hồi chỉ được đánh giá theo ngưỡng đã chốt |
+| Retention 29 ngày | Kiểm tra chính sách và mô phỏng thời gian/fixture dữ liệu theo từng loại bản ghi | Danh mục dữ liệu, mốc bắt đầu, cấu hình retention và kết quả truy vấn | Không xóa sớm dữ liệu bắt buộc; không xóa Saga chưa kết thúc; mốc tính phải được xác nhận |
+| Change Request 14 giờ | Thực hiện bài tập thay đổi có timestamp bắt đầu/kết thúc rõ ràng | Yêu cầu thay đổi, thời điểm tiếp nhận, đánh giá tác động và phản hồi | Chỉ kết luận sau khi định nghĩa “phản hồi” được xác nhận |
+| Usability cho người dùng lần đầu | Thử theo kịch bản và hỏi người dùng diễn giải trạng thái | Kịch bản, lỗi hiểu sai, phản hồi và kết quả | Không thông báo payment UNKNOWN như thành công/thất bại; ngưỡng số người thử là đề xuất |
+
+### 8.4. Quy tắc chốt Must/Should
+
+1. **Must** dùng cho ràng buộc cố định của đề bài và các bất biến cần thiết để đáp ứng Reliability, tránh thanh toán/giữ hàng trùng hoặc chuyển trạng thái mâu thuẫn.
+2. **Should** dùng cho mục tiêu cải thiện chất lượng chưa được đề bài quy định, như ngưỡng latency và trải nghiệm sử dụng, trừ khi có quyết định chính thức nâng mức ưu tiên.
+3. Một NFR có thể chứa cả yêu cầu Must và ngưỡng định lượng đề xuất. Mức Must của yêu cầu nền không tự động biến ngưỡng đề xuất thành cam kết nghiệm thu.
+4. Không đánh dấu NFR đã đạt chỉ vì có tiêu chí đo; cần có kết quả kiểm thử/đo thực tế kèm bằng chứng.
+5. Các điểm Q-04, Q-05, Q-06 và các ngưỡng ở Mục 4 phải được giữ trạng thái mở cho đến khi có quyết định được ghi nhận. Sau khi chốt, cập nhật tài liệu nguồn, Acceptance Criteria và test plan cùng một thay đổi có truy vết.
