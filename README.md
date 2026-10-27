@@ -64,7 +64,7 @@ Khởi tạo admin lần đầu bằng biến môi trường `APP_BOOTSTRAP_ADMI
 
 Đơn không tồn tại và đơn thuộc tài khoản khác đều trả `404 Order not found`. Mỗi truy cập bị từ chối được ghi vào audit log độc lập với transaction nghiệp vụ. Sau 10 lần từ chối trong cùng phiên, phiên bị thu hồi và tạo cảnh báo trong hàng đợi admin. Phiên hết hạn sau 30 phút không hoạt động; tài khoản bị khóa 15 phút ngay sau lần đăng nhập sai thứ năm. Cookie phiên là HttpOnly/SameSite=Strict; bật `SESSION_COOKIE_SECURE=true` khi dùng HTTPS.
 
-Đơn được ẩn khỏi danh sách sau 26 ngày; worker mỗi giờ xóa dữ liệu của đơn đã kết thúc và các bản ghi liên quan. Đơn quá hạn nhưng còn Saga/bù trừ chưa hoàn tất được giữ lại an toàn và ghi lỗi vận hành để đối soát, không xóa mù làm thất thoát reservation hoặc payment.
+Đơn được ẩn khỏi danh sách sau 28 ngày; worker mỗi giờ xóa dữ liệu của đơn đã kết thúc và các bản ghi liên quan. Đơn quá hạn nhưng còn Saga/bù trừ chưa hoàn tất được giữ lại an toàn và ghi lỗi vận hành để đối soát, không xóa mù làm thất thoát reservation hoặc payment.
 
 Nhân viên xem đơn tại `GET /api/v1/staff/orders`, nhận đơn bằng `POST /api/v1/staff/orders/{id}/claim`, rồi chuyển `RECEIVED → PREPARING → DELIVERED` bằng `PATCH /api/v1/staff/orders/{id}/fulfillment`. Mỗi mutation cần session và CSRF token.
 
@@ -96,7 +96,7 @@ $env:LOAD_TEST_PASSWORD = "<customer-password>"
 node scripts/order-load-test.mjs
 ```
 
-Mặc định chạy 148 phiên đăng nhập độc lập trong tối thiểu 120 giây; mỗi phiên tạo đơn, chờ 5–10 giây, tra cứu đơn rồi tiếp tục. Báo cáo JSON in p95 cho POST/GET, throughput, lỗi 5xx và phản hồi không mong đợi. Kết quả chỉ được coi đạt ngưỡng cá nhân hóa khi p95 mỗi endpoint ≤2 giây, 5xx ≤1%, đủ 148 phiên và chạy đủ thời lượng. Có thể dùng `LOAD_TEST_VUS` hoặc `LOAD_TEST_DURATION_SECONDS` để thử nhanh, nhưng các lần chạy đó không thể xác nhận đạt tải mục tiêu. `LOAD_TEST_BASE_URL` mặc định là `http://localhost:8080`; SKU mặc định là `DEMO-ITEM`.
+Mặc định chạy 115 phiên đăng nhập độc lập trong tối thiểu 120 giây; mỗi phiên tạo đơn, chờ 5–10 giây, tra cứu đơn rồi tiếp tục. Báo cáo JSON in p95 cho POST/GET, throughput, lỗi 5xx và phản hồi không mong đợi. Kết quả chỉ được coi đạt ngưỡng cá nhân hóa khi p95 mỗi endpoint ≤5,0 giây, 5xx ≤1%, đủ 115 phiên và chạy đủ thời lượng. Có thể dùng `LOAD_TEST_VUS` hoặc `LOAD_TEST_DURATION_SECONDS` để thử nhanh, nhưng các lần chạy đó không thể xác nhận đạt tải mục tiêu. `LOAD_TEST_BASE_URL` mặc định là `http://localhost:8080`; SKU mặc định là `DEMO-ITEM`.
 
 ## Mô phỏng payment
 
@@ -106,4 +106,4 @@ Các event nghiệp vụ được lưu cùng transaction thay đổi trạng th�
 
 ## Phạm vi của base code
 
-Đã có luồng nền cho giữ hàng, payment mock, xác nhận/thất bại, giải phóng reservation, refund mock và hết hạn; các nhánh cạnh tranh dùng conditional update theo DB clock. Increment RE-005 bổ sung session/authentication, role/ownership checks, audit, luồng fulfillment theo store, dọn retention cho đơn kết thúc và module lưu hàng đợi đơn offline phía trình duyệt. Chưa có giao diện đặt hàng tích hợp, retry/backoff tự động, lease worker bền vững, cảnh báo quản trị qua kênh ngoài, fault-injection API, payment reconciliation theo lịch D-04, TLS termination hoặc tích hợp broker/provider thật. Hiệu năng 148 người dùng đồng thời và các ngưỡng p95/độ lỗi cần được xác minh bằng môi trường tải riêng trước khi coi là đạt.
+Đã có luồng nền cho giữ hàng, payment mock, xác nhận/thất bại, giải phóng reservation, refund mock và hết hạn; các nhánh cạnh tranh dùng conditional update theo DB clock. Increment RE-005 bổ sung session/authentication, role/ownership checks, audit, luồng fulfillment theo store, dọn retention cho đơn kết thúc và module lưu hàng đợi đơn offline phía trình duyệt. Chưa có giao diện đặt hàng tích hợp, retry/backoff tự động, lease worker bền vững, cảnh báo quản trị qua kênh ngoài, fault-injection API, payment reconciliation theo lịch D-04, TLS termination hoặc tích hợp broker/provider thật. Mục tiêu tải là 115 người dùng/tác vụ đồng thời và p95 ≤ 5,0 giây; cần xác minh bằng môi trường tải riêng trước khi kết luận đạt. Ngưỡng 5xx ≤ 1% là ngưỡng bổ sung của nhóm.
