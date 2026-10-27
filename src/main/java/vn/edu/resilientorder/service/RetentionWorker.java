@@ -23,7 +23,7 @@ public class RetentionWorker {
 
     public RetentionWorker(
             JdbcTemplate jdbc,
-            @Value("${app.order.retention:26d}") Duration retentionPeriod
+            @Value("${app.order.retention:28d}") Duration retentionPeriod
     ) {
         if (retentionPeriod.isNegative() || retentionPeriod.isZero()) {
             throw new IllegalArgumentException("Order retention period must be positive.");
