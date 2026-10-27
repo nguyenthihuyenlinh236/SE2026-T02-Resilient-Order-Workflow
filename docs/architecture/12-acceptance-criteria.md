@@ -167,6 +167,7 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 - Chỉ một nhánh nhận được quyền chuyển trạng thái.
 - Nhánh còn lại không được ghi đè trạng thái đã được commit.
 - Order không thể vừa `CONFIRMED` vừa `EXPIRED`.
+- Order đã ở `FAILED` hoặc `EXPIRED` không được chuyển lại `CONFIRMED`.
 - Hệ thống đọc lại trạng thái hiện tại và xử lý theo nhánh hợp lệ.
 
 ## 6. AC-04 – Thanh toán thất bại
@@ -517,7 +518,6 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 - p95 của từng endpoint không vượt quá 5.000 ms (5,0 giây).
 - Báo cáo ghi rõ số người dùng đồng thời, thời lượng, số mẫu đo, p95 từng endpoint và tỷ lệ phản hồi 5xx.
 - Không kết luận đạt mục tiêu tải nếu chưa chạy đủ 115 người dùng/tác vụ đồng thời trong thời lượng kiểm thử đã quy định.
-- Order đã ở `FAILED` hoặc `EXPIRED` không được chuyển lại `CONFIRMED`.
 
 ## 13. AC-11 – Khả năng cấu hình và kiểm thử
 
