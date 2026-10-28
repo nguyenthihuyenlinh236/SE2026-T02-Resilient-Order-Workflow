@@ -27,9 +27,9 @@ docker compose up -d --wait
 docker compose ps
 ```
 
-Nếu không cần tùy chỉnh cấu hình, có thể bỏ qua bước `Copy-Item`; Compose có giá trị mặc định cho môi trường local. Các giá trị trong `.env.example` chỉ dành cho phát triển cục bộ, không dùng trong production.
+Có thể bỏ qua `Copy-Item` nếu dùng giá trị mặc định. Compose tự đọc `.env`; các giá trị trong `.env.example` chỉ dành cho phát triển cục bộ, không dùng trong production.
 
-Biên dịch và chạy các bài kiểm thử:
+Biên dịch và chạy smoke test ứng dụng/HTTP:
 
 ```powershell
 mvn clean verify
@@ -49,6 +49,8 @@ mvn -pl inventory-service spring-boot:run
 mvn -pl payment-service spring-boot:run
 ```
 
+Spring Boot khi chạy qua Maven đọc biến môi trường của tiến trình, không tự đọc file `.env`. Giá trị mặc định trong cấu hình service khớp với `.env.example`. Nếu đổi thông tin kết nối hoặc cổng, hãy đặt các biến tương ứng trong terminal chạy service.
+
 Khi cả ba service và hạ tầng đang chạy, kiểm tra endpoint:
 
 ```powershell
@@ -57,7 +59,7 @@ Invoke-RestMethod http://localhost:8082/actuator/health
 Invoke-RestMethod http://localhost:8083/actuator/health
 ```
 
-Cả ba endpoint cần trả về `status: UP`. Ở runtime, health indicator của PostgreSQL và RabbitMQ được bật; do đó kết quả `UP` xác nhận các dependency được kiểm tra đều khỏe. Các bài smoke test tự động hiện kiểm tra ứng dụng/HTTP độc lập với hạ tầng, nên cần thực hiện thêm bước kiểm tra runtime ở trên để xác minh kết nối thực tế.
+Cả ba endpoint cần trả về `status: UP`. Health indicator của PostgreSQL và RabbitMQ được bật khi chạy service, nên trạng thái `UP` xác nhận các kết nối đó đang khỏe. Smoke test tự động tắt hai indicator này để kiểm tra HTTP độc lập với hạ tầng; bước kiểm tra runtime phía trên xác minh kết nối thực tế.
 
 Dừng hạ tầng local:
 
@@ -69,5 +71,4 @@ Lưu ý: script tạo database của PostgreSQL chỉ chạy khi volume dữ li�
 
 ## Cấu hình
 
-Các cấu hình có thể ghi đè bằng biến môi trường trong `.env`. Xem `.env.example` để biết các cổng và thông tin kết nối local.
-
+Compose đọc các biến trong `.env`. Khi chạy service bằng Maven, đặt biến kết nối trong môi trường của terminal nếu cần ghi đè giá trị mặc định. Danh sách biến và cổng nằm trong `.env.example`.
