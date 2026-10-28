@@ -3,6 +3,3 @@ target/
 .vscode/
 *.iml
 .env
-*.local
-node_modules/
-dist/
