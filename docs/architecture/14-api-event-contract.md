@@ -1,9 +1,5 @@
 # 14 – API Contract và Event Contract
 
-> **Trạng thái:** Bản đặc tả thiết kế để review, chưa phải OpenAPI/schema triển khai cuối cùng.  
-> **Phạm vi:** Order Service, Inventory Service, Payment Service và điểm nhận thông báo của Notification Service.  
-> **Nguyên tắc:** Chốt hành vi nghiệp vụ và cấu trúc logic; Dev xác nhận tên endpoint, kiểu dữ liệu cụ thể, framework, broker và cấu hình triển khai trước khi code.
-
 ## 1. Mục tiêu và nguyên tắc thiết kế
 
 Tài liệu thống nhất cách các service trao đổi trong Resilient Order Workflow, bao gồm API đồng bộ, command nghiệp vụ, domain event, dữ liệu trao đổi, lỗi, timeout, idempotency và tương thích schema.
@@ -619,45 +615,5 @@ Cùng key/cùng payload phải trả lại kết quả đã lưu; cùng key/khá
 - Không log toàn bộ payload nếu chứa dữ liệu cá nhân/nhạy cảm.
 - Theo dõi số lần retry, timeout, trạng thái `UNKNOWN`, tuổi của Saga chưa hoàn tất, Outbox chưa publish và notification đang retry.
 - `correlationId` phải được giữ qua các hop để có thể truy vết một luồng từ request tạo Order đến event kết thúc.
-
-## 13. Quyết định còn mở cần Dev/nhóm xác nhận
-
-| ID | Nội dung | Đề xuất trong bản contract | Người cần xác nhận |
-|---|---|---|---|
-| OPEN-01 | REST sync hay broker command cho Reserve/Capture/Release/Refund | Giữ REST request/response như sequence hiện tại; không tạo command message trùng | Dev phụ trách tích hợp |
-| OPEN-02 | Endpoint nội bộ, base URL và authentication | Dùng các path logic ở mục 5–6; Dev chốt service discovery và auth | Dev |
-| OPEN-03 | Cách biểu diễn Inventory từ chối reserve | Chọn nhất quán giữa `409 INVENTORY_NOT_AVAILABLE` và response nghiệp vụ `REJECTED` | Inventory owner |
-| OPEN-04 | Kiểu ID, tiền và currency | String ID; decimal string + currency nếu có giá | Order/Payment owner |
-| OPEN-05 | Query theo idempotency key khi chưa có resource ID | Cần endpoint tra cứu theo key cho reserve/payment/refund | Inventory/Payment owner |
-| OPEN-06 | Schema validation và format chính thức | JSON mẫu trong tài liệu; Dev chốt OpenAPI/JSON Schema hoặc format tương ứng | Dev |
-| OPEN-07 | Broker, topic/queue, delivery/ack và schema registry | Chưa chốt trong tài liệu BA; chỉ triển khai sau khi thống nhất kiến trúc tích hợp | Dev |
-| OPEN-08 | Enum `reasonCode` của OrderFailed | Chốt danh mục mã lỗi dùng chung với failure catalog | BA + Dev |
-| OPEN-09 | Cách xử lý refund `FAILED` đã xác minh | Không tự sinh key refund mới; theo Q-08 trong Design Decisions | Nhóm |
-
-## 14. Checklist review và nghiệm thu
-
-- [ ] Các API Order create/query được đặc tả request, response, validation và lỗi.
-- [ ] Các thao tác reserve/query/release Inventory có contract và idempotency key.
-- [ ] Các thao tác capture/query/refund Payment có contract và phân biệt `SUCCEEDED`, `FAILED`, `UNKNOWN`.
-- [ ] Command được phân biệt với API transport và domain event.
-- [ ] Chỉ domain event đã được State Machine xác định được đưa vào phạm vi hiện tại.
-- [ ] Mỗi event có producer, consumer, envelope, payload và thời điểm phát rõ ràng.
-- [ ] `eventId`, `commandId`, `correlationId`, `schemaVersion` được phân biệt và dùng nhất quán.
-- [ ] Retry cùng hành động giữ nguyên Idempotency-Key; cùng key khác payload bị từ chối.
-- [ ] Timeout không bị xem là FAILED; `UNKNOWN` phải query/đối soát.
-- [ ] Outbox event được ghi cùng transaction với thay đổi Order tương ứng.
-- [ ] Consumer chống trùng bằng `(consumerName, eventId)`.
-- [ ] Không tuyên bố exactly-once cho tác dụng phụ bên ngoài nếu không có hỗ trợ từ bên nhận.
-- [ ] Không giả định API cũ trong source code đã được triển khai trong skeleton mới.
-- [ ] Dev/owner ba service review endpoint, schema, message format và các điểm mở trước khi merge vào `dev`.
-
-## 15. Tài liệu tham chiếu
-
-- `docs/requirements/02-functional-requirements.md`
-- `docs/requirements/03-business-rules.md`
-- `docs/requirements/06-design-decisions.md`
-- `docs/architecture/09-state-machine.md`
-- `docs/architecture/10-saga-workflow-and-compensation.md`
-- `docs/architecture/11-sequence-diagrams.md`
 - Issue #6 – Draft API and Event Contracts
 - Issue #20 – Hoàn thiện API Contract và Event Contract giữa các service
