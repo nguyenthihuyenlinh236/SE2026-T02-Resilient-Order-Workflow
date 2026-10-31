@@ -196,12 +196,14 @@ erDiagram
     RESERVATIONS {
         uuid reservation_id PK
         uuid order_id FK,UK
+        varchar store_id
         varchar reserve_key UK
         varchar status
     }
     RESERVATION_ITEMS {
         uuid reservation_id PK,FK
-        uuid product_id PK,FK
+        varchar sku PK
+        uuid product_id FK
         integer quantity
     }
 ```
@@ -211,13 +213,15 @@ erDiagram
 | Cột | Kiểu | Ràng buộc / mặc định | Ý nghĩa |
 |---|---|---|---|
 | `product_id` | `uuid` | PK | Định danh sản phẩm |
+| `sku` | `varchar(128)` | NOT NULL, không trắng | Mã sản phẩm trong cửa hàng |
+| `store_id` | `varchar(100)` | NOT NULL, không trắng | Cửa hàng sở hữu tồn kho |
 | `product_name` | `varchar(255)` | NOT NULL | Tên phục vụ kiểm thử |
 | `on_hand_quantity` | `integer` | NOT NULL, CHECK >= 0 | Tổng tồn có thể phân bổ |
 | `reserved_quantity` | `integer` | NOT NULL, default 0, CHECK >= 0 | Tổng lượng đang giữ |
 | `other_commitments` | `integer` | NOT NULL, default 0, CHECK >= 0 | Cam kết khác, ngoài Reservation |
 | `updated_at` | `timestamptz` | NOT NULL | Thời điểm cập nhật |
 
-`available_quantity = on_hand_quantity - reserved_quantity - other_commitments`, tính khi truy vấn, không lưu thêm một cột có thể lệch. CHECK `reserved_quantity + other_commitments <= on_hand_quantity`.
+`UNIQUE(store_id, sku)` xác định một dòng tồn trong cửa hàng; `product_id` là UUID nội bộ. Command Reserve dùng `storeId` và `items[{sku,quantity}]`, không dùng productId thay SKU. SKU phân biệt hoa/thường và không tự trim. `available_quantity = on_hand_quantity - reserved_quantity - other_commitments`, tính khi truy vấn, không lưu thêm một cột có thể lệch. CHECK `reserved_quantity::bigint + other_commitments <= on_hand_quantity` để phép cộng không tràn integer.
 
 Trong demo `other_commitments = 0`; cột này không bao gồm hàng đã tính trong `reserved_quantity`. Reservation của Order `CONFIRMED` vẫn là `RESERVED` và tiếp tục được tính, vì vận chuyển/tiêu thụ tồn kho ngoài phạm vi.
 
@@ -233,7 +237,7 @@ Trong demo `other_commitments = 0`; cột này không bao gồm hàng đã tính
 | `cancelled_at` | `timestamptz` | NULL trước khi hủy | Mốc ghi dấu hiệu hủy |
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | Mốc dữ liệu |
 
-Khi `cancellation_recorded = true`, các trường `cancel_key`, hash, result và `cancelled_at` phải có giá trị. Dấu hiệu này chỉ chuyển false → true. Cả Reserve, Release và Cancel đều tạo/khóa cùng dòng guard bằng `SELECT ... FOR UPDATE` trước khi thay đổi dữ liệu.
+Khi `cancellation_recorded = true`, `cancelled_at` phải có giá trị. Dấu hiệu này chỉ chuyển false → true. `cancel_key`, `cancel_payload_hash` và `cancel_result` cùng NULL hoặc cùng có giá trị; chúng chỉ được ghi khi có lệnh Cancel thật. Release cũng có thể ghi dấu hủy nhưng không tự tạo khóa/hash/kết quả Cancel. Kết quả Release lưu ở idempotency record riêng. Cả Reserve, Release và Cancel đều tạo/khóa cùng dòng guard bằng `SELECT ... FOR UPDATE` trước khi thay đổi dữ liệu.
 
 Cancel theo Order là lệnh bổ sung cho tình huống chưa có `reservation_id`: ghi dấu hiệu hủy và giải phóng Reservation nếu đã tồn tại. Kết quả trả về phải phân biệt không có Reservation với đã giải phóng. Release đã biết Reservation cũng ghi dấu hiệu hủy trong cùng transaction. Hai lệnh có khóa riêng nhưng chỉ một chuyển trạng thái Reservation được cộng trả tồn kho.
 
@@ -241,9 +245,11 @@ Cancel theo Order là lệnh bổ sung cho tình huống chưa có `reservation_
 
 | Cột | Kiểu | Ràng buộc / mặc định | Ý nghĩa |
 |---|---|---|---|
-| `reservation_id` | `uuid` | PK | Định danh Reservation |
+| `reservation_id` | `uuid` | PK | Order Service sinh một lần và truyền trong Reserve; Inventory lưu nguyên ID |
 | `order_id` | `uuid` | NOT NULL, UNIQUE, FK → inventory_order_guards | Một Reservation logic mỗi Order |
+| `store_id` | `varchar(100)` | NOT NULL, không trắng | Store dùng để phân giải SKU trong Reserve |
 | `reserve_key` | `varchar(255)` | NOT NULL, UNIQUE | `reserve:{orderId}:v1` |
+| `payload_hash` | `char(64)` | NOT NULL | Hash Reserve đã chuẩn hóa, đồng bộ với record lệnh |
 | `status` | `varchar(32)` | NOT NULL, CHECK | RESERVED/RELEASED/REJECTED |
 | `rejection_reason` | `varchar(128)` | NULL nếu không bị từ chối | Lý do REJECTED |
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | Mốc dữ liệu |
@@ -256,10 +262,11 @@ Inventory lưu trạng thái thực tế của Reservation; `UNKNOWN` là nhận
 | Cột | Kiểu | Ràng buộc | Ý nghĩa |
 |---|---|---|---|
 | `reservation_id` | `uuid` | PK thành phần, FK → reservations | Reservation sở hữu |
-| `product_id` | `uuid` | PK thành phần, FK → inventory | Sản phẩm được giữ |
+| `sku` | `varchar(128)` | PK thành phần, NOT NULL | Snapshot SKU trong request |
+| `product_id` | `uuid` | Nullable, FK → inventory | Tham chiếu tồn đã phân giải; NULL nếu SKU không tồn tại và Reserve bị từ chối |
 | `quantity` | `integer` | NOT NULL, CHECK > 0 | Số lượng của dòng |
 
-Reservation `RESERVED`/`RELEASED` có ít nhất một dòng. Reserve nhiều sản phẩm thành công toàn bộ hoặc từ chối toàn bộ. Nếu sản phẩm không tồn tại, lưu lỗi/kết quả trong idempotency record; không tạo dòng vi phạm FK. Dữ liệu request ban đầu được lưu trong record chống trùng để truy vết cả kết quả từ chối.
+PK `(reservation_id, sku)`. Reservation `RESERVED`/`RELEASED` có ít nhất một dòng và product_id được phân giải trong đúng store_id của Reservation. Reserve nhiều sản phẩm thành công toàn bộ hoặc từ chối toàn bộ. Với SKU không tồn tại, lưu dòng request có product_id NULL và kết quả REJECTED/PRODUCT_NOT_FOUND; không tạo FK giả. Dữ liệu request ban đầu cũng được lưu trong record chống trùng để truy vết cả kết quả từ chối. Kiểm tra store/SKU/reference của nhiều bảng được thực hiện trong transaction, không dùng CHECK truy vấn xuyên bảng.
 
 ## 6. Payment Database
 
@@ -345,7 +352,7 @@ Thêm `UNIQUE(payment_id, order_id)` trên Capture và FK kép từ Refund để
 
 Trong `order_db`, thêm `order_id uuid` nullable, FK → orders để liên kết yêu cầu tạo đơn thành công. PK `(scope, idempotency_key)` tương ứng `UNIQUE(clientId, idempotencyKey)` cho tạo Order. Với command nội bộ dùng scope cố định của service; không đưa operation vào scope để tránh cùng khóa bị tái sử dụng cho nghiệp vụ khác.
 
-Chuẩn hóa payload bằng cách cố định thứ tự trường, biểu diễn số và danh sách sản phẩm đã gộp/sắp theo `product_id`. Hash bao gồm operation, Order ID, resource ID, số lượng, số tiền/currency theo từng lệnh; không gồm trace ID, thời gian gửi hay số retry. Cancel lưu khóa/hash/kết quả ở guard vì là dấu hiệu theo Order.
+Chuẩn hóa payload bằng cấu trúc JSON cố định, biểu diễn số và danh sách sản phẩm đã gộp/sắp theo SKU. Hash Reserve bao gồm operation, orderId, reservationId, storeId và items; Release gồm operation, hai ID và reason; Cancel gồm operation, orderId và reason. Không ghép chuỗi bằng delimiter có thể xuất hiện trong SKU/storeId. Các lệnh thanh toán còn gồm số tiền/currency; không hash trace ID, thời gian gửi hay số retry. Cancel lưu khóa/hash/kết quả ở guard vì là dấu hiệu theo Order.
 
 Cùng khóa/cùng hash: đọc record đã lưu. Cùng khóa/khác hash: trả `409 IDEMPOTENCY_KEY_CONFLICT`, không đổi dữ liệu. Record `COMPLETED` phải có response code, payload và completed_at. Record `IN_PROGRESS` trả trạng thái đang xử lý hoặc được truy vấn; không cho worker thứ hai thực hiện tác dụng mới. Không coi response tiến trình ban đầu là kết quả cuối và không ghi đè Capture/Refund đã xác minh bằng UNKNOWN.
 
@@ -426,7 +433,7 @@ Chốt `EXPIRED` kiểm tra trong transaction: token đúng, lease còn hiệu l
 1. Tạo guard nếu chưa có bằng INSERT ON CONFLICT DO NOTHING; khóa guard theo Order.
 2. Kiểm tra idempotency record. Record đã hoàn tất thì replay, không sửa tồn kho.
 3. Nếu guard đã hủy, lưu kết quả từ chối; không tạo Reservation còn hiệu lực.
-4. Khóa tất cả dòng Inventory theo thứ tự `product_id` cố định để giảm deadlock.
+4. Phân giải và khóa tất cả dòng Inventory theo thứ tự SKU cố định trong đúng store_id để giảm deadlock.
 5. Xác minh mọi sản phẩm và tồn khả dụng. Nếu thiếu bất kỳ dòng nào, lưu kết quả REJECTED và không tăng reserved_quantity.
 6. Nếu đủ, tăng reserved_quantity có điều kiện, tạo Reservation/items và kết quả idempotency trong cùng transaction.
 7. Nếu ghi bất kỳ dòng nào lỗi, rollback toàn bộ. Không để đơn giữ một phần ngoài ý muốn.
@@ -435,9 +442,11 @@ CHECK tồn kho là lớp bảo vệ cuối; lock/cập nhật có điều kiệ
 
 ### 8.4. Release, Cancel và Reserve đến muộn
 
-Release khóa guard trước, kiểm tra đúng cặp Order/Reservation và khóa idempotency. Nếu Reservation không thuộc Order, từ chối và không ghi dấu hủy cho Order khác. Với Reservation hợp lệ, ghi dấu hủy, khóa Inventory theo thứ tự cố định, chuyển có điều kiện RESERVED → RELEASED, giảm reserved_quantity đúng số lượng đã giữ và lưu kết quả cùng transaction.
+Release dùng khóa `inventory:release:{orderId}:{reservationId}:v1`, khóa guard trước, kiểm tra đúng cặp Order/Reservation và khóa idempotency. Nếu Reservation không thuộc Order, từ chối và không ghi dấu hủy cho Order khác. Với Reservation hợp lệ, ghi dấu hủy, khóa Inventory theo thứ tự SKU trong store, chuyển có điều kiện RESERVED → RELEASED, giảm reserved_quantity đúng số lượng đã giữ, không tăng on_hand_quantity, và lưu kết quả cùng transaction.
 
 Nếu Reservation đã RELEASED, trả kết quả hiện tại, không cộng hàng lần nữa. Nếu chưa tìm thấy Reservation, không hoàn trả tồn kho và không khẳng định release thành công; tra cứu theo Reserve key hoặc dùng Cancel theo Order.
+
+Không chuyển REJECTED thành RELEASED. Release không tồn tại/sai chủ sở hữu/validation lỗi không commit dấu hủy hoặc snapshot thành công; NOT_FOUND không lưu thành kết quả cuối vì Reserve đang bay có thể xuất hiện sau đó. Cancel trả trạng thái lệnh CANCELLATION_RECORDED và reservationStatus riêng (NOT_CREATED/RELEASED/REJECTED), không tạo trạng thái Reservation mới. GET operation theo key trả snapshot lệnh; GET Reservation trả resource hiện tại. Phần contract HTTP chi tiết được quản lý trong `14-inventory-api-contract.md` ở nhánh Inventory #28.
 
 Cancel khóa cùng guard rồi ghi dấu hủy. Nếu Reserve đã thắng trước đó, Cancel giải phóng Reservation trong cùng transaction; nếu Cancel thắng trước, Reserve bị từ chối. Tra cứu không thấy Reservation chỉ an toàn để kết thúc khi không còn khả năng Reserve đang bay tạo giữ hàng mới; kết quả Cancel là bằng chứng chặn tác dụng muộn. Gửi lại Cancel cùng khóa khác hash phải xung đột.
 
@@ -525,6 +534,8 @@ Sử dụng Flyway với migration SQL có phiên bản, mỗi service quản l�
 | payment_db | captures → refunds → idempotency → index |
 
 Database/role được provision trước migration; cấp quyền theo service, không dùng tài khoản truy cập toàn bộ dữ liệu các service cho runtime.
+
+Inventory #28 đã có V001 và V002: V002 thêm SKU/store và caller Reservation ID contract, đổi PK items sang `(reservation_id, sku)`, giữ tồn kho và Reservation cũ. Không sửa V001 đã áp dụng. Migration #29 tiếp tục thêm released_at, guard hủy và snapshot kết quả; backfill Reserve từ dữ liệu có thể xác minh trước khi Release sửa trạng thái. Hash legacy giữ nguyên; không replay legacy như payload mới hoặc dựng kết quả RESERVED giả từ resource đã RELEASED.
 
 ### 11.3. Tái tạo môi trường kiểm thử
 
