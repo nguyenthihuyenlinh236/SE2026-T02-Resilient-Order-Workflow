@@ -4,7 +4,7 @@
 
 Hợp đồng HTTP cho issue #28 ánh xạ payload `ReserveInventory` trong `14-api-event-contract-draft.md` trên nhánh `feature/issue-6-api-event-contracts`: `orderId`, `reservationId`, `storeId`, `items[{sku,quantity}]`. RabbitMQ envelope/consumer chưa thuộc phạm vi. Order Service sinh và lưu `reservationId` một lần trước khi gửi; retry giữ nguyên ID, key và payload.
 
-Reserve và tra cứu Reservation đã được triển khai trong #28. Mục 5–8 đặc tả phần sẽ triển khai trong #29; các endpoint mới chưa tồn tại trong code #28. Công thức khóa theo D-02 và issue #29 được ưu tiên so với khóa Release cũ trong draft.
+Reserve và tra cứu Reservation được triển khai trong #28. Nhánh #29 triển khai mục 5–8; các endpoint này chưa có trong nhánh #28. Công thức khóa theo D-02 và issue #29 được ưu tiên so với khóa Release cũ trong draft.
 
 ## 2. ReserveInventory
 
@@ -100,6 +100,7 @@ Hai ID bắt buộc UUID; reservationId trong body phải khớp path. `reason` 
 | Không tồn tại | 404 RESERVATION_NOT_FOUND | Không báo giải phóng thành công; không trả tồn |
 | Cùng key khác payload | 409 IDEMPOTENCY_KEY_CONFLICT | Không có tác dụng mới |
 | Path/body/key sai | 400 INVALID_REQUEST | Không có tác dụng |
+| Legacy RELEASED thiếu mốc đã xác minh | 409 RELEASE_HISTORY_UNAVAILABLE | Không tự tạo timestamp hoặc trả tồn |
 
 Response 200 gồm `orderId`, `reservationId`, `idempotencyKey`, `status=RELEASED`, `releasedAt` (UTC). Release thành công hoặc xác minh đã RELEASED ghi dấu hủy theo Order. Lỗi validation, sai chủ sở hữu, REJECTED hoặc NOT_FOUND không commit dấu hủy/kết quả thành công. Không lưu NOT_FOUND như kết quả cuối của key, vì Reserve đang bay có thể hoàn tất sau đó; bên gọi tra cứu Reserve hoặc dùng Cancel theo Order.
 
@@ -137,3 +138,5 @@ Mọi Reserve/Release/Cancel khóa guard theo Order trước, rồi khóa các d
 Đã có record Reserve thì kiểm tra hash và replay trước khi xét guard hủy. Hai lệnh Reserve/Cancel cạnh tranh: Reserve thắng trước thì Cancel giải phóng; Cancel thắng trước thì Reserve bị từ chối. Guard, chuyển trạng thái, cập nhật tồn và kết quả lệnh rollback toàn bộ nếu transaction lỗi.
 
 Migration #29 bổ sung dấu hủy, released_at và nơi lưu snapshot kết quả lệnh; không sửa V001/V002. Backfill Reserve đã lưu từ #28 trước khi cho phép Release thay đổi resource, giữ nguyên payload hash cũ khi chưa có cách xác minh payload legacy. Không backfill response RESERVED từ Reservation đã RELEASED nếu không có bằng chứng kết quả gốc. Giữ khóa/guard theo retention và cửa sổ replay của NFR-10.
+
+V003 dùng bảng inventory_operations để lưu snapshot cả Reserve/Release/Cancel; guard chỉ lưu cancellation_recorded/cancelled_at, không tạo thông tin Cancel giả khi Release ghi dấu hủy. Khi có Reservation legacy nhưng không có snapshot ban đầu có thể xác minh, replay Reserve trả 409 RESERVE_HISTORY_UNAVAILABLE, không trả trạng thái hiện tại như kết quả gốc.
