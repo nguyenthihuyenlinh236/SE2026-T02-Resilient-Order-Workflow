@@ -1,6 +1,6 @@
-# Inventory Service – Reserve (issue #28)
+# Inventory Service – Reserve, Release và Idempotency (#28, #29)
 
-Service sử dụng Java 17, Maven, Spring Boot, JDBC, PostgreSQL và Flyway. Phạm vi hiện tại: truy vấn tồn kho, Reserve nhiều sản phẩm trong một transaction và tra cứu Reservation. Release, Cancel, RabbitMQ Consumer và cơ chế idempotency hoàn chỉnh thuộc issue #29/các giai đoạn sau.
+Service sử dụng Java 17, Maven, Spring Boot, JDBC, PostgreSQL và Flyway. #28 triển khai Reserve và tra cứu; #29 bổ sung Release, Cancel theo Order và snapshot kết quả idempotency. Chưa triển khai RabbitMQ Consumer, Saga Orchestrator hoặc Reconciliation Worker.
 
 ## 1. Khởi động
 
@@ -33,6 +33,9 @@ Flyway tự chạy migration khi khởi động. Profile `demo` nạp hai sản 
 | Method | Path | Kết quả |
 |---|---|---|
 | POST | `/api/v1/inventory/reservations` | RESERVED hoặc REJECTED; HTTP 200 cho kết quả nghiệp vụ xác định |
+| POST | `/api/v1/inventory/reservations/{reservationId}/release` | Giải phóng đúng Reservation một lần |
+| POST | `/api/v1/inventory/orders/{orderId}/cancel` | Ghi dấu hủy; giải phóng nếu đã giữ, chặn Reserve muộn |
+| GET | `/api/v1/inventory/operations?idempotencyKey={key}` | Snapshot kết quả lệnh đã commit |
 | GET | `/api/v1/inventory/products/{productId}` | Tổng tồn, lượng giữ, cam kết khác và tồn khả dụng |
 | GET | `/api/v1/inventory/stock?storeId={storeId}&sku={sku}` | Tồn kho SKU trong đúng cửa hàng |
 | GET | `/api/v1/inventory/reservations/{reservationId}` | Reservation đã lưu |
@@ -72,7 +75,45 @@ Invoke-RestMethod "http://localhost:8082/api/v1/inventory/products/$productId"
 Invoke-RestMethod "http://localhost:8082/api/v1/inventory/reservations/$($reservation.reservationId)"
 ```
 
-Nếu trước test còn 10, sau Reserve còn 8 và reservedQuantity=2. Gửi lại POST với nguyên body/header phải trả cùng ID và không giảm tồn lần nữa. Khóa bản ghi Order và UNIQUE bảo vệ Reservation trùng; replay sau Release và các tác vụ idempotency đầy đủ được hoàn thiện ở #29.
+Nếu trước test còn 10, sau Reserve còn 8 và reservedQuantity=2. Gửi lại POST với nguyên body/header phải trả cùng ID và không giảm tồn lần nữa. Sau Release, replay Reserve vẫn trả snapshot RESERVED ban đầu, nhưng GET Reservation trả RELEASED và hàng không bị giữ lại.
+
+### Release và Cancel
+
+Sau khi Reserve thành công, chạy ở terminal thứ hai với các biến từ ví dụ trên:
+
+```powershell
+$releaseKey = "inventory:release:${orderId}:${reservationId}:v1"
+$releaseBody = @{
+    orderId = $orderId
+    reservationId = $reservationId
+    reason = "ORDER_EXPIRED"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post `
+    -Uri "http://localhost:8082/api/v1/inventory/reservations/$reservationId/release" `
+    -Headers @{ "Idempotency-Key" = $releaseKey } `
+    -ContentType "application/json" -Body $releaseBody
+
+Invoke-RestMethod "http://localhost:8082/api/v1/inventory/operations?idempotencyKey=$releaseKey"
+Invoke-RestMethod "http://localhost:8082/api/v1/inventory/reservations/$reservationId"
+Invoke-RestMethod "http://localhost:8082/api/v1/inventory/products/$productId"
+```
+
+Kỳ vọng RELEASED, tồn khả dụng tăng đúng 2 so với sau Reserve, onHandQuantity không đổi. Gửi lại Release nguyên key/body không trả hàng thêm. Cùng key đổi reason trả 409. Không tồn tại trả 404; sai Order hoặc Reservation REJECTED trả 409 và không ghi dấu hủy.
+
+Cancel Order mới trước khi Reserve:
+
+```powershell
+$cancelOrderId = [guid]::NewGuid().ToString()
+$cancelKey = "inventory:cancel:${cancelOrderId}:v1"
+$cancelBody = @{ orderId = $cancelOrderId; reason = "ORDER_EXPIRED" } | ConvertTo-Json
+Invoke-RestMethod -Method Post `
+    -Uri "http://localhost:8082/api/v1/inventory/orders/$cancelOrderId/cancel" `
+    -Headers @{ "Idempotency-Key" = $cancelKey } `
+    -ContentType "application/json" -Body $cancelBody
+```
+
+Kỳ vọng CANCELLATION_RECORDED, reservationStatus=NOT_CREATED, reservationId=NULL. Reserve sau đó cho cùng Order bị REJECTED/ORDER_CANCELLED, tồn không đổi. Cancel đã có Reservation RESERVED giải phóng trong cùng transaction; Cancel lặp trả response ban đầu. Không gọi Cancel chỉ dựa vào timeout hoặc payment UNKNOWN.
 
 | Kịch bản | Kỳ vọng |
 |---|---|
@@ -101,6 +142,8 @@ Các lớp test:
 - `InventoryServiceTests`: unit test gộp/sắp SKU, dữ liệu sai, tràn lượng, command/key không hợp lệ và validation trước khi truy cập Repository.
 - `InventoryReserveIntegrationTests`: HTTP thật + PostgreSQL riêng; Reserve theo caller ID, store isolation, rejection, replay/conflict, lookup theo ID/Order/key, validation, 12 request tranh tồn và 12 request trùng đồng thời. Kiểm tra migration V001 → V002 giữ dữ liệu cũ.
 - `InventoryRollbackTests`: PostgreSQL 16 riêng bằng Testcontainers, Flyway chạy migration thật. Constraint chỉ trong DB test gây lỗi ở dòng Reservation thứ hai sau khi đã cập nhật tồn và ghi header/dòng đầu. Test xác minh toàn bộ tồn kho, Reservation, items, guard rollback và retry cùng Order/key thành công.
+- `InventoryLifecycleServiceTests`: validation Release/Cancel trước khi truy cập DB.
+- `InventoryLifecycleIntegrationTests`: Release/Cancel, snapshot Reserve sau Release, sai Order, thiếu Reservation, conflict, request đồng thời, rollback khi lưu snapshot, đọc kết quả bằng repository mới và nâng cấp V002 → V003.
 
 Chạy riêng rollback:
 
@@ -118,6 +161,14 @@ mvn -pl inventory-service "-Dtest=InventoryServiceTests" test
 
 V002 nâng cấp database demo đã có, không sửa V001 hoặc xóa volume. Giữ nguyên tồn và Reservation cũ; payload mới bắt buộc SKU/store/caller ID. Request mẫu productId trước đây không còn hợp lệ. Dữ liệu V001 vẫn query được; không replay hash legacy bằng payload contract mới. Các Order test mới dùng ID mới và lượng tồn hiện tại, không mặc định tồn quay về 10.
 
+V003 thêm inventory_operations, dấu hủy và released_at. Backfill response Reserve từ resource RESERVED/REJECTED có thể xác minh, giữ hash cũ. Không dựng response RESERVED giả cho dữ liệu đã RELEASED từ bên ngoài. Replay thiếu lịch sử gốc trả 409 RESERVE_HISTORY_UNAVAILABLE; Release legacy thiếu timestamp trả 409 RELEASE_HISTORY_UNAVAILABLE. Trường hợp này phải điều tra dữ liệu thay vì tạo tác dụng mới.
+
+Chạy riêng test #29:
+
+```powershell
+mvn -pl inventory-service "-Dtest=InventoryLifecycleServiceTests,InventoryLifecycleIntegrationTests" test
+```
+
 Nếu Docker CLI chạy nhưng Testcontainers không nhận Docker trên Windows với context desktop-linux, đặt trong terminal test:
 
 ```powershell
@@ -130,4 +181,6 @@ $env:DOCKER_HOST = "npipe:////./pipe/dockerDesktopLinuxEngine"
 
 Reserve khóa guard theo Order, kiểm tra kết quả cũ, khóa Inventory theo thứ tự SKU cố định trong cửa hàng và kiểm tra tất cả dòng trước khi phân bổ. Cập nhật reservedQuantity có điều kiện và lưu Reservation/items trong một transaction. CHECK ở DB ngăn tồn khả dụng âm. Lỗi DB rollback toàn bộ, không được trả REJECTED giả cho lỗi hạ tầng.
 
-Chưa có API sửa tồn kho, xác thực API nội bộ, Release/Cancel hoặc cơ chế đối soát tự động. Các test thủ công không thay thế bộ kiểm thử tải và phục hồi Saga ở các giai đoạn sau.
+Reserve/Release/Cancel khóa cùng guard theo Order; snapshot, trạng thái và tồn cùng commit hoặc rollback. Cancellation là dấu hiệu đơn điệu; Release không tạo snapshot Cancel giả. Snapshot được lưu trong inventory_operations thay vì nhúng vào guard, với UNIQUE(order_id, operation) và PK idempotency_key. Chưa có job xóa snapshot/guard: giữ dữ liệu để không mất bảo vệ replay; retention 29 ngày là tối thiểu, không phải tự động xóa ngày thứ 29.
+
+Chưa có API sửa tồn kho, xác thực API nội bộ hoặc cơ chế đối soát tự động. Các test thủ công không thay thế bộ kiểm thử tải và phục hồi Saga ở các giai đoạn sau.
