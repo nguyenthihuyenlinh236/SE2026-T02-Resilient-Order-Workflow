@@ -13,7 +13,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 // Infrastructure-independent HTTP smoke test. Live readiness checks must also
 // exercise PostgreSQL and RabbitMQ with their health contributors enabled.
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = {"management.health.db.enabled=false", "management.health.rabbit.enabled=false"})
+        properties = {"management.health.db.enabled=false", "management.health.rabbit.enabled=false",
+                "spring.flyway.enabled=false"})
 class InventoryServiceApplicationTests {
 
     @Autowired
