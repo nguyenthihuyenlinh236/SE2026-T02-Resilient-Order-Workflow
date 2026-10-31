@@ -82,6 +82,7 @@ class InventoryRollbackTests {
             assertThat(count("reservations")).isZero();
             assertThat(count("reservation_items")).isZero();
             assertThat(count("inventory_order_guards")).isZero();
+            assertThat(count("inventory_operations")).isZero();
         } finally {
             jdbc.execute("ALTER TABLE reservation_items DROP CONSTRAINT test_reject_quantity_three");
         }

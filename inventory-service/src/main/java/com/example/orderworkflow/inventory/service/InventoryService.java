@@ -17,12 +17,17 @@ import com.example.orderworkflow.inventory.api.InventoryDtos.Reservation;
 import com.example.orderworkflow.inventory.api.InventoryDtos.ReserveRequest;
 import com.example.orderworkflow.inventory.api.InventoryDtos.Stock;
 import com.example.orderworkflow.inventory.repository.InventoryRepository;
+import com.example.orderworkflow.inventory.repository.InventoryOperations;
 
 @Service
 public class InventoryService {
     private final InventoryRepository repository;
+    private final InventoryOperations operations;
 
-    public InventoryService(InventoryRepository repository) { this.repository = repository; }
+    public InventoryService(InventoryRepository repository, InventoryOperations operations) {
+        this.repository = repository;
+        this.operations = operations;
+    }
 
     @Transactional
     public Reservation reserve(ReserveRequest request, String key) {
@@ -35,17 +40,20 @@ public class InventoryService {
         List<Item> items = normalize(request.items());
         String hash = hash(request, items);
         repository.lockOrder(request.orderId());
+        var saved = operations.replay(key, "RESERVE", hash, Reservation.class);
+        if (saved.isPresent()) { return saved.get(); }
         var previousHash = repository.payloadHash(request.orderId());
         if (previousHash.isPresent()) {
             if (!previousHash.get().equals(hash)) {
                 throw new InventoryException(409, "IDEMPOTENCY_KEY_CONFLICT", "Order was reserved with a different payload");
             }
-            return repository.byOrder(request.orderId()).orElseThrow();
+            throw new InventoryException(409, "RESERVE_HISTORY_UNAVAILABLE",
+                    "Original Reserve response is unavailable; query the Reservation instead");
         }
 
-        String reason = null;
+        String reason = repository.cancelled(request.orderId()) ? "ORDER_CANCELLED" : null;
         // Consistent lock order across all multi-product requests prevents lock cycles.
-        for (Item item : items) {
+        for (Item item : reason == null ? items : List.<Item>of()) {
             var stock = repository.stock(request.storeId(), item.sku(), true);
             if (stock.isEmpty()) { reason = "PRODUCT_NOT_FOUND"; }
             else if (reason == null && stock.get().availableQuantity() < item.quantity()) {
@@ -53,7 +61,9 @@ public class InventoryService {
             }
         }
         if (reason == null) { items.forEach(item -> repository.allocate(request.storeId(), item)); }
-        return repository.insert(request, key, hash, items, reason);
+        var result = repository.insert(request, key, hash, items, reason);
+        operations.save(request.orderId(), key, "RESERVE", hash, result);
+        return result;
     }
 
     @Transactional(readOnly = true)

@@ -49,7 +49,7 @@ class InventoryReserveIntegrationTests {
     @BeforeEach
     void seedIsolatedDatabase() {
         // Only this throwaway container is connected; never truncate the demo DB.
-        jdbc.execute("TRUNCATE reservation_items, reservations, inventory_order_guards, inventory");
+        jdbc.execute("TRUNCATE inventory_operations, reservation_items, reservations, inventory_order_guards, inventory");
         stock("STORE-A", "ITEM", 8);
         stock("STORE-A", "EMPTY", 0);
         stock("STORE-B", "ITEM", 20);

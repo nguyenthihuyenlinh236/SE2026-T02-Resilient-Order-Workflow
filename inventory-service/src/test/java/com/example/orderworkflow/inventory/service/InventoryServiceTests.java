@@ -13,6 +13,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import com.example.orderworkflow.inventory.api.InventoryDtos.Item;
 import com.example.orderworkflow.inventory.api.InventoryDtos.ReserveRequest;
 import com.example.orderworkflow.inventory.repository.InventoryRepository;
+import com.example.orderworkflow.inventory.repository.InventoryOperations;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -42,7 +43,7 @@ class InventoryServiceTests {
     @Test
     void invalidCommandDoesNotTouchRepository() {
         var repository = mock(InventoryRepository.class);
-        var service = new InventoryService(repository);
+        var service = new InventoryService(repository, mock(InventoryOperations.class));
         UUID order = UUID.randomUUID();
         assertThatThrownBy(() -> service.reserve(new ReserveRequest(order, null, "STORE",
                 List.of(new Item("A", 1))), "reserve:" + order + ":v1"))
@@ -55,7 +56,7 @@ class InventoryServiceTests {
 
     @Test
     void lookupRequiresExactlyOneSelector() {
-        var service = new InventoryService(mock(InventoryRepository.class));
+        var service = new InventoryService(mock(InventoryRepository.class), mock(InventoryOperations.class));
         assertThatThrownBy(() -> service.lookup(null, null)).isInstanceOf(InventoryException.class);
         assertThatThrownBy(() -> service.lookup(UUID.randomUUID(), "key")).isInstanceOf(InventoryException.class);
     }
@@ -64,7 +65,7 @@ class InventoryServiceTests {
     void unknownStockReportsNotFound() {
         var repository = mock(InventoryRepository.class);
         when(repository.stock("STORE", "MISSING", false)).thenReturn(Optional.empty());
-        assertThatThrownBy(() -> new InventoryService(repository).stock("STORE", "MISSING"))
+        assertThatThrownBy(() -> new InventoryService(repository, mock(InventoryOperations.class)).stock("STORE", "MISSING"))
                 .isInstanceOfSatisfying(InventoryException.class, e -> assertThat(e.status()).isEqualTo(404));
     }
 }

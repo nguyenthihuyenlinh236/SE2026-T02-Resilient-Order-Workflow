@@ -8,13 +8,33 @@ import org.springframework.web.bind.annotation.*;
 import com.example.orderworkflow.inventory.api.InventoryDtos.*;
 import com.example.orderworkflow.inventory.service.InventoryService;
 import com.example.orderworkflow.inventory.service.InventoryException;
+import com.example.orderworkflow.inventory.service.InventoryLifecycleService;
 
 @RestController
 @RequestMapping("/api/v1/inventory")
 public class InventoryController {
     private final InventoryService service;
+    private final InventoryLifecycleService lifecycle;
 
-    public InventoryController(InventoryService service) { this.service = service; }
+    public InventoryController(InventoryService service, InventoryLifecycleService lifecycle) {
+        this.service = service;
+        this.lifecycle = lifecycle;
+    }
+
+    @PostMapping("/reservations/{reservationId}/release")
+    public ReleaseResult release(@PathVariable UUID reservationId, @Valid @RequestBody ReleaseRequest request,
+            @RequestHeader("Idempotency-Key") String key) {
+        return lifecycle.release(reservationId, request, key);
+    }
+
+    @PostMapping("/orders/{orderId}/cancel")
+    public CancelResult cancel(@PathVariable UUID orderId, @Valid @RequestBody CancelRequest request,
+            @RequestHeader("Idempotency-Key") String key) {
+        return lifecycle.cancel(orderId, request, key);
+    }
+
+    @GetMapping("/operations")
+    public OperationResult operation(@RequestParam String idempotencyKey) { return lifecycle.operation(idempotencyKey); }
 
     @PostMapping("/reservations")
     public Reservation reserve(@Valid @RequestBody ReserveRequest request,

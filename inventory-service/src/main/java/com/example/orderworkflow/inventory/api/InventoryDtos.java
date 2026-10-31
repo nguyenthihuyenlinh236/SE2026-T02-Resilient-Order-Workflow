@@ -10,6 +10,7 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
+import com.fasterxml.jackson.databind.JsonNode;
 
 public final class InventoryDtos {
     private InventoryDtos() { }
@@ -27,4 +28,18 @@ public final class InventoryDtos {
             int reservedQuantity, int otherCommitments, int availableQuantity) { }
 
     public record ApiError(String code, String message) { }
+
+    public record ReleaseRequest(@NotNull UUID orderId, @NotNull UUID reservationId,
+            @NotBlank @Size(max = 255) String reason) { }
+
+    public record CancelRequest(@NotNull UUID orderId, @NotBlank @Size(max = 255) String reason) { }
+
+    public record ReleaseResult(UUID orderId, UUID reservationId, String idempotencyKey,
+            String status, Instant releasedAt) { }
+
+    public record CancelResult(UUID orderId, String idempotencyKey, String status,
+            UUID reservationId, String reservationStatus, Instant cancelledAt) { }
+
+    public record OperationResult(String operation, String idempotencyKey, int responseCode,
+            JsonNode responsePayload, Instant completedAt) { }
 }

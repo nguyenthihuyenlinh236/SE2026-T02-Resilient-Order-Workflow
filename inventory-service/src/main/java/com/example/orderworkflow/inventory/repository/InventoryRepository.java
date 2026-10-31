@@ -5,6 +5,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Instant;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -55,6 +56,42 @@ public class InventoryRepository {
     public Optional<String> payloadHash(UUID orderId) {
         return jdbc.query("SELECT payload_hash FROM reservations WHERE order_id = ?",
                 (rs, row) -> rs.getString(1), orderId).stream().findFirst();
+    }
+
+    public boolean cancelled(UUID orderId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT cancellation_recorded FROM inventory_order_guards WHERE order_id = ?", Boolean.class, orderId));
+    }
+
+    public Instant cancelOrder(UUID orderId) {
+        // Preserve the original cancellation instant regardless of which command won.
+        return jdbc.queryForObject("UPDATE inventory_order_guards SET cancellation_recorded = TRUE, "
+                        + "cancelled_at = COALESCE(cancelled_at, clock_timestamp()) WHERE order_id = ? RETURNING cancelled_at",
+                (rs, row) -> rs.getTimestamp(1).toInstant(), orderId);
+    }
+
+    public Instant releasedAt(UUID reservationId) {
+        return jdbc.queryForObject("SELECT released_at FROM reservations WHERE reservation_id = ?",
+                (rs, row) -> rs.getTimestamp(1) == null ? null : rs.getTimestamp(1).toInstant(), reservationId);
+    }
+
+    public Instant release(Reservation reservation) {
+        var items = reservation.items().stream().sorted(java.util.Comparator.comparing(Item::sku)).toList();
+        for (Item item : items) {
+            stock(reservation.storeId(), item.sku(), true).orElseThrow(() ->
+                    new IllegalStateException("Reserved inventory row is missing"));
+        }
+        int changed = jdbc.update("UPDATE reservations SET status = 'RELEASED', released_at = clock_timestamp(), "
+                        + "updated_at = clock_timestamp() WHERE reservation_id = ? AND status = 'RESERVED'",
+                reservation.reservationId());
+        if (changed != 1) { throw new IllegalStateException("Reservation state changed under Order lock"); }
+        for (Item item : items) {
+            int returned = jdbc.update("UPDATE inventory SET reserved_quantity = reserved_quantity - ?, "
+                            + "updated_at = clock_timestamp() WHERE store_id = ? AND sku = ? AND reserved_quantity >= ?",
+                    item.quantity(), reservation.storeId(), item.sku(), item.quantity());
+            if (returned != 1) { throw new IllegalStateException("Reserved quantity is inconsistent"); }
+        }
+        return releasedAt(reservation.reservationId());
     }
 
     public Reservation insert(ReserveRequest request, String key, String hash, List<Item> items, String reason) {
