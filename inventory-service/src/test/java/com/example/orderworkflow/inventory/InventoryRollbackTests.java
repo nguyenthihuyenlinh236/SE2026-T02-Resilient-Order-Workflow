@@ -56,12 +56,13 @@ class InventoryRollbackTests {
         UUID secondProduct = UUID.fromString("00000000-0000-4000-8000-000000000002");
         UUID orderId = UUID.randomUUID();
         String key = "reserve:" + orderId + ":v1";
-        var request = new ReserveRequest(orderId,
-                List.of(new Item(firstProduct, 2), new Item(secondProduct, 3)));
+        var request = new ReserveRequest(orderId, UUID.randomUUID(), "TEST-STORE",
+                List.of(new Item("A", 2), new Item("B", 3)));
 
         for (UUID product : List.of(firstProduct, secondProduct)) {
-            jdbc.update("INSERT INTO inventory(product_id, product_name, on_hand_quantity) VALUES (?, ?, 10)",
-                    product, "Rollback test product");
+            jdbc.update("INSERT INTO inventory(product_id, sku, store_id, product_name, on_hand_quantity) "
+                            + "VALUES (?, ?, 'TEST-STORE', ?, 10)",
+                    product, product.equals(firstProduct) ? "A" : "B", "Rollback test product");
         }
 
         // The second item fails AFTER both stock updates, the Reservation header

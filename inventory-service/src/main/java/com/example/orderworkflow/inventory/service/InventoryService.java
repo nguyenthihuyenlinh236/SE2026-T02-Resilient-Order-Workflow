@@ -1,12 +1,13 @@
 package com.example.orderworkflow.inventory.service;
 
-import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.TreeMap;
 import java.util.UUID;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,11 +27,13 @@ public class InventoryService {
     @Transactional
     public Reservation reserve(ReserveRequest request, String key) {
         if (request == null || request.orderId() == null) { throw invalid("orderId is required"); }
+        if (request.reservationId() == null || request.storeId() == null || request.storeId().isBlank()
+                || request.storeId().length() > 100) { throw invalid("reservationId and storeId are required"); }
         if (!("reserve:" + request.orderId() + ":v1").equals(key)) {
             throw invalid("Idempotency-Key must be reserve:{orderId}:v1");
         }
         List<Item> items = normalize(request.items());
-        String hash = hash(request.orderId(), items);
+        String hash = hash(request, items);
         repository.lockOrder(request.orderId());
         var previousHash = repository.payloadHash(request.orderId());
         if (previousHash.isPresent()) {
@@ -43,20 +46,29 @@ public class InventoryService {
         String reason = null;
         // Consistent lock order across all multi-product requests prevents lock cycles.
         for (Item item : items) {
-            var stock = repository.stock(item.productId(), true);
+            var stock = repository.stock(request.storeId(), item.sku(), true);
             if (stock.isEmpty()) { reason = "PRODUCT_NOT_FOUND"; }
             else if (reason == null && stock.get().availableQuantity() < item.quantity()) {
                 reason = "INSUFFICIENT_STOCK";
             }
         }
-        if (reason == null) { items.forEach(repository::allocate); }
-        return repository.insert(request.orderId(), key, hash, items, reason);
+        if (reason == null) { items.forEach(item -> repository.allocate(request.storeId(), item)); }
+        return repository.insert(request, key, hash, items, reason);
     }
 
     @Transactional(readOnly = true)
     public Stock stock(UUID id) {
         return repository.stock(id, false).orElseThrow(() ->
                 new InventoryException(404, "PRODUCT_NOT_FOUND", "Product not found"));
+    }
+
+    @Transactional(readOnly = true)
+    public Stock stock(String storeId, String sku) {
+        if (storeId == null || storeId.isBlank() || sku == null || sku.isBlank()) {
+            throw invalid("storeId and sku are required");
+        }
+        return repository.stock(storeId, sku, false).orElseThrow(() ->
+                new InventoryException(404, "PRODUCT_NOT_FOUND", "Product not found in store"));
     }
 
     @Transactional(readOnly = true)
@@ -71,25 +83,27 @@ public class InventoryService {
 
     static List<Item> normalize(List<Item> items) {
         if (items == null || items.isEmpty() || items.size() > 20) { throw invalid("items must contain 1 to 20 lines"); }
-        var quantities = new TreeMap<UUID, Integer>();
+        var quantities = new TreeMap<String, Integer>();
         try {
             for (Item item : items) {
-                if (item == null || item.productId() == null || item.quantity() == null || item.quantity() <= 0) {
-                    throw invalid("Each item requires productId and positive quantity");
+                if (item == null || item.sku() == null || item.sku().isBlank() || item.sku().length() > 128
+                        || item.quantity() == null || item.quantity() <= 0) {
+                    throw invalid("Each item requires sku and positive quantity");
                 }
-                quantities.merge(item.productId(), item.quantity(), Math::addExact);
+                quantities.merge(item.sku(), item.quantity(), Math::addExact);
             }
         } catch (ArithmeticException e) { throw invalid("Combined quantity is too large"); }
         return quantities.entrySet().stream().map(e -> new Item(e.getKey(), e.getValue())).toList();
     }
 
-    private static String hash(UUID orderId, List<Item> items) {
-        StringBuilder payload = new StringBuilder("RESERVE:").append(orderId);
-        items.forEach(item -> payload.append('|').append(item.productId()).append(':').append(item.quantity()));
+    private static String hash(ReserveRequest request, List<Item> items) {
         try {
+            // JSON structure avoids delimiter collisions in arbitrary store/SKU strings.
+            byte[] payload = new ObjectMapper().writeValueAsBytes(List.of("RESERVE", request.orderId().toString(),
+                    request.reservationId().toString(), request.storeId(), items));
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(payload.toString().getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
+                    .digest(payload));
+        } catch (NoSuchAlgorithmException | JsonProcessingException e) { throw new IllegalStateException(e); }
     }
 
     private static InventoryException invalid(String message) {
