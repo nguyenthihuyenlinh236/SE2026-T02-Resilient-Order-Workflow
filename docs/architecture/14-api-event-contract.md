@@ -49,6 +49,123 @@ Order Service không phát `OrderCreated` trong contract domain event tối thi�
 - Thời gian dùng ISO-8601 UTC, ví dụ `2026-10-29T10:15:30Z`.
 - Tiền (nếu mô hình đơn hàng có giá) dùng decimal dạng chuỗi và currency rõ ràng; không dùng số thực dấu phẩy động.
 
+### 3.1.1. Kiểu dữ liệu và validation dùng chung
+
+| Kiểu logic | Kiểu JSON | Quy tắc |
+|---|---|---|
+| Identifier | string | Không rỗng, tối đa 128 ký tự; dạng `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}# 14 – API Contract và Event Contract
+
+## 1. Mục tiêu và nguyên tắc thiết kế
+
+Tài liệu thống nhất cách các service trao đổi trong Resilient Order Workflow, bao gồm API đồng bộ, command nghiệp vụ, domain event, dữ liệu trao đổi, lỗi, timeout, idempotency và tương thích schema.
+
+Các nguyên tắc bắt buộc:
+
+1. Order Service là nơi điều phối Saga và là chủ sở hữu trạng thái Order.
+2. Inventory Service là nơi sở hữu trạng thái Reservation; Payment Service là nơi sở hữu kết quả capture/refund.
+3. Service không đọc trực tiếp database của service khác. Service gọi API hoặc nhận message theo contract.
+4. Các thao tác có tác dụng phụ (reserve, capture, release, refund) phải có idempotency key ổn định; retry cùng hành động dùng lại đúng key.
+5. Timeout không chứng minh thao tác thất bại. Kết quả chưa xác minh phải được biểu diễn là `UNKNOWN`, sau đó query/đối soát.
+6. Thay đổi trạng thái Order và ghi domain event tương ứng vào Outbox phải nằm trong cùng transaction.
+7. Không phát domain event cho mỗi lần retry kỹ thuật. Event chỉ phản ánh thay đổi nghiệp vụ đã commit.
+8. Tài liệu này không quy định broker/topic/queue hoặc triển khai Controller, producer, consumer.
+
+### 1.1. Phân biệt API, command và event
+
+| Khái niệm | Ý nghĩa trong dự án | Ví dụ |
+|---|---|---|
+| API | Giao diện request/response mà service cung cấp | `POST /internal/v1/reservations` |
+| Command | Yêu cầu một service thực hiện một hành động nghiệp vụ | `ReserveInventory`, `CapturePayment` |
+| Domain event | Sự thật nghiệp vụ đã xảy ra và được commit | `OrderConfirmed` |
+| Thông báo kỹ thuật | Thông tin vận hành như retry vượt ngưỡng, worker lỗi | Không phải domain event |
+
+Trong bản thiết kế hiện tại, các bước Saga giữa Order–Inventory–Payment được mô tả theo request/response đồng bộ. Vì vậy, các command dưới đây được thực hiện qua API nội bộ; **không tạo thêm command message qua broker** nếu nhóm chưa quyết định chuyển sang điều phối bất đồng bộ. Domain event được phát qua Outbox cho Notification Service.
+
+## 2. Sơ đồ trách nhiệm giao tiếp
+
+| Bên gọi/phát | Bên nhận | Giao tiếp | Mục đích |
+|---|---|---|---|
+| Client | Order Service | Public API | Tạo và tra cứu Order |
+| Order Service / Saga Orchestrator | Inventory Service | Internal API / command | Reserve, query và release Reservation |
+| Order Service / Saga Orchestrator | Payment Service | Internal API / command | Capture, query và refund Payment |
+| Order Service / Outbox Publisher | Notification Service | Domain event | Thông báo Order đã kết thúc một nhánh nghiệp vụ |
+| Notification Service | Consumer inbox | Lưu trữ nội bộ | Chống xử lý event trùng |
+
+Order Service không phát `OrderCreated` trong contract domain event tối thiểu hiện tại: việc tạo Order ở `PENDING` chưa phải một kết quả cuối cần Notification Service xử lý theo các sequence diagram đã thống nhất. Ba domain event kết thúc được xác định tại State Machine là `OrderConfirmed`, `OrderFailed`, `OrderExpired`.
+
+## 3. Quy ước chung cho API
+
+### 3.1. Quy ước đường dẫn và định danh
+
+- Prefix public: `/api/v1`.
+- Prefix nội bộ đề xuất: `/internal/v1`.
+- Các đường dẫn dưới đây là đường dẫn logic; Dev xác nhận base URL, service discovery và cách xác thực nội bộ.
+- ID dùng kiểu chuỗi trong JSON: `orderId`, `reservationId`, `paymentId`, `refundId`.
+- Thời gian dùng ISO-8601 UTC, ví dụ `2026-10-29T10:15:30Z`.
+- Tiền (nếu mô hình đơn hàng có giá) dùng decimal dạng chuỗi và currency rõ ràng; không dùng số thực dấu phẩy động.
+
+; ID do service sở hữu tài nguyên sinh. |
+| Idempotency key | header string | Bắt buộc với POST có tác dụng phụ; 1–128 ký tự ASCII, không có khoảng trắng; giữ nguyên khi retry cùng hành động. |
+| commandId / correlationId | string | Không rỗng, tối đa 128 ký tự; UUID hoặc mã tracing hợp lệ. |
+| quantity | integer | Số nguyên dương; không chấp nhận float, chuỗi số, 0 hoặc âm; giới hạn tối đa cấu hình. |
+| amount | decimal string | Dạng `^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,2})?# 14 – API Contract và Event Contract
+
+## 1. Mục tiêu và nguyên tắc thiết kế
+
+Tài liệu thống nhất cách các service trao đổi trong Resilient Order Workflow, bao gồm API đồng bộ, command nghiệp vụ, domain event, dữ liệu trao đổi, lỗi, timeout, idempotency và tương thích schema.
+
+Các nguyên tắc bắt buộc:
+
+1. Order Service là nơi điều phối Saga và là chủ sở hữu trạng thái Order.
+2. Inventory Service là nơi sở hữu trạng thái Reservation; Payment Service là nơi sở hữu kết quả capture/refund.
+3. Service không đọc trực tiếp database của service khác. Service gọi API hoặc nhận message theo contract.
+4. Các thao tác có tác dụng phụ (reserve, capture, release, refund) phải có idempotency key ổn định; retry cùng hành động dùng lại đúng key.
+5. Timeout không chứng minh thao tác thất bại. Kết quả chưa xác minh phải được biểu diễn là `UNKNOWN`, sau đó query/đối soát.
+6. Thay đổi trạng thái Order và ghi domain event tương ứng vào Outbox phải nằm trong cùng transaction.
+7. Không phát domain event cho mỗi lần retry kỹ thuật. Event chỉ phản ánh thay đổi nghiệp vụ đã commit.
+8. Tài liệu này không quy định broker/topic/queue hoặc triển khai Controller, producer, consumer.
+
+### 1.1. Phân biệt API, command và event
+
+| Khái niệm | Ý nghĩa trong dự án | Ví dụ |
+|---|---|---|
+| API | Giao diện request/response mà service cung cấp | `POST /internal/v1/reservations` |
+| Command | Yêu cầu một service thực hiện một hành động nghiệp vụ | `ReserveInventory`, `CapturePayment` |
+| Domain event | Sự thật nghiệp vụ đã xảy ra và được commit | `OrderConfirmed` |
+| Thông báo kỹ thuật | Thông tin vận hành như retry vượt ngưỡng, worker lỗi | Không phải domain event |
+
+Trong bản thiết kế hiện tại, các bước Saga giữa Order–Inventory–Payment được mô tả theo request/response đồng bộ. Vì vậy, các command dưới đây được thực hiện qua API nội bộ; **không tạo thêm command message qua broker** nếu nhóm chưa quyết định chuyển sang điều phối bất đồng bộ. Domain event được phát qua Outbox cho Notification Service.
+
+## 2. Sơ đồ trách nhiệm giao tiếp
+
+| Bên gọi/phát | Bên nhận | Giao tiếp | Mục đích |
+|---|---|---|---|
+| Client | Order Service | Public API | Tạo và tra cứu Order |
+| Order Service / Saga Orchestrator | Inventory Service | Internal API / command | Reserve, query và release Reservation |
+| Order Service / Saga Orchestrator | Payment Service | Internal API / command | Capture, query và refund Payment |
+| Order Service / Outbox Publisher | Notification Service | Domain event | Thông báo Order đã kết thúc một nhánh nghiệp vụ |
+| Notification Service | Consumer inbox | Lưu trữ nội bộ | Chống xử lý event trùng |
+
+Order Service không phát `OrderCreated` trong contract domain event tối thiểu hiện tại: việc tạo Order ở `PENDING` chưa phải một kết quả cuối cần Notification Service xử lý theo các sequence diagram đã thống nhất. Ba domain event kết thúc được xác định tại State Machine là `OrderConfirmed`, `OrderFailed`, `OrderExpired`.
+
+## 3. Quy ước chung cho API
+
+### 3.1. Quy ước đường dẫn và định danh
+
+- Prefix public: `/api/v1`.
+- Prefix nội bộ đề xuất: `/internal/v1`.
+- Các đường dẫn dưới đây là đường dẫn logic; Dev xác nhận base URL, service discovery và cách xác thực nội bộ.
+- ID dùng kiểu chuỗi trong JSON: `orderId`, `reservationId`, `paymentId`, `refundId`.
+- Thời gian dùng ISO-8601 UTC, ví dụ `2026-10-29T10:15:30Z`.
+- Tiền (nếu mô hình đơn hàng có giá) dùng decimal dạng chuỗi và currency rõ ràng; không dùng số thực dấu phẩy động.
+
+; lớn hơn 0; không dùng float/double. |
+| currency | string | ISO 4217 viết hoa gồm 3 chữ cái; hiện chỉ hỗ trợ `VND`. |
+| timestamp | string | ISO-8601 UTC có hậu tố `Z`; phải parse được. |
+| enum/status | string | Chỉ nhận tập giá trị được endpoint/state machine công bố. |
+
+Quy tắc `items`: mảng bắt buộc, không rỗng, 1–100 phần tử; mỗi phần tử có `productId` hợp lệ và `quantity` integer dương; `productId` không trùng trong request (client phải gộp các dòng trùng); tổng quantity theo sản phẩm không vượt giới hạn cấu hình.
+
 ### 3.2. Header chuẩn
 
 | Header | Bắt buộc | Quy tắc |
@@ -92,9 +209,9 @@ Lỗi ở tầng giao thức/validation dùng cấu trúc thống nhất:
 |---|---|---|
 | `400` | JSON sai, thiếu trường hoặc validation không hợp lệ | Không retry nếu chưa sửa request |
 | `401/403` | Chưa xác thực/không có quyền | Không retry mù; xử lý cấu hình/quyền |
-| `404` | Không tìm thấy tài nguyên | Kiểm tra ID và phạm vi truy vấn |
-| `409` | Xung đột nghiệp vụ hoặc idempotency key khác payload | Không tạo key mới để né xung đột |
-| `422` | Request đúng cấu trúc nhưng không thể xử lý theo quy tắc nghiệp vụ (nếu nhóm chọn dùng) | Đọc error code; không retry lỗi xác định |
+| `404` | Không tìm thấy tài nguyên/giao dịch theo ID hoặc key | Kiểm tra ID/key; khi POST timeout, không suy luận command chưa được xử lý |
+| `409` | Idempotency key dùng với payload khác hoặc xung đột tài nguyên | Không tạo key mới để né xung đột |
+| `422` | Không dùng cho kết quả nghiệp vụ thường lệ của reserve/capture/refund; kết quả đã xác minh trả `200` với trạng thái trong body |
 | `429` | Bị giới hạn tốc độ | Retry theo hướng dẫn/backoff nếu được phép |
 | `5xx` | Lỗi tạm thời phía service | Có thể retry theo D-03, giữ nguyên key |
 | Timeout / mất kết nối | Không nhận được phản hồi xác định | Kết quả tác dụng phụ có thể là `UNKNOWN`; query hoặc retry cùng key |
@@ -104,6 +221,8 @@ Không dùng HTTP status đơn lẻ để suy ra trạng thái nghiệp vụ. V�
 ## 4. API Contract – Order Service
 
 ### 4.1. Tạo Order
+
+**Schema request/response:** `customerId: string ID` bắt buộc; `items: array<object>` bắt buộc 1–100 phần tử, không rỗng; `items[].productId: string ID` bắt buộc, duy nhất; `items[].quantity: integer` bắt buộc, số nguyên dương. Response: `orderId: string ID`, `status: enum` (ban đầu `PENDING`), `createdAt/expireAt: ISO-8601 UTC` (expireAt > createdAt), `correlationId: string` đều bắt buộc.
 
 | Thuộc tính | Đặc tả |
 |---|---|
@@ -151,6 +270,8 @@ Quy tắc:
 
 ### 4.2. Tra cứu Order
 
+**Schema response:** `orderId: string ID`, `status: enum Order`, `createdAt/expireAt: ISO-8601 UTC` bắt buộc; `reservationStatus: enum` optional (`NOT_CREATED/RESERVED/RELEASED/REJECTED/UNKNOWN`); `captureStatus: enum` optional (`NOT_STARTED/IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN`); `correlationId: string` bắt buộc. Path `orderId` phải là Identifier hợp lệ.
+
 | Thuộc tính | Đặc tả |
 |---|---|
 | Command/query | `GetOrder` |
@@ -183,14 +304,16 @@ Các API này là internal API, chỉ Order Service/Saga Orchestrator được g
 
 ### 5.1. Reserve Inventory
 
+**Schema request:** `commandId: string`, `orderId: string ID`, `correlationId: string` bắt buộc; `items` bắt buộc 1–100 phần tử, không rỗng; `items[].productId: string ID` không trùng; `items[].quantity: integer > 0`. **Response:** `reservationId: string ID` khi RESERVED; `orderId: string ID`; `status: RESERVED|REJECTED`; `reservedAt: ISO-8601 UTC|null`; `reasonCode: string|null`.
+
 | Thuộc tính | Đặc tả |
 |---|---|
 | Command | `ReserveInventory` |
 | API | `POST /internal/v1/reservations` |
 | Bên gọi → nhận | Order Service → Inventory Service |
 | Idempotency key | `reserve:{orderId}:v1` |
-| Thành công nghiệp vụ | `200 OK`, `status = RESERVED` |
-| Từ chối nghiệp vụ | `409 INVENTORY_NOT_AVAILABLE` hoặc response kết quả `REJECTED`; Dev chọn một cách biểu diễn và dùng nhất quán |
+| Kết quả nghiệp vụ đã xác định | `200 OK`; body `status = RESERVED` hoặc `REJECTED` |
+| Từ chối nghiệp vụ | `200 OK`, body `status = REJECTED`, `reasonCode = INVENTORY_NOT_AVAILABLE` |
 | Lỗi chưa rõ | Timeout/5xx: Order Service ghi nhận `UNKNOWN`, query trước khi quyết định bước tiếp |
 
 Request mẫu:
@@ -229,6 +352,8 @@ Quy tắc:
 
 ### 5.2. Tra cứu Reservation
 
+**Schema response:** `reservationId: string ID` nếu tồn tại; `orderId: string ID`; `status: NOT_CREATED|RESERVED|RELEASED|REJECTED|UNKNOWN`; `idempotencyKey: string`. Path `orderId` theo Identifier.
+
 | Thuộc tính | Đặc tả |
 |---|---|
 | Query | `GetReservation` |
@@ -251,6 +376,8 @@ Response mẫu:
 Nếu chưa có reservation, service trả kết quả không tồn tại rõ ràng; không được suy luận từ timeout thành `NOT_CREATED`.
 
 ### 5.3. Release Inventory
+
+**Schema request:** `commandId: string`, `orderId: string ID`, `correlationId: string` bắt buộc. **Response:** `reservationId/orderId: string ID`; `status: RELEASED|ALREADY_RELEASED`; `releasedAt: ISO-8601 UTC` khi đã release. Path reservationId theo Identifier.
 
 | Thuộc tính | Đặc tả |
 |---|---|
@@ -294,14 +421,16 @@ Các API này là internal API. Payment Service sở hữu trạng thái capture
 
 ### 6.1. Capture Payment
 
+**Schema request:** `commandId/orderId/correlationId: string` (orderId là ID); `amount: decimal string` > 0, tối đa 2 chữ số thập phân; `currency: string` ISO 4217, hiện chỉ `VND`. **Response:** `paymentId: string ID|null`; `orderId: string ID`; `status: IN_PROGRESS|SUCCEEDED|FAILED`; `amount: decimal string`; `currency: string`; `capturedAt: ISO-8601 UTC|null`.
+
 | Thuộc tính | Đặc tả |
 |---|---|
 | Command | `CapturePayment` |
 | API | `POST /internal/v1/payments/captures` |
 | Bên gọi → nhận | Order Service → Payment Service |
 | Idempotency key | `payment:capture:{orderId}:v1` |
-| Kết quả | `SUCCEEDED`, `FAILED` hoặc `UNKNOWN` |
-| Lỗi chính | `400` request không hợp lệ; `409 IDEMPOTENCY_KEY_CONFLICT`; timeout/5xx cần query/đối soát |
+| Kết quả sau khi nhận command | `200 OK` với body `IN_PROGRESS`, `SUCCEEDED` hoặc `FAILED` |
+| Lỗi HTTP | `400 VALIDATION_ERROR`; `404 ORDER_NOT_FOUND`; `409 IDEMPOTENCY_KEY_CONFLICT`; `5xx` tạm thời. Timeout không có response được caller lưu cục bộ là `UNKNOWN`. |
 
 Request mẫu:
 
@@ -349,13 +478,15 @@ Quy tắc:
 
 ### 6.2. Tra cứu Payment
 
+**Schema response:** `paymentId/orderId: string ID` khi tồn tại; `status: NOT_STARTED|IN_PROGRESS|SUCCEEDED|FAILED|UNKNOWN`; `amount: decimal string`, `currency: ISO 4217`, `idempotencyKey: string` khi capture đã tạo.
+
 | Thuộc tính | Đặc tả |
 |---|---|
 | Query | `GetPayment` |
 | API đề xuất | `GET /internal/v1/payments/{paymentId}` |
 | API tra cứu theo key (nếu chưa có paymentId) | `GET /internal/v1/payments/by-idempotency-key/{key}` |
 | Bên gọi → nhận | Order Service/Reconciliation Worker → Payment Service |
-| Thành công | `200 OK`; trả `SUCCEEDED`, `FAILED` hoặc `UNKNOWN` |
+| Query thành công | `200 OK`; trả `NOT_STARTED/IN_PROGRESS/SUCCEEDED/FAILED`; chỉ trả `UNKNOWN` nếu Payment Service thực sự lưu trạng thái chưa xác minh |
 | Lỗi chính | `404 PAYMENT_NOT_FOUND`; timeout/5xx chỉ retry query |
 
 Response mẫu:
@@ -378,14 +509,16 @@ Quy tắc:
 
 ### 6.3. Refund Payment
 
+**Schema request:** `commandId/correlationId: string`; `orderId: string ID`; `reason: ORDER_FAILED|ORDER_EXPIRED|LATE_CAPTURE`. **Response:** `refundId: string ID|null`; `paymentId/orderId: string ID`; `status: IN_PROGRESS|SUCCEEDED|FAILED`; `refundedAt: ISO-8601 UTC|null`.
+
 | Thuộc tính | Đặc tả |
 |---|---|
 | Command | `RefundPayment` |
 | API | `POST /internal/v1/payments/{paymentId}/refunds` |
 | Bên gọi → nhận | Order Service → Payment Service |
 | Idempotency key | `payment:refund:{orderId}:{paymentId}:v1` |
-| Kết quả | `SUCCEEDED`, `FAILED` hoặc `UNKNOWN` |
-| Lỗi chính | `404 PAYMENT_NOT_FOUND`; `409 IDEMPOTENCY_KEY_CONFLICT`; timeout/5xx cần query/đối soát |
+| Kết quả sau khi nhận command | `200 OK` với body `IN_PROGRESS`, `SUCCEEDED` hoặc `FAILED` |
+| Lỗi HTTP | `400 VALIDATION_ERROR`; `404 PAYMENT_NOT_FOUND`; `409 IDEMPOTENCY_KEY_CONFLICT`; `5xx` tạm thời. Timeout không có response được caller lưu cục bộ là `UNKNOWN`. |
 
 Request mẫu:
 
@@ -416,6 +549,57 @@ Quy tắc:
 - Timeout refund là `UNKNOWN`; query theo refundId/key trước khi retry.
 - Cùng key/cùng payload không tạo refund thứ hai; cùng key/khác payload bị từ chối.
 - Refund `FAILED` đã xác minh không được tự động né bằng cách tạo key mới; xử lý theo quyết định vận hành/Q-08.
+
+### 6.4. Tra cứu Refund
+
+Refund có vòng đời riêng; không dùng trạng thái capture để suy ra trạng thái refund.
+
+| Thuộc tính | Đặc tả |
+|---|---|
+| Theo refundId | `GET /internal/v1/payments/refunds/{refundId}` |
+| Theo idempotency key | `GET /internal/v1/payments/refunds/by-idempotency-key/{key}` |
+| Bên gọi → nhận | Order Service / Reconciliation Worker → Payment Service |
+| Thành công | `200 OK`; body status `IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN` |
+| Không tìm thấy | `404 REFUND_NOT_FOUND` |
+| Lỗi khác | `400 INVALID_IDENTIFIER`; `5xx`; timeout query chỉ retry query |
+
+**Schema response:** `refundId/paymentId/orderId: string ID`; `status: IN_PROGRESS|SUCCEEDED|FAILED|UNKNOWN`; `idempotencyKey: string`; `amount: decimal string > 0`; `currency: ISO 4217`; `reason: ORDER_FAILED|ORDER_EXPIRED|LATE_CAPTURE`; `createdAt: ISO-8601 UTC`; `refundedAt: ISO-8601 UTC|null`.
+
+Response mẫu:
+
+```json
+{
+  "refundId": "REF-001",
+  "paymentId": "PAY-001",
+  "orderId": "ORD-001",
+  "status": "IN_PROGRESS",
+  "idempotencyKey": "payment:refund:ORD-001:PAY-001:v1",
+  "amount": "250000.00",
+  "currency": "VND",
+  "reason": "ORDER_EXPIRED",
+  "createdAt": "2026-10-29T10:15:50Z",
+  "refundedAt": null
+}
+```
+
+Quy tắc:
+- Query không tạo tác dụng phụ.
+- `IN_PROGRESS` xác nhận Payment Service đã nhận command và giao dịch đang xử lý; caller polling.
+- `UNKNOWN` nghĩa là chưa thể xác định giao dịch được tiếp nhận/thực hiện; đối soát bằng refund key, không tạo key mới.
+- `FAILED` chỉ được trả khi Payment Service xác minh thất bại; không đồng nhất với timeout.
+- `404 REFUND_NOT_FOUND` không cho phép tạo key mới; retry command (nếu phù hợp) phải giữ key ban đầu.
+
+### 6.5. Phân biệt IN_PROGRESS và UNKNOWN
+
+| Trạng thái | Ý nghĩa | API POST | API GET |
+|---|---|---|---|
+| `NOT_STARTED` | Chưa có giao dịch | Không phải kết quả command đã nhận | Có thể trả khi query theo key chưa khởi tạo |
+| `IN_PROGRESS` | Payment đã nhận command, giao dịch đang xử lý | `200 OK`, body IN_PROGRESS | `200 OK`, body IN_PROGRESS |
+| `SUCCEEDED` | Thành công đã xác minh | `200 OK`, body SUCCEEDED | `200 OK`, body SUCCEEDED |
+| `FAILED` | Thất bại đã xác minh | `200 OK`, body FAILED | `200 OK`, body FAILED |
+| `UNKNOWN` | Chưa thể xác định command được tiếp nhận/thực hiện hay không | Nếu response timeout, caller tự ghi local UNKNOWN; không phải HTTP status | Chỉ trả nếu Payment Service lưu trạng thái chưa xác minh |
+
+`IN_PROGRESS` khác `UNKNOWN`: trạng thái đầu xác nhận command đã được tiếp nhận; trạng thái sau không khẳng định điều đó. Nếu response POST mất, caller phải query theo idempotency key.
 
 ## 7. Danh sách command và API tương ứng
 
@@ -599,13 +783,24 @@ Cùng key/cùng payload phải trả lại kết quả đã lưu; cùng key/khá
 
 ## 11. Tương thích và tiến hóa schema
 
-- Mỗi event có `schemaVersion` dạng số nguyên.
-- Thay đổi tương thích ngược (ví dụ thêm field optional) có thể giữ version nếu nhóm thống nhất consumer bỏ qua field không biết.
-- Xóa/đổi tên field, đổi kiểu dữ liệu, thay đổi ý nghĩa hoặc làm field optional thành bắt buộc là thay đổi phá vỡ tương thích; cần version mới và kế hoạch chuyển đổi consumer.
-- Consumer phải bỏ qua field không biết nếu schema cho phép; không được giả định field optional luôn có mặt.
-- Không tái sử dụng cùng version cho hai cấu trúc payload khác nhau.
-- Event đã ghi Outbox phải giữ nguyên payload/version khi publish lại.
-- Cơ chế registry, JSON Schema/Avro/Protobuf và chính sách giữ nhiều version là quyết định triển khai còn mở.
+Một cặp `eventType + schemaVersion` xác định duy nhất một cấu trúc và ngữ nghĩa schema.
+
+| Thay đổi | Phân loại | Version |
+|---|---|---|
+| Thêm field optional; consumer cũ bỏ qua field lạ, semantics cũ không đổi | Tương thích ngược | Có thể giữ version |
+| Thêm enum value mà consumer cũ không xử lý | Không mặc nhiên tương thích | Mặc định tăng version nếu chưa quy định fallback an toàn |
+| Thêm field bắt buộc | Phá vỡ tương thích | Tăng version |
+| Xóa/đổi tên field | Phá vỡ tương thích | Tăng version |
+| Đổi kiểu, format, đơn vị hoặc cấu trúc lồng nhau | Phá vỡ tương thích | Tăng version |
+| Đổi ý nghĩa hoặc ràng buộc của field hiện có | Phá vỡ tương thích | Tăng version |
+
+Quy tắc:
+- Chỉ thay đổi tương thích ngược như thêm field optional mới được phép giữ version; consumer phải bỏ qua field không biết và không giả định field optional luôn có mặt.
+- Thay đổi phá vỡ tương thích phải có version mới; không tái sử dụng cùng version cho hai schema/semantics khác nhau.
+- Producer và consumer validate payload theo đúng cặp `eventType + schemaVersion`.
+- Producer có thể phát nhiều version trong giai đoạn migration chỉ khi consumer hỗ trợ rõ từng version theo kế hoạch.
+- Event đã ghi Outbox phải giữ nguyên payload và version khi publish lại.
+- Registry và lựa chọn JSON Schema/Avro/Protobuf là quyết định triển khai, không làm thay đổi quy tắc trên.
 
 ## 12. Bảo mật và quan sát
 
