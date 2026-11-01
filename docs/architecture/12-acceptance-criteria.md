@@ -468,8 +468,7 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 ### AC-10.1 – Không vượt tồn kho
 
 **Given**
-- Có tối đa 155 người dùng hoạt động đồng thời.
-- Nhiều yêu cầu đặt cùng sản phẩm.
+- Nhiều yêu cầu đặt cùng sản phẩm trong điều kiện cạnh tranh.
 
 **When**
 - Các yêu cầu cùng cố gắng giữ hàng.
@@ -534,21 +533,21 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 - Fault injection mặc định tắt ngoài môi trường được cấu hình cho kiểm thử.
 - Sau khi fault injection kết thúc, hệ thống có thể phục hồi các công việc bị gián đoạn.
 
-### AC-11.3 – Lưu giữ dữ liệu 29 ngày
+### AC-11.3 – Chính sách lưu giữ dữ liệu
 
 **Given**
 - Order, Saga, kết quả Reservation/Payment, Outbox/Inbox và log kiểm toán thuộc phạm vi lưu giữ đã được xác định.
-- Chính sách lưu giữ đã chỉ rõ mốc bắt đầu tính 29 ngày cho từng loại dữ liệu.
+- Chính sách lưu giữ đã xác định phạm vi dữ liệu, căn cứ lưu giữ và mốc thời gian áp dụng cho từng loại dữ liệu.
 
 **When**
 - Dữ liệu được lưu trong hệ thống và tiến trình dọn dẹp dữ liệu chạy.
 
 **Then**
-- Dữ liệu thuộc phạm vi bắt buộc không bị xóa trước khi hết thời hạn lưu giữ 29 ngày tính từ mốc đã thống nhất.
+- Dữ liệu thuộc phạm vi bắt buộc không bị xóa trước khi hết thời hạn lưu giữ đã được chính sách xác định.
 - Chính sách nêu rõ dữ liệu nào được xóa, ẩn danh hoặc lưu tiếp sau thời hạn; không suy ra rằng mọi dữ liệu phải xóa đúng tại ngày thứ 29 nếu chính sách chưa quy định.
 - Việc dọn dẹp không xóa dữ liệu cần thiết để điều tra Saga chưa hoàn tất, đối soát Payment hoặc chứng minh kết quả nghiệp vụ.
 
-### AC-11.4 – Theo dõi thời hạn phản hồi Change Request
+### AC-11.4 – Theo dõi và đánh giá Change Request
 
 **Given**
 - Nhóm tiếp nhận một Change Request trong quá trình phát triển W2.
@@ -559,8 +558,8 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 
 **Then**
 - Có thể truy xuất thời điểm tiếp nhận, người phụ trách, kết quả đánh giá và thời điểm phản hồi.
-- Mục tiêu phản hồi là không quá 14 giờ theo ràng buộc dự án.
-- Nếu không thể phản hồi trong thời hạn, lý do và trạng thái xử lý được ghi nhận; tiêu chí này là kiểm soát quy trình nhóm, không phải SLA runtime của Order Service.
+- Kết quả đánh giá, quyết định tiếp theo, người phụ trách và các điểm cần xác nhận được ghi nhận.
+- Các thay đổi chưa thể đánh giá đầy đủ phải nêu rõ thông tin còn thiếu và trạng thái xử lý; không mặc định thời gian đánh giá là SLA runtime của Order Service.
 
 ## 14. Liên kết yêu cầu
 

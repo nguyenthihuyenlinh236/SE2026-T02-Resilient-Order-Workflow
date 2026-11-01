@@ -1,0 +1,24 @@
+server:
+  port: ${ORDER_SERVICE_PORT:8081}
+
+spring:
+  application:
+    name: order-service
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/order_db
+    username: ${POSTGRES_USER:workflow}
+    password: ${POSTGRES_PASSWORD:workflow_local}
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:workflow}
+    password: ${RABBITMQ_PASSWORD:workflow_local}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
