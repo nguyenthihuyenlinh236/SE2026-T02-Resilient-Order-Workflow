@@ -207,7 +207,7 @@ Lỗi ở tầng giao thức/validation dùng cấu trúc thống nhất:
 
 | HTTP status | Ý nghĩa | Hành vi phía gọi |
 |---|---|---|
-| `400` | JSON sai, thiếu trường hoặc validation không hợp lệ | Không retry nếu chưa sửa request |
+| `400` | JSON sai, thiếu trường hoặc validation không hợp lệ (`VALIDATION_ERROR`, `INVALID_IDENTIFIER`) | Không retry nếu chưa sửa request |
 | `401/403` | Chưa xác thực/không có quyền | Không retry mù; xử lý cấu hình/quyền |
 | `404` | Không tìm thấy tài nguyên/giao dịch theo ID hoặc key | Kiểm tra ID/key; khi POST timeout, không suy luận command chưa được xử lý |
 | `409` | Idempotency key dùng với payload khác hoặc xung đột tài nguyên | Không tạo key mới để né xung đột |
@@ -457,21 +457,21 @@ Response khi thành công:
 }
 ```
 
-Response khi chưa xác định:
+Response khi đang xử lý: 
 
 ```json
 {
   "paymentId": "PAY-001",
   "orderId": "ORD-001",
-  "status": "UNKNOWN",
+  "status": "IN_PROGRESS",
   "idempotencyKey": "payment:capture:ORD-001:v1",
-  "message": "Chưa xác minh được kết quả capture"
+  "message": "Capture đã được tiếp nhận và đang xử lý"
 }
 ```
 
 Quy tắc:
 - `UNKNOWN` là kết quả chưa xác định, không phải `FAILED`.
-- Timeout/mất kết nối có thể xảy ra sau khi Payment đã thực hiện capture; Order Service phải lưu trạng thái chưa rõ và query theo paymentId hoặc capture key.
+- Timeout/mất kết nối có thể xảy ra sau khi Payment đã thực hiện capture; Order Service lưu cục bộ `UNKNOWN` và query theo paymentId hoặc capture key. Nếu Payment đã ghi nhận giao dịch đang chạy, API query trả `IN_PROGRESS`.
 - Không gửi capture mới bằng key khác để xử lý timeout.
 - Chỉ Order ở `PENDING` mới được bắt đầu lệnh tiến capture; sau khi Order rời `PENDING`, không gửi lệnh tiến mới.
 - Order chỉ được xác nhận khi capture `SUCCEEDED` đã xác minh, Reservation `RESERVED` đã xác minh, và conditional update `PENDING → CONFIRMED` hợp lệ theo D-01.
@@ -531,7 +531,7 @@ Request mẫu:
 }
 ```
 
-Response mẫu:
+Response khi đã hoàn tiền thành công:
 
 ```json
 {
@@ -546,7 +546,7 @@ Response mẫu:
 Quy tắc:
 - Chỉ refund khi capture đã được xác minh `SUCCEEDED` và chính sách nghiệp vụ yêu cầu hoàn tiền.
 - Capture và refund là hai trạng thái/giao dịch riêng.
-- Timeout refund là `UNKNOWN`; query theo refundId/key trước khi retry.
+- Timeout refund không có response được caller ghi cục bộ là `UNKNOWN`; query theo refundId/key trước khi retry.
 - Cùng key/cùng payload không tạo refund thứ hai; cùng key/khác payload bị từ chối.
 - Refund `FAILED` đã xác minh không được tự động né bằng cách tạo key mới; xử lý theo quyết định vận hành/Q-08.
 
