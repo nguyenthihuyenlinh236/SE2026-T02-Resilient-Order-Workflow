@@ -456,15 +456,16 @@ Response khi thành công:
 }
 ```
 
-Response khi đang xử lý: 
+Response khi đang xử lý trả `200 OK`:
 
 ```json
 {
   "paymentId": "PAY-001",
   "orderId": "ORD-001",
   "status": "IN_PROGRESS",
-  "idempotencyKey": "payment:capture:ORD-001:v1",
-  "message": "Capture đã được tiếp nhận và đang xử lý"
+  "amount": "250000.00",
+  "currency": "VND",
+  "idempotencyKey": "payment:capture:ORD-001:v1"
 }
 ```
 
@@ -548,6 +549,7 @@ Quy tắc:
 - Timeout refund không có response được caller ghi cục bộ là `UNKNOWN`; query theo refundId/key trước khi retry.
 - Cùng key/cùng payload không tạo refund thứ hai; cùng key/khác payload bị từ chối.
 - Refund `FAILED` đã xác minh không được tự động né bằng cách tạo key mới; xử lý theo quyết định vận hành/Q-08.
+- Khi đang xử lý, Refund API trả `200 OK` với `status = IN_PROGRESS`; response phải gồm `refundId` nếu đã tạo, `paymentId`, `orderId`, `idempotencyKey`, `amount`, `currency`, `reason`, `createdAt` và `refundedAt = null`.
 
 ### 6.4. Tra cứu Refund
 
