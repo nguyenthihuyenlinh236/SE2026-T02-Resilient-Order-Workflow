@@ -313,7 +313,6 @@ Các API này là internal API, chỉ Order Service/Saga Orchestrator được g
 | Bên gọi → nhận | Order Service → Inventory Service |
 | Idempotency key | `reserve:{orderId}:v1` |
 | Kết quả nghiệp vụ đã xác định | `200 OK`; body `status = RESERVED` hoặc `REJECTED` |
-| Từ chối nghiệp vụ | `200 OK`, body `status = REJECTED`, `reasonCode = INVENTORY_NOT_AVAILABLE` |
 | Lỗi chưa rõ | Timeout/5xx: Order Service ghi nhận `UNKNOWN`, query trước khi quyết định bước tiếp |
 
 Request mẫu:
@@ -495,7 +494,7 @@ Response mẫu:
 {
   "paymentId": "PAY-001",
   "orderId": "ORD-001",
-  "status": "UNKNOWN",
+  "status": "IN_PROGRESS",
   "amount": "250000.00",
   "currency": "VND",
   "idempotencyKey": "payment:capture:ORD-001:v1"
@@ -559,7 +558,7 @@ Refund có vòng đời riêng; không dùng trạng thái capture để suy ra 
 | Theo refundId | `GET /internal/v1/payments/refunds/{refundId}` |
 | Theo idempotency key | `GET /internal/v1/payments/refunds/by-idempotency-key/{key}` |
 | Bên gọi → nhận | Order Service / Reconciliation Worker → Payment Service |
-| Thành công | `200 OK`; body status `IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN` |
+| Thành công | `200 OK`; body status `IN_PROGRESS/SUCCEEDED/FAILED`; `UNKNOWN` chỉ khi Payment Service lưu rõ tình trạng chưa xác minh |
 | Không tìm thấy | `404 REFUND_NOT_FOUND` |
 | Lỗi khác | `400 INVALID_IDENTIFIER`; `5xx`; timeout query chỉ retry query |
 
