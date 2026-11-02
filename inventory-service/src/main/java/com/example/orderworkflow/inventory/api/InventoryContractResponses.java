@@ -13,6 +13,8 @@ public final class InventoryContractResponses {
     public record ReservationResponse(String reservationId, String orderId, String status,
             String idempotencyKey, String reasonCode) { }
 
+    public record ReleaseResponse(String reservationId, String orderId, String status, Instant releasedAt) { }
+
     public static ReserveResponse reserve(Reservation result) {
         boolean rejected = result.status().equals("REJECTED");
         return new ReserveResponse(rejected ? null : result.reservationId(), result.orderId(), result.status(),

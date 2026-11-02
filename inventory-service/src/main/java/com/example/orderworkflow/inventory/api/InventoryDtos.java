@@ -39,6 +39,9 @@ public final class InventoryDtos {
     public record ReleaseRequest(@Identifier String orderId, @Identifier String reservationId,
             @NotBlank @Size(max = 255) String reason) { }
 
+    public record InternalReleaseRequest(@NotBlank @Size(max = 128) String commandId,
+            @Identifier String orderId, @NotBlank @Size(max = 128) String correlationId) { }
+
     public record CancelRequest(@Identifier String orderId, @NotBlank @Size(max = 255) String reason) { }
 
     public record ReleaseResult(String orderId, String reservationId, String idempotencyKey,

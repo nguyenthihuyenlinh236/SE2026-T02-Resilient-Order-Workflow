@@ -12,6 +12,26 @@ import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class InventoryLifecycleServiceTests {
+    @Test
+    void invalidInternalReleaseCannotTouchDatabase() {
+        var repository = mock(InventoryRepository.class);
+        var operations = mock(InventoryOperations.class);
+        var service = new InventoryLifecycleService(repository, operations);
+        String key = "inventory:release:ORD-001:RES-001:v1";
+        assertThatThrownBy(() -> service.releaseInternal("RES-001", null, key)).isInstanceOf(InventoryException.class);
+        for (var request : java.util.List.of(
+                new InternalReleaseRequest(null, "ORD-001", "corr-001"),
+                new InternalReleaseRequest("cmd-001", "bad!id", "corr-001"),
+                new InternalReleaseRequest("cmd-001", "ORD-001", " "),
+                new InternalReleaseRequest("x".repeat(129), "ORD-001", "corr-001"))) {
+            assertThatThrownBy(() -> service.releaseInternal("RES-001", request, key)).isInstanceOf(InventoryException.class);
+        }
+        assertThatThrownBy(() -> service.releaseInternal("RES-001",
+                new InternalReleaseRequest("cmd-001", "ORD-001", "corr-001"), "wrong-key"))
+                .isInstanceOf(InventoryException.class);
+        verifyNoInteractions(repository, operations);
+    }
+
     @ParameterizedTest
     @NullAndEmptySource
     @ValueSource(strings = {" ", "key with space", "key\tvalue", "key\nvalue", "key\u007f", "khóa"})

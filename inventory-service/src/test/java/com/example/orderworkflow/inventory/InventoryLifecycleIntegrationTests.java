@@ -717,6 +717,139 @@ class InventoryLifecycleIntegrationTests {
         assertStock(0);
     }
 
+    @Test
+    void internalReleaseUsesContractBodyAndReplaysOriginalTimestamp() {
+        var request = reserveRequest();
+        inventory.reserve(request, reserveKey(request));
+        var body = new InternalReleaseRequest("cmd-release-001", request.orderId(), "corr-001");
+        var response = http.exchange("/internal/v1/reservations/" + request.reservationId() + "/release",
+                HttpMethod.POST, entity(body, releaseKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        var original = response.getBody();
+        assertThat(original.properties()).extracting(java.util.Map.Entry::getKey)
+                .containsExactlyInAnyOrder("reservationId", "orderId", "status", "releasedAt");
+        assertThat(original.get("reservationId").asText()).isEqualTo(request.reservationId());
+        assertThat(original.get("orderId").asText()).isEqualTo(request.orderId());
+        assertThat(original.get("status").asText()).isEqualTo("RELEASED");
+        assertThat(java.time.Instant.parse(original.get("releasedAt").asText())).isNotNull();
+        for (int i = 0; i < 3; i++) {
+            var replay = http.exchange("/internal/v1/reservations/" + request.reservationId() + "/release",
+                    HttpMethod.POST, entity(body, releaseKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+            assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(replay.getBody()).isEqualTo(original);
+        }
+        assertStock(0);
+        assertThat(count("inventory_operations")).isEqualTo(2);
+    }
+
+    @Test
+    void changedInternalReleasePayloadConflictsWithoutReturningStockTwice() {
+        var request = reserveRequest();
+        inventory.reserve(request, reserveKey(request));
+        lifecycle.releaseInternal(request.reservationId(),
+                new InternalReleaseRequest("cmd-001", request.orderId(), "corr-001"), releaseKey(request));
+        for (var changed : List.of(new InternalReleaseRequest("cmd-002", request.orderId(), "corr-001"),
+                new InternalReleaseRequest("cmd-001", request.orderId(), "corr-002"))) {
+            var response = http.exchange("/internal/v1/reservations/" + request.reservationId() + "/release",
+                    HttpMethod.POST, entity(changed, releaseKey(request)), ContractErrorResponse.class);
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+            assertThat(response.getBody().error().code()).isEqualTo("IDEMPOTENCY_KEY_CONFLICT");
+        }
+        assertStock(0);
+        assertThat(count("inventory_operations")).isEqualTo(2);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"commandId\":\"cmd-001\",\"orderId\":\"ORD-001\"}",
+            "{\"commandId\":\"cmd-001\",\"orderId\":\"ORD-001\",\"correlationId\":\"corr-001\",\"reason\":\"FAILED\"}"})
+    void malformedInternalReleaseCannotCreateGuardOrOperation(String body) {
+        var response = http.exchange("/internal/v1/reservations/RES-001/release", HttpMethod.POST,
+                entity(body, "inventory:release:ORD-001:RES-001:v1"), ContractErrorResponse.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().error().code()).isEqualTo("VALIDATION_ERROR");
+        assertThat(count("inventory_order_guards")).isZero();
+        assertThat(count("inventory_operations")).isZero();
+    }
+
+    @Test
+    void internalReleaseChecksOwnerMissingAndRejectedReservations() {
+        var request = reserveRequest();
+        var body = new InternalReleaseRequest("cmd-001", request.orderId(), "corr-001");
+        assertError(() -> lifecycle.releaseInternal(request.reservationId(), body, releaseKey(request)), 404, "RESERVATION_NOT_FOUND");
+        assertThat(count("inventory_order_guards")).isZero();
+        inventory.reserve(request, reserveKey(request));
+        assertError(() -> lifecycle.releaseInternal(request.reservationId(),
+                new InternalReleaseRequest("cmd-001", "WRONG-ORDER", "corr-001"),
+                "inventory:release:WRONG-ORDER:" + request.reservationId() + ":v1"), 409, "RESERVATION_ORDER_MISMATCH");
+        var rejected = new ReserveRequest("ORD-REJECTED", "RES-REJECTED", "STORE", List.of(new Item("A", 100)));
+        inventory.reserve(rejected, reserveKey(rejected));
+        assertError(() -> lifecycle.releaseInternal(rejected.reservationId(),
+                new InternalReleaseRequest("cmd-002", rejected.orderId(), "corr-002"), releaseKey(rejected)), 409, "RESERVATION_NOT_RESERVED");
+        assertStock(2);
+        assertThat(count("inventory_operations")).isEqualTo(2);
+        assertThat(count("inventory_order_guards")).isEqualTo(2);
+    }
+
+    @Test
+    void internalReleaseAfterCancelKeepsFirstReleaseTimestamp() {
+        var request = reserveRequest();
+        inventory.reserve(request, reserveKey(request));
+        cancel(request.orderId());
+        var firstReleasedAt = jdbc.queryForObject("SELECT released_at FROM reservations", java.sql.Timestamp.class).toInstant();
+        var result = lifecycle.releaseInternal(request.reservationId(),
+                new InternalReleaseRequest("cmd-001", request.orderId(), "corr-001"), releaseKey(request));
+        assertThat(result.releasedAt()).isEqualTo(firstReleasedAt);
+        assertStock(0);
+    }
+
+    @Test
+    void concurrentInternalReleaseReturnsStockOnlyOnce() throws Exception {
+        var request = reserveRequest();
+        inventory.reserve(request, reserveKey(request));
+        var body = new InternalReleaseRequest("cmd-001", request.orderId(), "corr-001");
+        var tasks = new ArrayList<Callable<Object>>();
+        for (int i = 0; i < 5; i++) {
+            tasks.add(() -> lifecycle.releaseInternal(request.reservationId(), body, releaseKey(request)));
+        }
+        var results = concurrently(tasks);
+        assertThat(results).allMatch(results.get(0)::equals);
+        assertStock(0);
+        assertThat(count("inventory_operations")).isEqualTo(2);
+    }
+
+    @Test
+    void internalReleaseSnapshotFailureRollsBackAndAllowsRetry() {
+        var request = reserveRequest();
+        inventory.reserve(request, reserveKey(request));
+        var body = new InternalReleaseRequest("cmd-001", request.orderId(), "corr-001");
+        jdbc.execute("ALTER TABLE inventory_operations ADD CONSTRAINT test_internal_release_failure CHECK (operation <> 'RELEASE')");
+        try {
+            assertThatThrownBy(() -> lifecycle.releaseInternal(request.reservationId(), body, releaseKey(request)))
+                    .isInstanceOf(DataIntegrityViolationException.class);
+            assertStock(2);
+            assertThat(inventory.reservation(request.reservationId()).status()).isEqualTo("RESERVED");
+            assertThat(jdbc.queryForObject("SELECT cancellation_recorded FROM inventory_order_guards", Boolean.class)).isFalse();
+            assertThat(jdbc.queryForObject("SELECT released_at FROM reservations", java.sql.Timestamp.class)).isNull();
+            assertThat(count("inventory_operations")).isEqualTo(1);
+        } finally {
+            jdbc.execute("ALTER TABLE inventory_operations DROP CONSTRAINT test_internal_release_failure");
+        }
+        assertThat(lifecycle.releaseInternal(request.reservationId(), body, releaseKey(request)).status()).isEqualTo("RELEASED");
+        assertStock(0);
+    }
+
+    @Test
+    void internalReleaseDoesNotRewriteLegacyReleaseSnapshot() {
+        var request = reserveRequest();
+        inventory.reserve(request, reserveKey(request));
+        var original = release(request);
+        assertError(() -> lifecycle.releaseInternal(request.reservationId(),
+                new InternalReleaseRequest("cmd-001", request.orderId(), "corr-001"), releaseKey(request)),
+                409, "IDEMPOTENCY_KEY_CONFLICT");
+        assertThat(release(request)).isEqualTo(original);
+        assertStock(0);
+    }
+
     private ReserveRequest reserveRequest() {
         return new ReserveRequest(UUID.randomUUID().toString(), UUID.randomUUID().toString(), "STORE", List.of(new Item("A", 2), new Item("B", 3)));
     }

@@ -22,12 +22,6 @@ public class InventoryController {
         this.lifecycle = lifecycle;
     }
 
-    @PostMapping("/reservations/{reservationId}/release")
-    public ReleaseResult release(@PathVariable String reservationId, @Valid @RequestBody ReleaseRequest request,
-            @RequestHeader("Idempotency-Key") String key) {
-        return lifecycle.release(reservationId, request, key);
-    }
-
     @PostMapping("/orders/{orderId}/cancel")
     public CancelResult cancel(@PathVariable String orderId, @Valid @RequestBody CancelRequest request,
             @RequestHeader("Idempotency-Key") String key) {

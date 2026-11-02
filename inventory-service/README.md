@@ -30,6 +30,28 @@ Flyway tự chạy migration khi khởi động. Profile `demo` nạp hai sản 
 
 ## 2. API
 
+Release nội bộ theo #39:
+
+```http
+POST /internal/v1/reservations/RES-001/release
+Content-Type: application/json
+Idempotency-Key: inventory:release:ORD-001:RES-001:v1
+X-Correlation-Id: corr-001
+
+{"commandId":"cmd-release-001","orderId":"ORD-001","correlationId":"corr-001"}
+```
+
+Body không nhận reason hoặc reservationId; Reservation ID lấy từ path. Response
+có đúng reservationId, orderId, status=RELEASED, releasedAt. Retry giữ nguyên key
+và toàn bộ body, trả cùng releasedAt; không giảm reserved_quantity lần nữa.
+Hash request nội bộ gồm cả commandId/correlationId: thay đổi chúng cùng key trả
+409. API cũ dùng body reason vẫn được hỗ trợ tại `/api/v1/inventory`.
+Không chuyển đổi hash/snapshot Release cũ sang body mới; dùng key của command cũ
+với body mới trả IDEMPOTENCY_KEY_CONFLICT, không thực hiện tác dụng phụ lần nữa.
+Validation tracing hiện kiểm tra bắt buộc/không trắng/tối đa 128 ký tự; định dạng
+tracing và kiểm tra khớp header/body còn ở mục 5. Điều kiện Payment/Saga do Order
+xác minh trước khi gửi Release, Inventory không đọc trạng thái Payment.
+
 Response `POST /internal/v1/reservations` theo #39 gồm `reservationId`,
 `orderId`, `status`, `reservedAt`, `reasonCode`. REJECTED trả reservationId và
 reservedAt là null; mã từ chối là INVENTORY_NOT_AVAILABLE, PRODUCT_NOT_FOUND,

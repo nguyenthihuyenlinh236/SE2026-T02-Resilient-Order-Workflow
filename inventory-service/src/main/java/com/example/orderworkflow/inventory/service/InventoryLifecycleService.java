@@ -36,12 +36,33 @@ public class InventoryLifecycleService {
             throw invalid("Invalid Release idempotency key");
         }
         String hash = hash(List.of("RELEASE", request.orderId(), request.reservationId(), request.reason()));
-        repository.lockOrder(request.orderId());
+        return completeRelease(request.orderId(), pathId, key, hash);
+    }
+
+    @Transactional
+    public ReleaseResult releaseInternal(String pathId, InternalReleaseRequest request, String key) {
+        Identifiers.require(pathId, "reservationId");
+        if (request == null) { throw invalid("Release request is required"); }
+        Identifiers.require(request.orderId(), "orderId");
+        validateTrace(request.commandId(), "commandId");
+        validateTrace(request.correlationId(), "correlationId");
+        if (!("inventory:release:" + request.orderId() + ":" + pathId + ":v1").equals(key)) {
+            throw invalid("Invalid Release idempotency key");
+        }
+        // The new body is hashed in full, with an explicit schema discriminator.
+        // Never reinterpret an old reason-based hash as this new request.
+        String hash = hash(List.of("RELEASE_INTERNAL_V1", request.orderId(), pathId,
+                request.commandId(), request.correlationId()));
+        return completeRelease(request.orderId(), pathId, key, hash);
+    }
+
+    private ReleaseResult completeRelease(String orderId, String reservationId, String key, String hash) {
+        repository.lockOrder(orderId);
         var saved = operations.replay(key, "RELEASE", hash, ReleaseResult.class);
         if (saved.isPresent()) { return saved.get(); }
-        var reservation = repository.byId(request.reservationId()).orElseThrow(() ->
+        var reservation = repository.byId(reservationId).orElseThrow(() ->
                 new InventoryException(404, "RESERVATION_NOT_FOUND", "Reservation is not yet known; query Reserve or cancel the Order"));
-        if (!reservation.orderId().equals(request.orderId())) {
+        if (!reservation.orderId().equals(orderId)) {
             throw new InventoryException(409, "RESERVATION_ORDER_MISMATCH", "Reservation belongs to another Order");
         }
         if (reservation.status().equals("REJECTED")) {
@@ -52,10 +73,16 @@ public class InventoryLifecycleService {
         if (releasedAt == null) {
             throw new InventoryException(409, "RELEASE_HISTORY_UNAVAILABLE", "Legacy release timestamp cannot be verified");
         }
-        repository.cancelOrder(request.orderId());
-        var result = new ReleaseResult(request.orderId(), request.reservationId(), key, "RELEASED", releasedAt);
-        operations.save(request.orderId(), key, "RELEASE", hash, result);
+        repository.cancelOrder(orderId);
+        var result = new ReleaseResult(orderId, reservationId, key, "RELEASED", releasedAt);
+        operations.save(orderId, key, "RELEASE", hash, result);
         return result;
+    }
+
+    private static void validateTrace(String value, String field) {
+        if (value == null || value.isBlank() || value.length() > 128) {
+            throw invalid(field + " must contain 1 to 128 characters");
+        }
     }
 
     @Transactional
