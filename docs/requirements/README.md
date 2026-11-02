@@ -1,6 +1,6 @@
 # APP-08 – Resilient Order Workflow: Business Analysis
 
-Tài liệu phân tích nghiệp vụ cho hệ thống mô phỏng quy trình xử lý đơn hàng phân tán, tập trung vào Saga Pattern, Outbox Pattern, idempotency và Order Expiration / TTL.
+Tài liệu phân tích nghiệp vụ cho hệ thống mô phỏng quy trình xử lý đơn hàng phân tán, tập trung vào Saga Pattern, Outbox Pattern, idempotency và Order Expiration / TTL. Các yêu cầu được trình bày theo nguyên tắc nghiệp vụ; thông số tải, lưu giữ và vận hành cần được xác định theo bối cảnh triển khai, không dùng các tham số riêng của một bài tập làm mặc định.
 
 ## Danh mục tài liệu
 
