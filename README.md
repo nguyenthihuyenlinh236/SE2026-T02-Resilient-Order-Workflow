@@ -158,3 +158,67 @@ Chỉ tạo database còn thiếu sau khi kiểm tra. Nếu dùng Linux và log 
 ### Health endpoint không trả `UP`
 
 Kiểm tra container và log bằng các lệnh trên, sau đó xem terminal của service bị lỗi. `Connection refused` thường cho thấy service/hạ tầng chưa chạy hoặc sai cổng. Nếu Maven kết thúc bằng `BUILD FAILURE`, tìm `APPLICATION FAILED TO START` và `Caused by:` phía trên để xác định nguyên nhân; dòng `exit code: 1` chỉ là thông báo kết thúc.
+
+## Continuous Integration (CI)
+
+Dự án sử dụng GitHub Actions để tự động build và chạy kiểm thử Maven khi mở hoặc cập nhật Pull Request vào `dev` hoặc `main`.
+
+**Các nhánh feature tạo PR vào `dev`. Không làm việc trực tiếp trên `main`.**
+
+### Quy trình kiểm tra
+
+Workflow được cấu hình tại `.github/workflows/ci.yml`:
+
+1. Lấy mã nguồn của PR.
+2. Thiết lập môi trường Ubuntu và JDK 17.
+3. Khôi phục cache dependencies Maven nếu có.
+4. Chạy lệnh tại thư mục gốc:
+
+```bash
+mvn -B clean verify
+```
+
+Maven build và chạy kiểm thử cho cả ba module:
+
+- `order-service`
+- `inventory-service`
+- `payment-service`
+
+Nếu bất kỳ module nào build hoặc kiểm thử thất bại, CI báo thất bại.
+
+### Xem kết quả và xử lý lỗi
+
+1. Mở PR trên GitHub.
+2. Chọn tab **Checks**.
+3. Mở job **Maven build and test**.
+4. Xem log của bước **Build and test all modules**.
+
+Có thể xem lịch sử chạy trong tab **Actions**, workflow **Maven CI**.
+
+- **Check xanh:** các bước kiểm tra đã chạy thành công.
+- **Check đỏ:** có bước thất bại; đọc log để xác định module, test hoặc cấu hình gây lỗi.
+
+Khi CI thất bại:
+
+1. Đọc thông báo lỗi đầu tiên có liên quan trong log.
+2. Sửa trên nhánh feature của PR.
+3. Chạy lại `mvn -B clean verify` trên máy.
+4. Commit và push lên cùng nhánh; CI sẽ tự chạy lại.
+
+Không bỏ qua test hoặc vô hiệu hóa kiểm tra chỉ để làm CI xanh.
+
+### Phạm vi kiểm thử
+
+CI này kiểm tra khả năng build và các bài kiểm thử Maven hiện có. Các smoke test của skeleton không yêu cầu PostgreSQL và RabbitMQ đang chạy.
+
+**CI xanh chưa chứng minh các service kết nối được hạ tầng thực tế.** Kiểm thử tích hợp cần khởi động PostgreSQL, RabbitMQ và các service, sau đó xác minh kết nối và `/actuator/health` theo hướng dẫn chạy local.
+
+Workflow không tự deploy ứng dụng.
+
+### Điều kiện merge
+
+PR cần được review và đáp ứng các quy tắc bảo vệ nhánh trước khi merge vào `dev`.
+
+Sau khi CI hoạt động ổn định, quản trị viên cấu hình ruleset yêu cầu status check **Maven build and test** thành công trước khi merge. Việc thêm workflow không tự bật quy tắc này.
+
+Kết quả CI hỗ trợ review, không thay thế việc kiểm tra mã nguồn và đối chiếu yêu cầu của issue.
