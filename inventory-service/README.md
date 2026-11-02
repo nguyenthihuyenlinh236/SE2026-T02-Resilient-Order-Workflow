@@ -30,6 +30,25 @@ Flyway tự chạy migration khi khởi động. Profile `demo` nạp hai sản 
 
 ## 2. API
 
+Cancel và Reserve đến muộn (mục 6): Cancel theo Order hiện là phần mở rộng của
+#29, chưa được PR #39 định nghĩa endpoint/payload/key. Giữ nguyên contract Cancel
+hiện có; không tự xem Cancel là Release thành công trong contract #39.
+
+| Tình huống | Hành vi hiện tại |
+|---|---|
+| Cancel commit trước Reserve | Guard chặn giữ hàng; Reserve trả REJECTED/ORDER_ALREADY_RELEASED ở API nội bộ |
+| Reserve commit trước Cancel | Cancel chuyển Reservation sang RELEASED và trả tồn một lần |
+| Chỉ có guard, chưa có Reserve | GET Reservation trả 404; Cancel replay vẫn NOT_CREATED |
+| Release không tìm thấy Reservation | Trả 404; không commit guard hoặc snapshot lỗi; Reserve đến sau vẫn có thể chạy |
+| Retry Reserve sau Release | POST trả snapshot Reserve gốc; GET trả RELEASED |
+| Release và Cancel cạnh tranh | Cùng khóa guard Order; chỉ một lần giảm reserved_quantity, giữ nguyên released_at |
+
+Điểm cần chốt với người viết #39: có công bố Cancel theo Order hay không; schema,
+key và quyền gọi Cancel; cách biểu diễn ORDER_ALREADY_RELEASED khi guard đến từ
+Cancel chưa có Reservation. Chưa tự thay Release 404 bằng thành công hoặc tạo
+Reservation giả. Order/Saga phải xác minh Reserve/Payment trước compensation;
+Inventory không tự xác minh Payment hoặc chốt trạng thái Order.
+
 Tracing nội bộ (mục 5): mọi endpoint `/internal/v1/**` yêu cầu header
 `X-Correlation-Id`. `X-Command-Id` là optional; nếu có thì phải hợp lệ.
 Header tracing không trắng, tối đa 128 ký tự ASCII hiển thị được. Response thành

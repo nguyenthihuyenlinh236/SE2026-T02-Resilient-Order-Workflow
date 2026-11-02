@@ -950,6 +950,115 @@ class InventoryLifecycleIntegrationTests {
         assertStock(0);
     }
 
+    @Test
+    void internalCancelBeforeLateReserveKeepsOriginalCancelAndRejectionSnapshots() {
+        var request = reserveRequest();
+        String cancelPath = "/internal/v1/orders/" + request.orderId() + "/cancel";
+        var cancelBody = new CancelRequest(request.orderId(), "EXPIRED");
+        var cancelled = http.exchange(cancelPath, HttpMethod.POST,
+                entity(cancelBody, cancelKey(request.orderId())), CancelResult.class);
+        assertThat(cancelled.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(cancelled.getBody().reservationStatus()).isEqualTo("NOT_CREATED");
+        assertThat(cancelled.getBody().reservationId()).isNull();
+        // A cancellation guard alone does not fabricate a Reservation resource.
+        assertThat(http.getForEntity("/internal/v1/reservations/by-order/" + request.orderId(),
+                ContractErrorResponse.class).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        var late = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(late.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(late.getBody().get("status").asText()).isEqualTo("REJECTED");
+        assertThat(late.getBody().get("reasonCode").asText()).isEqualTo("ORDER_ALREADY_RELEASED");
+        assertThat(late.getBody().get("reservationId").isNull()).isTrue();
+        var cancelReplay = http.exchange(cancelPath, HttpMethod.POST,
+                entity(cancelBody, cancelKey(request.orderId())), CancelResult.class);
+        assertThat(cancelReplay.getBody()).isEqualTo(cancelled.getBody());
+        var reserveReplay = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(reserveReplay.getBody()).isEqualTo(late.getBody());
+        var current = http.getForEntity("/internal/v1/reservations/by-order/" + request.orderId(),
+                com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(current.getBody().get("status").asText()).isEqualTo("REJECTED");
+        assertThat(current.getBody().get("idempotencyKey").asText()).isEqualTo(reserveKey(request));
+        assertStock(0);
+        assertThat(count("inventory_operations")).isEqualTo(2);
+    }
+
+    @Test
+    void internalRelease404DoesNotCancelOrderOrCacheFailureBeforeLateReserve() {
+        var request = reserveRequest();
+        String path = "/internal/v1/reservations/" + request.reservationId() + "/release";
+        var body = new InternalReleaseRequest("cmd-release-late", request.orderId(), "corr-001");
+        var missing = http.exchange(path, HttpMethod.POST,
+                entity(body, releaseKey(request)), ContractErrorResponse.class);
+        assertThat(missing.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(missing.getBody().error().code()).isEqualTo("RESERVATION_NOT_FOUND");
+        assertThat(count("inventory_order_guards")).isZero();
+        assertThat(count("inventory_operations")).isZero();
+        var reserved = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(reserved.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(reserved.getBody().get("status").asText()).isEqualTo("RESERVED");
+        var released = http.exchange(path, HttpMethod.POST,
+                entity(body, releaseKey(request)), com.example.orderworkflow.inventory.api.InventoryContractResponses.ReleaseResponse.class);
+        assertThat(released.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(released.getBody().status()).isEqualTo("RELEASED");
+        var replay = http.exchange(path, HttpMethod.POST,
+                entity(body, releaseKey(request)), com.example.orderworkflow.inventory.api.InventoryContractResponses.ReleaseResponse.class);
+        assertThat(replay.getBody()).isEqualTo(released.getBody());
+        assertStock(0);
+        assertThat(count("inventory_operations")).isEqualTo(2);
+    }
+
+    @Test
+    void internalReserveAndCancelRaceLeavesNoActiveStockAndBothCommandsReplay() throws Exception {
+        var request = reserveRequest();
+        var cancelBody = new CancelRequest(request.orderId(), "EXPIRED");
+        String cancelPath = "/internal/v1/orders/" + request.orderId() + "/cancel";
+        var results = concurrently(List.of(
+                () -> http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                        entity(request, reserveKey(request)), com.fasterxml.jackson.databind.JsonNode.class),
+                () -> http.exchange(cancelPath, HttpMethod.POST,
+                        entity(cancelBody, cancelKey(request.orderId())), CancelResult.class)));
+        for (Object result : results) {
+            assertThat(((ResponseEntity<?>) result).getStatusCode()).isEqualTo(HttpStatus.OK);
+        }
+        var reserveReplay = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        var cancelReplay = http.exchange(cancelPath, HttpMethod.POST,
+                entity(cancelBody, cancelKey(request.orderId())), CancelResult.class);
+        assertThat(reserveReplay.getBody()).isEqualTo(((ResponseEntity<?>) results.get(0)).getBody());
+        assertThat(cancelReplay.getBody()).isEqualTo(((ResponseEntity<?>) results.get(1)).getBody());
+        assertThat(inventory.reservation(request.reservationId()).status()).isIn("RELEASED", "REJECTED");
+        assertStock(0);
+        assertThat(count("inventory_operations")).isEqualTo(2);
+    }
+
+    @Test
+    void internalReleaseAndCancelRaceKeepOneReleaseTimestampAndReturnStockOnce() throws Exception {
+        var request = reserveRequest();
+        inventory.reserve(request, reserveKey(request));
+        String releasePath = "/internal/v1/reservations/" + request.reservationId() + "/release";
+        var releaseBody = new InternalReleaseRequest("cmd-release-race", request.orderId(), "corr-001");
+        String cancelPath = "/internal/v1/orders/" + request.orderId() + "/cancel";
+        var cancelBody = new CancelRequest(request.orderId(), "EXPIRED");
+        var results = concurrently(List.of(
+                () -> http.exchange(releasePath, HttpMethod.POST,
+                        entity(releaseBody, releaseKey(request)), com.example.orderworkflow.inventory.api.InventoryContractResponses.ReleaseResponse.class),
+                () -> http.exchange(cancelPath, HttpMethod.POST,
+                        entity(cancelBody, cancelKey(request.orderId())), CancelResult.class)));
+        for (Object result : results) {
+            assertThat(((ResponseEntity<?>) result).getStatusCode()).isEqualTo(HttpStatus.OK);
+        }
+        var replay = http.exchange(releasePath, HttpMethod.POST,
+                entity(releaseBody, releaseKey(request)), com.example.orderworkflow.inventory.api.InventoryContractResponses.ReleaseResponse.class);
+        assertThat(replay.getBody()).isEqualTo(((ResponseEntity<?>) results.get(0)).getBody());
+        assertThat(replay.getBody().releasedAt()).isEqualTo(
+                jdbc.queryForObject("SELECT released_at FROM reservations", java.sql.Timestamp.class).toInstant());
+        assertThat(inventory.reservation(request.reservationId()).status()).isEqualTo("RELEASED");
+        assertStock(0);
+        assertThat(count("inventory_operations")).isEqualTo(3);
+    }
+
     private static class DefaultTraceHeader implements org.springframework.http.client.ClientHttpRequestInterceptor {
         @Override
         public org.springframework.http.client.ClientHttpResponse intercept(org.springframework.http.HttpRequest request,
