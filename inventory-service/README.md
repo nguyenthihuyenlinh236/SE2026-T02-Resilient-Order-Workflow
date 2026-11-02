@@ -30,6 +30,23 @@ Flyway tự chạy migration khi khởi động. Profile `demo` nạp hai sản 
 
 ## 2. API
 
+Tracing nội bộ (mục 5): mọi endpoint `/internal/v1/**` yêu cầu header
+`X-Correlation-Id`. `X-Command-Id` là optional; nếu có thì phải hợp lệ.
+Header tracing không trắng, tối đa 128 ký tự ASCII hiển thị được. Response thành
+công/lỗi giữ nguyên correlation header hợp lệ. Thiếu/sai correlation trả 400
+VALIDATION_ERROR trước khi gọi nghiệp vụ; response lỗi dùng UUID thay thế để truy
+vết lỗi đó. API cũ không bắt buộc tracing header.
+
+Hash được tạo từ cấu trúc dữ liệu đã parse, không hash nguyên văn JSON. Đổi thứ
+tự field hoặc whitespace JSON không làm đổi hash. Header tracing không tham gia
+hash; body commandId/correlationId của Release nội bộ vẫn tham gia như mục 4.
+Không cập nhật lại hash hoặc snapshot cũ khi retry/đổi header.
+
+Các điểm #39 chưa chốt và được để lại: regex tracing ID chính thức; xử lý khi
+header khác body; có loại tracing field trong body khỏi payload hash hay không.
+Chưa tự chọn header/body làm nguồn ưu tiên. Tracing trong body Reserve mới chờ
+hoàn thiện payload Reserve ở phần 2.
+
 Release nội bộ theo #39:
 
 ```http

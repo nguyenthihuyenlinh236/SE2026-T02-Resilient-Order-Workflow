@@ -48,7 +48,7 @@ public class InventoryErrorHandler {
                     status == 400 && code.equals("INVALID_IDENTIFIER") ? "INVALID_REQUEST" : code, message));
         }
         String correlationId = request.getHeader("X-Correlation-Id");
-        if (correlationId == null || !correlationId.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) {
+        if (!InventoryTracing.validHeader(correlationId)) {
             correlationId = UUID.randomUUID().toString();
         }
         String contractCode = code.equals("INVALID_REQUEST") ? "VALIDATION_ERROR" : code;

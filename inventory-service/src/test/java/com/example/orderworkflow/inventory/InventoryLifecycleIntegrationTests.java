@@ -53,6 +53,11 @@ class InventoryLifecycleIntegrationTests {
 
     @BeforeEach
     void seed() {
+        // Model an internal caller that consistently forwards its Saga correlation ID.
+        var client = http.getRestTemplate();
+        if (client.getInterceptors().stream().noneMatch(interceptor -> interceptor instanceof DefaultTraceHeader)) {
+            client.getInterceptors().add(new DefaultTraceHeader());
+        }
         jdbc.execute("TRUNCATE inventory_operations, reservation_items, reservations, inventory_order_guards, inventory");
         for (String sku : List.of("A", "B")) {
             jdbc.update("INSERT INTO inventory(product_id, sku, store_id, product_name, on_hand_quantity) VALUES (?, ?, 'STORE', ?, 10)",
@@ -128,7 +133,7 @@ class InventoryLifecycleIntegrationTests {
         assertThat(response.getBody().error().code()).isEqualTo("RESERVATION_NOT_FOUND");
         assertThat(response.getBody().error().retryable()).isFalse();
         assertThat(response.getBody().error().details()).isEmpty();
-        assertThat(UUID.fromString(response.getBody().error().correlationId())).isNotNull();
+        assertThat(response.getBody().error().correlationId()).isEqualTo("corr-001");
         assertThat(response.getHeaders().getFirst("X-Correlation-Id"))
                 .isEqualTo(response.getBody().error().correlationId());
     }
@@ -848,6 +853,112 @@ class InventoryLifecycleIntegrationTests {
                 409, "IDEMPOTENCY_KEY_CONFLICT");
         assertThat(release(request)).isEqualTo(original);
         assertStock(0);
+    }
+
+    @Test
+    void missingInternalCorrelationIsRejectedBeforeWritesButLegacyRouteStillWorks() {
+        var caller = new TestRestTemplate();
+        var request = reserveRequest();
+        var response = caller.exchange(http.getRootUri() + "/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), ContractErrorResponse.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().error().code()).isEqualTo("VALIDATION_ERROR");
+        assertThat(UUID.fromString(response.getBody().error().correlationId())).isNotNull();
+        assertThat(response.getHeaders().getFirst("X-Correlation-Id"))
+                .isEqualTo(response.getBody().error().correlationId());
+        assertThat(count("inventory_order_guards")).isZero();
+        assertThat(count("inventory_operations")).isZero();
+        var legacy = caller.exchange(http.getRootUri() + "/api/v1/inventory/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), Reservation.class);
+        assertThat(legacy.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    void invalidTracingHeadersCannotCreateSideEffects() {
+        var request = reserveRequest();
+        for (String field : List.of("X-Correlation-Id", "X-Command-Id")) {
+            var headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.set("Idempotency-Key", reserveKey(request));
+            headers.set("X-Correlation-Id", "corr-001");
+            headers.set(field, "x".repeat(129));
+            var response = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                    new HttpEntity<>(request, headers), ContractErrorResponse.class);
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(response.getBody().error().code()).isEqualTo("VALIDATION_ERROR");
+        }
+        assertThat(count("inventory_order_guards")).isZero();
+        assertThat(count("inventory_operations")).isZero();
+        assertStock(0);
+    }
+
+    @Test
+    void internalQueriesRequireAndEchoCorrelationIncludingOnErrors() {
+        var caller = new TestRestTemplate();
+        var missing = caller.getForEntity(http.getRootUri() + "/internal/v1/reservations/by-order/ORD-UNKNOWN",
+                ContractErrorResponse.class);
+        assertThat(missing.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        String trace = "trace:" + "x".repeat(122);
+        var headers = new HttpHeaders();
+        headers.set("X-Correlation-Id", trace);
+        var notFound = caller.exchange(http.getRootUri() + "/internal/v1/reservations/by-order/ORD-UNKNOWN",
+                HttpMethod.GET, new HttpEntity<>(headers), ContractErrorResponse.class);
+        assertThat(notFound.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(notFound.getBody().error().correlationId()).isEqualTo(trace);
+        assertThat(notFound.getHeaders().getFirst("X-Correlation-Id")).isEqualTo(trace);
+    }
+
+    @Test
+    void transportCorrelationDoesNotChangeReserveHashOrPersistedSnapshot() {
+        var request = reserveRequest();
+        var original = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        String hash = jdbc.queryForObject("SELECT payload_hash FROM inventory_operations", String.class);
+        String snapshot = jdbc.queryForObject("SELECT response_payload::text FROM inventory_operations", String.class);
+        var headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("Idempotency-Key", reserveKey(request));
+        headers.set("X-Correlation-Id", "corr-query-002");
+        var replay = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                new HttpEntity<>(request, headers), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(replay.getBody()).isEqualTo(original.getBody());
+        assertThat(replay.getHeaders().getFirst("X-Correlation-Id")).isEqualTo("corr-query-002");
+        assertThat(jdbc.queryForObject("SELECT payload_hash FROM inventory_operations", String.class)).isEqualTo(hash);
+        assertThat(jdbc.queryForObject("SELECT response_payload::text FROM inventory_operations", String.class)).isEqualTo(snapshot);
+        assertStock(2);
+    }
+
+    @Test
+    void releaseJsonFieldOrderAndWhitespaceDoNotChangeHashOrReplay() {
+        var request = reserveRequest();
+        inventory.reserve(request, reserveKey(request));
+        var body = new InternalReleaseRequest("cmd-001", request.orderId(), "corr-001");
+        var first = http.exchange("/internal/v1/reservations/" + request.reservationId() + "/release", HttpMethod.POST,
+                entity(body, releaseKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        String hash = jdbc.queryForObject("SELECT payload_hash FROM inventory_operations WHERE operation = 'RELEASE'", String.class);
+        String reordered = "{ \"correlationId\": \"corr-001\", \"orderId\": \"" + request.orderId()
+                + "\", \"commandId\": \"cmd-001\" }";
+        var replay = http.exchange("/internal/v1/reservations/" + request.reservationId() + "/release", HttpMethod.POST,
+                entity(reordered, releaseKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(replay.getBody()).isEqualTo(first.getBody());
+        assertThat(replay.getHeaders().getFirst("X-Correlation-Id")).isEqualTo("corr-001");
+        assertThat(jdbc.queryForObject("SELECT payload_hash FROM inventory_operations WHERE operation = 'RELEASE'", String.class)).isEqualTo(hash);
+        assertThat(count("inventory_operations")).isEqualTo(2);
+        assertStock(0);
+    }
+
+    private static class DefaultTraceHeader implements org.springframework.http.client.ClientHttpRequestInterceptor {
+        @Override
+        public org.springframework.http.client.ClientHttpResponse intercept(org.springframework.http.HttpRequest request,
+                byte[] body, org.springframework.http.client.ClientHttpRequestExecution execution) throws java.io.IOException {
+            if (!request.getHeaders().containsKey("X-Correlation-Id")) {
+                request.getHeaders().set("X-Correlation-Id", "corr-001");
+            }
+            return execution.execute(request, body);
+        }
     }
 
     private ReserveRequest reserveRequest() {
