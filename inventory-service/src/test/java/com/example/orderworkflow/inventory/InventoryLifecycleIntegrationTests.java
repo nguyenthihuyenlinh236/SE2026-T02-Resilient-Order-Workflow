@@ -123,9 +123,57 @@ class InventoryLifecycleIntegrationTests {
 
     @Test
     void internalLookupReturns404ForUnknownOrder() {
-        var response = http.getForEntity("/internal/v1/reservations/by-order/" + UUID.randomUUID(), ApiError.class);
+        var response = http.getForEntity("/internal/v1/reservations/by-order/" + UUID.randomUUID(), ContractErrorResponse.class);
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        assertThat(response.getBody().code()).isEqualTo("RESERVATION_NOT_FOUND");
+        assertThat(response.getBody().error().code()).isEqualTo("RESERVATION_NOT_FOUND");
+        assertThat(response.getBody().error().retryable()).isFalse();
+        assertThat(response.getBody().error().details()).isEmpty();
+        assertThat(UUID.fromString(response.getBody().error().correlationId())).isNotNull();
+        assertThat(response.getHeaders().getFirst("X-Correlation-Id"))
+                .isEqualTo(response.getBody().error().correlationId());
+    }
+
+    @Test
+    void internalValidationErrorHasFieldDetailsAndPreservesCorrelationId() {
+        var request = reserveRequest();
+        var invalid = new ReserveRequest(request.orderId(), request.reservationId(), "", request.items());
+        var headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("Idempotency-Key", reserveKey(request));
+        headers.set("X-Correlation-Id", "corr-validation-001");
+        var response = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                new HttpEntity<>(invalid, headers), ContractErrorResponse.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        var error = response.getBody().error();
+        assertThat(error.code()).isEqualTo("VALIDATION_ERROR");
+        assertThat(error.correlationId()).isEqualTo("corr-validation-001");
+        assertThat(error.retryable()).isFalse();
+        assertThat(error.details()).extracting(ErrorDetail::field).contains("storeId");
+        assertThat(count("inventory_operations")).isZero();
+    }
+
+    @Test
+    void internalInvalidIdentifierAndMissingHeaderUseContractErrors() {
+        var malformed = http.getForEntity("/internal/v1/reservations/by-order/not-a-uuid", ContractErrorResponse.class);
+        assertThat(malformed.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(malformed.getBody().error().code()).isEqualTo("INVALID_IDENTIFIER");
+        var missingHeader = http.postForEntity("/internal/v1/reservations", reserveRequest(), ContractErrorResponse.class);
+        assertThat(missingHeader.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(missingHeader.getBody().error().code()).isEqualTo("VALIDATION_ERROR");
+    }
+
+    @Test
+    void internalIdempotencyConflictUsesContractErrorAndPreservesStock() {
+        var request = reserveRequest();
+        inventory.reserve(request, reserveKey(request));
+        var changed = new ReserveRequest(request.orderId(), request.reservationId(), request.storeId(), List.of(new Item("A", 9)));
+        var response = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(changed, reserveKey(request)), ContractErrorResponse.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody().error().code()).isEqualTo("IDEMPOTENCY_KEY_CONFLICT");
+        assertThat(response.getBody().error().retryable()).isFalse();
+        assertStock(2);
+        assertThat(count("inventory_operations")).isEqualTo(1);
     }
 
     @Test

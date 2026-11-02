@@ -37,6 +37,14 @@ Bước này chỉ bổ sung đường dẫn; request/response vẫn dùng schem
 #28–#29, chưa phải toàn bộ schema đề xuất trong #39. Tra cứu Reservation trả
 trạng thái hiện tại; retry Reserve cùng key và payload trả kết quả lệnh gốc.
 
+Các lỗi validation, xung đột và không tìm thấy do Inventory xử lý tại
+`/internal/v1` dùng envelope `{"error":{"code","message","details","correlationId","retryable"}}`
+(các tên trong ví dụ biểu thị trường). Validation dùng `VALIDATION_ERROR`, ID sai
+định dạng dùng `INVALID_IDENTIFIER`. Lỗi 4xx này có `retryable=false`.
+`X-Correlation-Id` hợp lệ được giữ trong body và header response; nếu thiếu hoặc
+sai định dạng, response lỗi sinh UUID thay thế. Đây chưa phải validation tracing
+cho toàn bộ request thành công. API `/api/v1/inventory` vẫn trả lỗi `{code,message}`.
+
 | Method | Path | Kết quả |
 |---|---|---|
 | POST | `/api/v1/inventory/reservations` | RESERVED hoặc REJECTED; HTTP 200 cho kết quả nghiệp vụ xác định |

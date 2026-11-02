@@ -29,6 +29,11 @@ public final class InventoryDtos {
 
     public record ApiError(String code, String message) { }
 
+    public record ContractErrorResponse(ContractError error) { }
+    public record ContractError(String code, String message, List<ErrorDetail> details,
+            String correlationId, boolean retryable) { }
+    public record ErrorDetail(String field, String reason) { }
+
     public record ReleaseRequest(@NotNull UUID orderId, @NotNull UUID reservationId,
             @NotBlank @Size(max = 255) String reason) { }
 
