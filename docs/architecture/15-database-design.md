@@ -45,10 +45,17 @@ erDiagram
     ORDERS ||--o{ OUTBOX_EVENTS : emits
     ORDERS {
         uuid order_id PK
+        varchar store_id
         varchar status
         timestamptz expire_at
         uuid payment_id
         uuid reservation_id
+    }
+    ORDER_ITEMS {
+        uuid order_id PK,FK
+        varchar sku PK
+        uuid product_id
+        integer quantity
     }
     SAGAS {
         uuid saga_id PK
@@ -76,10 +83,11 @@ Inbox không có FK tới Order vì có thể tiếp nhận event sai tham chi�
 |---|---|---|---|
 | `order_id` | `uuid` | PK | Định danh Order |
 | `client_id` | `varchar(128)` | NOT NULL | Phạm vi khóa tạo đơn; định danh client, không thay thế xác thực |
+| `store_id` | `varchar(100)` | NOT NULL, không trắng | Snapshot cửa hàng đã xác định khi tiếp nhận Order; nguồn storeId cho Reserve |
 | `status` | `varchar(32)` | NOT NULL, default `PENDING`, CHECK | Trạng thái Order |
 | `total_amount` | `numeric(19,2)` | NOT NULL, CHECK > 0 | Tổng tiền từ các dòng đơn |
 | `currency` | `varchar(3)` | NOT NULL | Loại tiền |
-| `reservation_id` | `uuid` | NULL cho đến khi nhận kết quả | Tham chiếu logic Inventory |
+| `reservation_id` | `uuid` | NOT NULL, UNIQUE | Order Service sinh một lần khi tạo Order, lưu trước khi gửi Reserve; tham chiếu logic Inventory |
 | `reservation_status` | `varchar(32)` | NOT NULL, default `NOT_CREATED`, CHECK | Bản trạng thái Reservation cục bộ |
 | `reservation_verified` | `boolean` | NOT NULL, default false | Kết quả đã được Inventory xác minh |
 | `unknown_operation` | `varchar(16)` | NULL hoặc `RESERVE`/`RELEASE` | Thao tác Reservation cần đối soát |
@@ -113,11 +121,21 @@ CHECK bảo đảm `terminal_at` và timestamp tương ứng tồn tại khi Ord
 | Cột | Kiểu | Ràng buộc / mặc định | Ý nghĩa |
 |---|---|---|---|
 | `order_id` | `uuid` | PK thành phần, FK → orders | Đơn sở hữu |
-| `product_id` | `uuid` | PK thành phần | Tham chiếu sản phẩm logic |
+| `sku` | `varchar(128)` | PK thành phần, NOT NULL, không trắng | Snapshot mã sản phẩm từ yêu cầu đặt hàng |
+| `product_id` | `uuid` | Nullable, không FK xuyên DB | Tham chiếu logic dòng Inventory nếu đã xác minh qua API; không dùng làm khóa gửi Reserve |
 | `quantity` | `integer` | NOT NULL, CHECK > 0 | Số lượng |
 | `unit_price` | `numeric(19,2)` | NOT NULL, CHECK > 0 | Giá tại thời điểm đặt |
 
-PK `(order_id, product_id)` loại bỏ dòng sản phẩm trùng; request được chuẩn hóa trước khi hash. Trong transaction tạo Order, xác minh có ít nhất một dòng và `total_amount = SUM(quantity * unit_price)`. Đây là kiểm tra nhiều dòng trong nghiệp vụ, không dùng CHECK truy vấn bảng khác. Dữ liệu giá được cố định khi tiếp nhận, không cập nhật theo giá sản phẩm về sau.
+PK `(order_id, sku)` loại bỏ dòng SKU trùng trong một Order; mỗi Order thuộc một `orders.store_id`. Request được gộp các dòng trùng SKU và chuẩn hóa trước khi hash. Trong transaction tạo Order, xác minh có ít nhất một dòng và `total_amount = SUM(quantity * unit_price)`. Đây là kiểm tra nhiều dòng trong nghiệp vụ, không dùng CHECK truy vấn bảng khác. Dữ liệu giá được cố định khi tiếp nhận, không cập nhật theo giá sản phẩm về sau.
+
+#### 4.3.1. Ánh xạ Order–Inventory và phục hồi Reserve
+
+- Client gửi `storeId` và `items[{sku, quantity}]` khi đặt hàng. Nếu API tạo Order cho phép thiếu storeId, Order Service chọn cửa hàng mặc định theo cấu hình đã được nhóm thống nhất, kiểm tra không trắng/tối đa 100 ký tự và lưu giá trị cụ thể vào `orders.store_id` trước khi chấp nhận. Không xác định được cửa hàng thì từ chối yêu cầu; không để worker tự chọn mặc định lại sau restart.
+- `order_items.sku` lưu nguyên SKU đã xác thực từ request (tối đa 128 ký tự, phân biệt hoa/thường, không tự trim); quantity lưu tổng sau gộp. Với một Order, cặp `(orders.store_id, order_items.sku)` là định danh logic dùng để yêu cầu giữ hàng.
+- Inventory phân giải cặp `(store_id, sku)` sang `inventory.product_id` bằng UNIQUE tương ứng trong database của nó. Order không suy ra SKU từ UUID, không JOIN Inventory DB và không cần product_id để gửi Reserve. Cột product_id ở Order chỉ được bổ sung nếu Order nhận được ánh xạ đã xác minh qua API Inventory, ví dụ tra cứu tồn theo store/SKU; có thể để NULL, không giả định luôn tồn tại sản phẩm trước Reserve.
+- Khi tạo Order, Order Service sinh reservationId và ghi Order, items, Saga cùng bước RESERVE với key `reserve:{orderId}:v1` trong transaction cục bộ. `saga_steps.request_payload` lưu snapshot `{"orderId":..., "reservationId":..., "storeId":..., "items":[{"sku":..., "quantity":...}]}` đã gộp/sắp SKU và phiên bản schema của command. Bước đã lưu bền vững trước khi gửi mạng.
+- Sau restart, worker đọc bước đã lưu, query kết quả theo key rồi chỉ gửi lại cùng payload/key khi cần. Không sinh reservationId mới, đổi store theo cấu hình mới, tra danh mục hiện tại để dựng lại SKU hoặc thay đổi số lượng. Hash được tính từ cùng dữ liệu nghiệp vụ đã chuẩn hóa; metadata retry không làm đổi hash. Order/items và payload của bước Reserve không được sửa sau khi lệnh đã có thể được gửi.
+- Nếu worker tiếp quản khi Order đã rời PENDING, không gửi Reserve mới; tiếp tục đối soát hoặc nhánh bù trừ theo State Machine. Các tham chiếu product_id là thông tin bổ sung, không phải nguồn tái dựng lệnh.
 
 ### 4.4. Bảng `sagas`
 
@@ -494,20 +512,20 @@ Query timeout vẫn tính một lượt. Sau downtime không phát dồn mọi q
 
 ## 10. Chính sách lưu giữ dữ liệu
 
-Dữ liệu nghiệp vụ, chống trùng và kiểm toán được giữ tối thiểu 29 ngày. Không đồng nhất TTL 15 phút với retention 29 ngày.
+Dữ liệu nghiệp vụ, chống trùng và kiểm toán được giữ theo chính sách cấu hình của môi trường, phù hợp NFR-10. Thời lượng retention không phải một giá trị cố định dùng chung cho toàn dự án. Cấu hình phải nêu thời lượng theo từng loại dữ liệu, mốc bắt đầu tính, cửa sổ retry/replay và cách xử lý sau thời hạn; kịch bản kiểm thử ghi rõ giá trị lựa chọn. TTL nghiệp vụ của Order không phải thời hạn xóa dữ liệu.
 
-| Dữ liệu | Mốc tính tối thiểu 29 ngày | Điều kiện dọn dẹp |
+| Dữ liệu | Mốc bắt đầu tính retention cấu hình | Điều kiện dọn dẹp |
 |---|---|---|
 | Order, items | terminal_at | Saga và mọi tác vụ liên quan đã hoàn tất |
 | Saga, steps, attempts | completed_at gần nhất của Saga | Không còn retry, đối soát hoặc can thiệp |
 | Reservation, items, guard | Kết quả kết thúc Order đã được Inventory xác minh qua giao tiếp service | Không còn Reservation cần xử lý; bảo vệ replay còn đủ hạn |
 | Capture, Refund | Mốc muộn hơn giữa hoàn tất giao dịch và kết thúc xử lý liên quan | Không UNKNOWN/IN_PROGRESS hoặc còn khoản cần hoàn |
-| Idempotency | completed_at; với tạo đơn không sớm hơn terminal_at | Ít nhất 29 ngày và không ngắn hơn cửa sổ retry/replay |
+| Idempotency | completed_at; với tạo đơn không sớm hơn terminal_at | Hết thời hạn cấu hình và không ngắn hơn cửa sổ retry/replay |
 | Outbox | Mốc muộn hơn giữa published_at và terminal_at | Đã PUBLISHED; hết cửa sổ replay |
-| Inbox | processed_at | Hết cửa sổ replay của producer và tối thiểu 29 ngày |
+| Inbox | processed_at | Hết thời hạn cấu hình và cửa sổ replay của producer |
 | Log kiểm toán | Thời điểm ghi | Không thuộc hồ sơ đang điều tra |
 
-`retain_until` là hạn tối thiểu, không phải lệnh xóa ngay khi đến hạn. Với bảng nghiệp vụ, tiến trình cleanup tính eligibility từ các mốc và trạng thái tương ứng. Inventory/Payment chỉ xác nhận eligibility qua thông tin service cung cấp, không JOIN Order DB. Chưa có bằng chứng hoàn tất thì tiếp tục giữ dữ liệu.
+`retain_until` là hạn sớm nhất được xét dọn theo chính sách, không phải lệnh xóa ngay khi đến hạn. Tính hạn từ mốc trong bảng và thời lượng cấu hình; với dữ liệu chống trùng, hạn không được sớm hơn khi kết thúc cửa sổ retry/replay đã công bố. Chưa có cấu hình retention/cửa sổ replay hợp lệ thì không tự xóa dữ liệu. Với bảng nghiệp vụ, tiến trình cleanup tính eligibility từ các mốc và trạng thái tương ứng. Inventory/Payment chỉ xác nhận eligibility qua thông tin service cung cấp, không JOIN Order DB. Chưa có bằng chứng hoàn tất thì tiếp tục giữ dữ liệu.
 
 Saga được mở lại để Refund muộn làm mất điều kiện cleanup và tính lại retention sau khi hoàn tất. Guard chống Reserve muộn, record chống trùng và định danh nghiệp vụ không bị xóa khi producer còn có thể replay. Cửa sổ replay chưa giới hạn thì giữ tiếp bản ghi chống trùng/guard. Không xóa sớm để tiết kiệm dung lượng rồi cho phép tác dụng cũ chạy lại.
 
@@ -552,10 +570,10 @@ Khởi tạo PostgreSQL rỗng tách biệt, chạy toàn bộ migration, nạp 
 | Conditional update, version | D-01, NFR-02, AC-10.3 | Ba nhánh cạnh tranh, chỉ một UPDATE thành công |
 | Saga, steps, attempts, lease | FR-11/12/13/14, D-03/04/06 | Crash và tiếp quản không tạo tác dụng lần hai |
 | Outbox/Inbox | BR-09/12, NFR-06, AC-08 | Rollback không để event rời trạng thái; publish lại cùng ID |
-| Retention | NFR-C02, NFR-10, AC-11.3 | Không xóa công việc dang dở hoặc mất khóa trong cửa sổ replay |
+| Retention | NFR-10, AC-11.3 | Không xóa công việc dang dở hoặc mất khóa trong cửa sổ replay; kiểm tra theo thời lượng cấu hình |
 | Migration | Issue #21 | Tạo database từ rỗng, ràng buộc/index có đủ và nâng cấp được |
 
-Các kiểm thử triển khai phải bao phủ ít nhất 10 lần gửi trùng từng lệnh, cùng khóa khác payload, crash trước/sau commit, publish trước mark, worker chết sau claim, Refund UNKNOWN/FAILED, Reserve muộn và rollback khi ghi dữ liệu lỗi. Kiểm thử cạnh tranh trạng thái sử dụng ít nhất 1.000 Order độc lập theo NFR-02; kịch bản tải 155 người dùng kiểm tra bất biến, không suy ra 155 request/giây.
+Các kiểm thử triển khai phải bao phủ ít nhất 10 lần gửi trùng từng lệnh, cùng khóa khác payload, crash trước/sau commit, publish trước mark, worker chết sau claim, Refund UNKNOWN/FAILED, Reserve muộn và rollback khi ghi dữ liệu lỗi. Kiểm thử cạnh tranh trạng thái sử dụng ít nhất 1.000 Order độc lập theo NFR-02. Mỗi kịch bản tải công bố số người dùng/yêu cầu đồng thời, thời lượng, dữ liệu tồn kho ban đầu, môi trường và căn cứ chọn tải. Không áp đặt một quy mô tải cố định cho mọi môi trường hoặc suy ra request/giây chỉ từ số người dùng. Kiểm thử retention sử dụng thời lượng cấu hình của chính kịch bản, kiểm tra trước/sau retain_until và các trường hợp Saga, compensation hoặc replay còn tồn đọng.
 
 ## 13. Tài liệu tham chiếu
 
