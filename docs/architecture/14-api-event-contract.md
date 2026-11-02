@@ -155,7 +155,7 @@ Bảng này là checklist triển khai ở mức field-level cho tất cả HTTP
 
 ### 4.1. Tạo Order
 
-**Schema request/response:** `customerId: string ID` bắt buộc; `items: array<object>` bắt buộc 1–100 phần tử, không rỗng; `items[].productId: string ID` bắt buộc, duy nhất; `items[].quantity: integer` bắt buộc, số nguyên dương. Response: `orderId: string ID`, `status: enum` (ban đầu `PENDING`), `createdAt/expireAt: ISO-8601 UTC` (expireAt > createdAt), `correlationId: string` đều bắt buộc.
+**Schema request:** `customerId: string Identifier` bắt buộc/non-null; `items: array<object>` bắt buộc/non-null, 1–100 phần tử, không rỗng; mỗi item là object non-null, `productId: string Identifier` bắt buộc/non-null và duy nhất, `quantity: integer` bắt buộc/non-null, số nguyên dương, không vượt giới hạn cấu hình. Không chấp nhận quantity dạng float/chuỗi số, item null, mảng rỗng hoặc productId trùng. Header `Idempotency-Key` bắt buộc theo mục 3.1.1; `X-Correlation-Id` optional, nếu có phải theo quy ước tracing. **Response:** `orderId: Identifier`, `status: enum Order` (`PENDING` khi tạo), `createdAt/expireAt: ISO-8601 UTC` và `correlationId: string` đều bắt buộc/non-null; `expireAt > createdAt`.
 
 | Thuộc tính | Đặc tả |
 |---|---|
@@ -203,7 +203,7 @@ Quy tắc:
 
 ### 4.2. Tra cứu Order
 
-**Schema response:** `orderId: string ID`, `status: enum Order`, `createdAt/expireAt: ISO-8601 UTC` bắt buộc; `reservationStatus: enum` optional (`NOT_CREATED/RESERVED/RELEASED/REJECTED/UNKNOWN`); `captureStatus: enum` optional (`NOT_STARTED/IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN`); `correlationId: string` bắt buộc. Path `orderId` phải là Identifier hợp lệ.
+**Schema request:** không có body; path `orderId: Identifier` bắt buộc/non-null. **Schema response:** `orderId: Identifier`, `status: enum Order`, `createdAt/expireAt: ISO-8601 UTC`, `correlationId: string` đều bắt buộc/non-null; `reservationStatus` optional (nếu có: `NOT_CREATED/RESERVED/RELEASED/REJECTED/UNKNOWN`); `captureStatus` optional (nếu có: `NOT_STARTED/IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN`). Field optional vắng mặt thì omit, không gửi null nếu không được schema cho phép.
 
 | Thuộc tính | Đặc tả |
 |---|---|
@@ -237,7 +237,7 @@ Các API này là internal API, chỉ Order Service/Saga Orchestrator được g
 
 ### 5.1. Reserve Inventory
 
-**Schema request:** `commandId: string`, `orderId: string ID`, `correlationId: string` bắt buộc; `items` bắt buộc 1–100 phần tử, không rỗng; `items[].productId: string ID` không trùng; `items[].quantity: integer > 0`. Các trường request đều bắt buộc, không được null; áp dụng validation mục 3.1.1.
+**Schema request:** `commandId: string` UUID/tracing ID ≤128 ký tự, `orderId: Identifier`, `correlationId: string` UUID/tracing ID ≤128 ký tự đều bắt buộc/non-null; `items: array<object>` bắt buộc/non-null, 1–100 phần tử, không rỗng; từng item object non-null có `productId: Identifier` bắt buộc/duy nhất và `quantity: integer` bắt buộc >0, không vượt giới hạn cấu hình. Không chấp nhận duplicate productId, item null, quantity float/chuỗi số/0/âm. Header `Idempotency-Key` bắt buộc đúng `reserve:{orderId}:v1`.
 
 **Schema response Reserve:** Tất cả trường dưới đây bắt buộc có mặt.
 
@@ -337,7 +337,7 @@ Nếu không tìm thấy bản ghi theo `orderId`, trả `404 RESERVATION_NOT_FO
 
 ### 5.3. Release Inventory
 
-**Schema request:** `commandId: string`, `orderId: string ID`, `correlationId: string` bắt buộc. Mọi trường request bắt buộc, không null. **Response:** `reservationId/orderId: Identifier`, `status: RELEASED`, `releasedAt: ISO-8601 UTC` đều bắt buộc, không null. Path `reservationId` theo Identifier. Chỉ dùng `RELEASED`, không có status `ALREADY_RELEASED`: release lại reservation đã giải phóng vẫn trả `200 RELEASED`, giữ nguyên `releasedAt` lần đầu và không tăng tồn kho lần nữa.
+**Schema request:** Path `reservationId: Identifier` bắt buộc; header `Idempotency-Key` bắt buộc đúng `inventory:release:{orderId}:{reservationId}:v1`; body `commandId`, `orderId`, `correlationId` đều string bắt buộc/non-null, command/correlation theo quy tắc tracing ≤128 ký tự. **Response:** `reservationId/orderId: Identifier`, `status: RELEASED`, `releasedAt: ISO-8601 UTC` đều bắt buộc/non-null. Chỉ dùng `RELEASED`, không có status `ALREADY_RELEASED`: release lại reservation đã giải phóng vẫn trả `200 RELEASED`, giữ nguyên `releasedAt` lần đầu và không tăng tồn kho lần nữa.
 
 | Thuộc tính | Đặc tả |
 |---|---|
@@ -381,7 +381,7 @@ Các API này là internal API. Payment Service sở hữu trạng thái capture
 
 ### 6.1. Capture Payment
 
-**Schema request:** `commandId`, `orderId`, `correlationId`, `amount`, `currency` đều bắt buộc, không được null; áp dụng kiểu và validation tại mục 3.1.1 (`orderId` là Identifier).
+**Schema request:** `commandId`, `correlationId` là string UUID/tracing ID ≤128 ký tự bắt buộc/non-null; `orderId: Identifier` bắt buộc/non-null; `amount: decimal string` bắt buộc/non-null, >0, tối đa 2 chữ số thập phân và không vượt giới hạn 12 chữ số nguyên; `currency: string` bắt buộc/non-null, ISO 4217 uppercase, phiên bản này chỉ nhận `VND`. Header `Idempotency-Key` bắt buộc đúng `payment:capture:{orderId}:v1`. Không nhận JSON number/float cho amount.
 
 **Schema response Capture (POST và GET):**
 
@@ -455,6 +455,8 @@ Quy tắc:
 
 ### 6.2. Tra cứu Payment
 
+**Schema request:** Không có body. `paymentId` trên path là Identifier bắt buộc; với endpoint by-idempotency-key, `{key}` bắt buộc, percent-decode rồi validate 1–512 ASCII ký tự printable, không whitespace/control. Không gửi Idempotency-Key header cho GET.
+
 **Schema response:** Dùng schema Capture tại mục 6.1; mọi trường bắt buộc có mặt, chỉ `capturedAt` được null. Không có bản ghi thì trả `404 PAYMENT_NOT_FOUND` theo error response mục 3.3.
 
 | Thuộc tính | Đặc tả |
@@ -489,7 +491,7 @@ Khi không tìm thấy bản ghi, cả tra cứu theo `paymentId` và theo key �
 
 ### 6.3. Refund Payment
 
-**Schema request:** `commandId`, `orderId`, `correlationId`, `reason` đều bắt buộc, không được null. Các định danh theo mục 3.1.1; `reason` nhận `ORDER_FAILED/ORDER_EXPIRED/LATE_CAPTURE`. Path `paymentId` là Identifier.
+**Schema request:** Path `paymentId: Identifier` bắt buộc; header `Idempotency-Key` bắt buộc đúng `payment:refund:{orderId}:{paymentId}:v1`; body `commandId`, `correlationId` là string UUID/tracing ID ≤128 ký tự, `orderId: Identifier`, `reason: enum` (`ORDER_FAILED/ORDER_EXPIRED/LATE_CAPTURE`) đều bắt buộc/non-null. Amount/currency được lấy từ Capture đã xác minh, không nhận từ caller.
 
 **Schema response Refund (POST và GET):**
 
@@ -554,6 +556,8 @@ Quy tắc:
 - Khi đang xử lý, Refund API trả `200 OK` với `status = IN_PROGRESS`; response phải gồm `refundId` đã lưu, `paymentId`, `orderId`, `idempotencyKey`, `amount`, `currency`, `reason`, `createdAt` và `refundedAt = null`.
 
 ### 6.4. Tra cứu Refund
+
+**Schema request:** Không có body. `refundId` trên path là Identifier bắt buộc; với endpoint by-idempotency-key, `{key}` bắt buộc, percent-decode rồi validate 1–512 ASCII ký tự printable, không whitespace/control. Không gửi Idempotency-Key header cho GET.
 
 Refund có vòng đời riêng; không dùng trạng thái capture để suy ra trạng thái refund.
 
