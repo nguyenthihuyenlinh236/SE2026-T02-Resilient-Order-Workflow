@@ -1059,6 +1059,62 @@ class InventoryLifecycleIntegrationTests {
         assertThat(count("inventory_operations")).isEqualTo(3);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"123", "true", "1.5"})
+    void reserveRejectsScalarCoercionInStringFieldsBeforeWriting(String scalar) throws Exception {
+        for (String field : List.of("orderId", "reservationId", "storeId", "sku")) {
+            var request = reserveRequest();
+            var json = mapper.valueToTree(request);
+            var target = field.equals("sku") ? json.get("items").get(0) : json;
+            ((com.fasterxml.jackson.databind.node.ObjectNode) target).set(field, mapper.readTree(scalar));
+            String key = field.equals("orderId") ? "reserve:" + scalar + ":v1" : reserveKey(request);
+            var response = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                    entity(json.toString(), key), ContractErrorResponse.class);
+            assertThat(response.getStatusCode()).as("field %s with %s", field, scalar).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(response.getBody().error().code()).isEqualTo("VALIDATION_ERROR");
+        }
+        assertThat(count("inventory_order_guards")).isZero();
+        assertThat(count("inventory_operations")).isZero();
+        assertStock(0);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"123", "true", "1.5"})
+    void internalReleaseRejectsScalarCoercionInIdentifiersAndTracing(String scalar) throws Exception {
+        var request = reserveRequest();
+        inventory.reserve(request, reserveKey(request));
+        var body = new InternalReleaseRequest("cmd-001", request.orderId(), "corr-001");
+        for (String field : List.of("orderId", "commandId", "correlationId")) {
+            var json = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.valueToTree(body);
+            json.set(field, mapper.readTree(scalar));
+            String key = field.equals("orderId")
+                    ? "inventory:release:" + scalar + ":" + request.reservationId() + ":v1" : releaseKey(request);
+            var response = http.exchange("/internal/v1/reservations/" + request.reservationId() + "/release",
+                    HttpMethod.POST, entity(json.toString(), key), ContractErrorResponse.class);
+            assertThat(response.getStatusCode()).as("field %s with %s", field, scalar).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(response.getBody().error().code()).isEqualTo("VALIDATION_ERROR");
+        }
+        assertThat(inventory.reservation(request.reservationId()).status()).isEqualTo("RESERVED");
+        assertThat(count("inventory_order_guards")).isEqualTo(1);
+        assertThat(count("inventory_operations")).isEqualTo(1);
+        assertStock(2);
+    }
+
+    @Test
+    void numericLookingStringIdentifierRemainsValidAndReplays() {
+        var request = new ReserveRequest("123", "456", "STORE", List.of(new Item("A", 2)));
+        var first = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(first.getBody().get("orderId").isTextual()).isTrue();
+        assertThat(first.getBody().get("orderId").asText()).isEqualTo("123");
+        var replay = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(replay.getBody()).isEqualTo(first.getBody());
+        assertThat(count("inventory_operations")).isEqualTo(1);
+        assertThat(inventory.stock("STORE", "A").reservedQuantity()).isEqualTo(2);
+    }
+
     private static class DefaultTraceHeader implements org.springframework.http.client.ClientHttpRequestInterceptor {
         @Override
         public org.springframework.http.client.ClientHttpResponse intercept(org.springframework.http.HttpRequest request,

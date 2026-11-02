@@ -90,6 +90,11 @@ sku không trắng tối đa 128 ký tự và quantity là JSON integer dương 
 Java Integer. Không nhận chuỗi số, float, boolean hoặc tràn số; SKU trùng vẫn
 được gộp trong schema hiện tại. Không tự chọn kho mặc định hoặc gom tồn nhiều kho.
 
+Trường JSON kiểu string phải được gửi đúng kiểu string: số hoặc boolean không
+được tự đổi thành chuỗi cho ID, tracing, storeId, SKU hoặc reason. Ví dụ
+`"orderId":"123"` hợp lệ về kiểu/định dạng, nhưng `"orderId":123` trả 400.
+Quy tắc này áp dụng cả API cũ và API nội bộ; validation null/rỗng vẫn như trước.
+
 API cũ không bắt buộc tracing header và trả lỗi `{code,message}`. Thiếu tồn trả
 REJECTED/INSUFFICIENT_STOCK, SKU không tồn tại trả REJECTED/PRODUCT_NOT_FOUND.
 GET 404 không phải bằng chứng một Reserve đang bay đã bị hủy.
