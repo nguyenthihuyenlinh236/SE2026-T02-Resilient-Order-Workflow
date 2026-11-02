@@ -176,6 +176,32 @@ class InventoryLifecycleIntegrationTests {
         assertThat(count("inventory_operations")).isEqualTo(1);
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {1, 255, 256, 278, 512})
+    void internalOperationLookupSupportsContractKeyLengths(int length) {
+        UUID order = UUID.randomUUID();
+        String key = "k".repeat(length);
+        jdbc.update("INSERT INTO inventory_order_guards(order_id) VALUES (?)", order);
+        jdbc.update("INSERT INTO inventory_operations(idempotency_key, order_id, operation, payload_hash, response_code, response_payload) "
+                + "VALUES (?, ?, 'RESERVE', ?, 200, '{\"status\":\"REJECTED\"}'::jsonb)", key, order, "a".repeat(64));
+        var response = http.getForEntity("/internal/v1/operations?idempotencyKey=" + key, OperationResult.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody().idempotencyKey()).isEqualTo(key);
+        assertThat(response.getBody().responsePayload().get("status").asText()).isEqualTo("REJECTED");
+        assertStock(0);
+    }
+
+    @Test
+    void internalOperationLookupRejectsOversizedKeyAndDistinguishesMissingOperation() {
+        var invalid = http.getForEntity("/internal/v1/operations?idempotencyKey=" + "k".repeat(513), ContractErrorResponse.class);
+        assertThat(invalid.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(invalid.getBody().error().code()).isEqualTo("VALIDATION_ERROR");
+        var missing = http.getForEntity("/internal/v1/operations?idempotencyKey=" + "k".repeat(512), ContractErrorResponse.class);
+        assertThat(missing.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(missing.getBody().error().code()).isEqualTo("OPERATION_NOT_FOUND");
+        assertThat(count("inventory_operations")).isZero();
+    }
+
     @Test
     void changedReleaseReasonIsConflictWithoutSecondStockReturn() {
         var request = reserveRequest();

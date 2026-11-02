@@ -2,6 +2,9 @@ package com.example.orderworkflow.inventory.service;
 
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 import com.example.orderworkflow.inventory.api.InventoryDtos.*;
 import com.example.orderworkflow.inventory.repository.InventoryOperations;
 import com.example.orderworkflow.inventory.repository.InventoryRepository;
@@ -9,6 +12,27 @@ import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class InventoryLifecycleServiceTests {
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "key with space", "key\tvalue", "key\nvalue", "key\u007f", "khóa"})
+    void invalidOperationKeysAreRejectedBeforeDatabaseAccess(String key) {
+        var repository = mock(InventoryRepository.class);
+        var operations = mock(InventoryOperations.class);
+        var service = new InventoryLifecycleService(repository, operations);
+        assertThatThrownBy(() -> service.operation(key)).isInstanceOfSatisfying(InventoryException.class,
+                error -> assertThat(error.status()).isEqualTo(400));
+        verifyNoInteractions(repository, operations);
+    }
+
+    @Test
+    void operationKeyLongerThan512IsRejectedBeforeDatabaseAccess() {
+        var repository = mock(InventoryRepository.class);
+        var operations = mock(InventoryOperations.class);
+        var service = new InventoryLifecycleService(repository, operations);
+        assertThatThrownBy(() -> service.operation("k".repeat(513))).isInstanceOf(InventoryException.class);
+        verifyNoInteractions(repository, operations);
+    }
+
     @Test
     void invalidReleaseIsRejectedBeforeDatabaseAccess() {
         var repository = mock(InventoryRepository.class);

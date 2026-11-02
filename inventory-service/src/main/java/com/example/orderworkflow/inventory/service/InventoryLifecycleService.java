@@ -89,7 +89,9 @@ public class InventoryLifecycleService {
 
     @Transactional(readOnly = true)
     public OperationResult operation(String key) {
-        if (key == null || key.isBlank() || key.length() > 255) { throw invalid("A valid idempotencyKey is required"); }
+        if (key == null || !key.matches("[!-~]{1,512}")) {
+            throw invalid("idempotencyKey must contain 1 to 512 printable ASCII characters without whitespace");
+        }
         return operations.find(key).orElseThrow(() -> new InventoryException(404, "OPERATION_NOT_FOUND",
                 "No completed command found; an in-flight command may still complete"));
     }
