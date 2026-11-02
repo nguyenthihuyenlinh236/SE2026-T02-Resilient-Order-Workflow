@@ -123,7 +123,7 @@ class InventoryLifecycleIntegrationTests {
 
     @Test
     void internalLookupReturns404ForUnknownOrder() {
-        var response = http.getForEntity("/internal/v1/reservations/by-order/" + UUID.randomUUID(), ContractErrorResponse.class);
+        var response = http.getForEntity("/internal/v1/reservations/by-order/" + UUID.randomUUID().toString(), ContractErrorResponse.class);
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         assertThat(response.getBody().error().code()).isEqualTo("RESERVATION_NOT_FOUND");
         assertThat(response.getBody().error().retryable()).isFalse();
@@ -154,7 +154,7 @@ class InventoryLifecycleIntegrationTests {
 
     @Test
     void internalInvalidIdentifierAndMissingHeaderUseContractErrors() {
-        var malformed = http.getForEntity("/internal/v1/reservations/by-order/not-a-uuid", ContractErrorResponse.class);
+        var malformed = http.getForEntity("/internal/v1/reservations/by-order/invalid!id", ContractErrorResponse.class);
         assertThat(malformed.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(malformed.getBody().error().code()).isEqualTo("INVALID_IDENTIFIER");
         var missingHeader = http.postForEntity("/internal/v1/reservations", reserveRequest(), ContractErrorResponse.class);
@@ -179,7 +179,7 @@ class InventoryLifecycleIntegrationTests {
     @ParameterizedTest
     @ValueSource(ints = {1, 255, 256, 278, 512})
     void internalOperationLookupSupportsContractKeyLengths(int length) {
-        UUID order = UUID.randomUUID();
+        String order = UUID.randomUUID().toString();
         String key = "k".repeat(length);
         jdbc.update("INSERT INTO inventory_order_guards(order_id) VALUES (?)", order);
         jdbc.update("INSERT INTO inventory_operations(idempotency_key, order_id, operation, payload_hash, response_code, response_payload) "
@@ -217,7 +217,7 @@ class InventoryLifecycleIntegrationTests {
     void wrongOrderCannotReleaseOrCreateCancellationGuard() {
         var request = reserveRequest();
         inventory.reserve(request, reserveKey(request));
-        UUID wrongOrder = UUID.randomUUID();
+        String wrongOrder = UUID.randomUUID().toString();
         assertError(() -> lifecycle.release(request.reservationId(),
                 new ReleaseRequest(wrongOrder, request.reservationId(), "FAILED"),
                 "inventory:release:" + wrongOrder + ":" + request.reservationId() + ":v1"),
@@ -267,7 +267,7 @@ class InventoryLifecycleIntegrationTests {
 
     @Test
     void cancelHttpEndpointValidatesPathAndPersistsOperation() {
-        UUID order = UUID.randomUUID();
+        String order = UUID.randomUUID().toString();
         var body = new CancelRequest(order, "EXPIRED");
         String path = "/api/v1/inventory/orders/" + order + "/cancel";
         var response = http.exchange(path, HttpMethod.POST, entity(body, cancelKey(order)), CancelResult.class);
@@ -275,7 +275,7 @@ class InventoryLifecycleIntegrationTests {
         assertThat(response.getBody().reservationStatus()).isEqualTo("NOT_CREATED");
         assertThat(response.getBody()).isEqualTo(cancel(order));
         assertThat(lifecycle.operation(cancelKey(order)).operation()).isEqualTo("CANCEL");
-        assertThat(http.exchange("/api/v1/inventory/orders/" + UUID.randomUUID() + "/cancel", HttpMethod.POST,
+        assertThat(http.exchange("/api/v1/inventory/orders/" + UUID.randomUUID().toString() + "/cancel", HttpMethod.POST,
                 entity(body, cancelKey(order)), ApiError.class).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(count("inventory_order_guards")).isEqualTo(1);
     }
@@ -335,7 +335,7 @@ class InventoryLifecycleIntegrationTests {
             assertThat(http.exchange(releasePath(request.reservationId()), HttpMethod.POST, entity(body, key), ApiError.class)
                     .getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         }
-        assertThat(http.exchange(releasePath(UUID.randomUUID()), HttpMethod.POST, entity(body, releaseKey(request)), ApiError.class)
+        assertThat(http.exchange(releasePath(UUID.randomUUID().toString()), HttpMethod.POST, entity(body, releaseKey(request)), ApiError.class)
                 .getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(http.getForEntity("/api/v1/inventory/operations?idempotencyKey=missing", ApiError.class)
                 .getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
@@ -449,16 +449,16 @@ class InventoryLifecycleIntegrationTests {
         var request = reserveRequest();
         var original = inventory.reserve(request, reserveKey(request));
         String hash = jdbc.queryForObject("SELECT payload_hash FROM reservations WHERE order_id = ?", String.class, request.orderId());
-        legacy.update("INSERT INTO inventory_order_guards(order_id) VALUES (?)", request.orderId());
+        legacy.update("INSERT INTO inventory_order_guards(order_id) VALUES (?)", UUID.fromString(request.orderId()));
         legacy.update("INSERT INTO reservations(reservation_id, order_id, reserve_key, payload_hash, status, store_id, created_at) "
-                        + "VALUES (?, ?, ?, ?, 'RESERVED', 'STORE', ?)", request.reservationId(), request.orderId(),
+                        + "VALUES (?, ?, ?, ?, 'RESERVED', 'STORE', ?)", UUID.fromString(request.reservationId()), UUID.fromString(request.orderId()),
                 reserveKey(request), hash, java.sql.Timestamp.from(original.createdAt()));
         for (Item item : request.items()) {
             UUID product = UUID.randomUUID();
             legacy.update("INSERT INTO inventory(product_id, sku, store_id, product_name, on_hand_quantity, reserved_quantity) "
                     + "VALUES (?, ?, 'STORE', ?, 10, ?)", product, item.sku(), item.sku(), item.quantity());
             legacy.update("INSERT INTO reservation_items(reservation_id, sku, product_id, quantity) VALUES (?, ?, ?, ?)",
-                    request.reservationId(), item.sku(), product, item.quantity());
+                    UUID.fromString(request.reservationId()), item.sku(), product, item.quantity());
         }
         org.flywaydb.core.Flyway.configure()
                 .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
@@ -505,17 +505,130 @@ class InventoryLifecycleIntegrationTests {
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {7, 128})
+    void stringIdentifiersSupportReserveReleaseCancelAndReplay(int length) {
+        String order = "ORD-001" + "x".repeat(length - 7);
+        String reservation = "RES-001" + "x".repeat(length - 7);
+        var request = new ReserveRequest(order, reservation, "STORE", List.of(new Item("A", 2), new Item("B", 3)));
+        var reserved = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), Reservation.class);
+        assertThat(reserved.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(reserved.getBody().orderId()).isEqualTo(order);
+        assertThat(reserved.getBody().reservationId()).isEqualTo(reservation);
+        var found = http.getForEntity("/internal/v1/reservations/by-order/" + order, Reservation.class);
+        assertThat(found.getBody()).isEqualTo(reserved.getBody());
+        var released = http.exchange("/internal/v1/reservations/" + reservation + "/release", HttpMethod.POST,
+                entity(new ReleaseRequest(order, reservation, "FAILED"), releaseKey(request)), ReleaseResult.class);
+        assertThat(released.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(released.getBody().reservationId()).isEqualTo(reservation);
+        assertThat(inventory.reserve(request, reserveKey(request))).isEqualTo(reserved.getBody());
+        assertThat(release(request)).isEqualTo(released.getBody());
+        assertThat(cancel(order).reservationId()).isEqualTo(reservation);
+        assertStock(0);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bad!id", "_leading", "-leading", "has space", "khóa"})
+    void invalidStringIdentifiersReturn400WithoutWrites(String id) {
+        var request = new ReserveRequest(id, "RES-001", "STORE", List.of(new Item("A", 2)));
+        var response = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, "reserve:" + id + ":v1"), ContractErrorResponse.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        var invalidReservation = new ReserveRequest("ORD-001", id, "STORE", request.items());
+        assertThat(http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(invalidReservation, "reserve:ORD-001:v1"), ContractErrorResponse.class).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(count("inventory_order_guards")).isZero();
+        assertStock(0);
+    }
+
+    @Test
+    void identifiersLongerThan128AreRejectedInBodyAndPath() {
+        String tooLong = "x".repeat(129);
+        var request = new ReserveRequest(tooLong, "RES-001", "STORE", List.of(new Item("A", 2)));
+        assertThat(http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, "reserve:" + tooLong + ":v1"), ContractErrorResponse.class).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+        var path = http.getForEntity("/internal/v1/reservations/by-order/" + tooLong, ContractErrorResponse.class);
+        assertThat(path.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(path.getBody().error().code()).isEqualTo("INVALID_IDENTIFIER");
+        assertThat(count("inventory_order_guards")).isZero();
+    }
+
+    @Test
+    void v005PreservesUuidDataSnapshotsAndForeignKeys() throws Exception {
+        String schema = "upgrade_v4_identifiers";
+        var config = org.flywaydb.core.Flyway.configure()
+                .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+                .schemas(schema).defaultSchema(schema);
+        config.target("4").load().migrate();
+        var source = new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                POSTGRES.getJdbcUrl() + (POSTGRES.getJdbcUrl().contains("?") ? "&" : "?") + "currentSchema=" + schema,
+                POSTGRES.getUsername(), POSTGRES.getPassword());
+        var legacy = new JdbcTemplate(source);
+        UUID order = UUID.randomUUID();
+        UUID reservation = UUID.randomUUID();
+        UUID product = UUID.randomUUID();
+        var request = new ReserveRequest(order.toString(), reservation.toString(), "STORE", List.of(new Item("A", 2)));
+        String key = reserveKey(request);
+        // Reproduce #28's UUID-based JSON hash, not a hash generated by the new code.
+        String hash = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(mapper.writeValueAsBytes(List.of("RESERVE", order.toString(), reservation.toString(), "STORE", request.items()))));
+        legacy.update("INSERT INTO inventory_order_guards(order_id) VALUES (?)", order);
+        legacy.update("INSERT INTO inventory(product_id, sku, store_id, product_name, on_hand_quantity, reserved_quantity) "
+                + "VALUES (?, 'A', 'STORE', 'Legacy', 10, 2)", product);
+        legacy.update("INSERT INTO reservations(reservation_id, order_id, reserve_key, payload_hash, status, store_id) "
+                + "VALUES (?, ?, ?, ?, 'RESERVED', 'STORE')", reservation, order, key, hash);
+        legacy.update("INSERT INTO reservation_items(reservation_id, sku, product_id, quantity) VALUES (?, 'A', ?, 2)", reservation, product);
+        var original = new Reservation(reservation.toString(), order.toString(), "STORE", key, "RESERVED", null,
+                request.items(), legacy.queryForObject("SELECT created_at FROM reservations", java.sql.Timestamp.class).toInstant());
+        String snapshot = mapper.writeValueAsString(original);
+        legacy.update("INSERT INTO inventory_operations(idempotency_key, order_id, operation, payload_hash, response_code, response_payload) "
+                + "VALUES (?, ?, 'RESERVE', ?, 200, ?::jsonb)", key, order, hash, snapshot);
+        String storedSnapshot = legacy.queryForObject("SELECT response_payload::text FROM inventory_operations", String.class);
+
+        config.target("5").load().migrate();
+
+        var repository = new com.example.orderworkflow.inventory.repository.InventoryRepository(legacy);
+        var operations = new com.example.orderworkflow.inventory.repository.InventoryOperations(legacy, mapper);
+        var service = new InventoryService(repository, operations);
+        var lifecycleService = new InventoryLifecycleService(repository, operations);
+        var transaction = new org.springframework.transaction.support.TransactionTemplate(
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
+        assertThat(repository.byId(reservation.toString())).contains(original);
+        var replayBeforeRelease = transaction.execute(status -> service.reserve(request, key));
+        assertThat(replayBeforeRelease).isEqualTo(original);
+        assertThat(legacy.queryForObject("SELECT response_payload::text FROM inventory_operations", String.class)).isEqualTo(storedSnapshot);
+        assertThat(legacy.queryForObject("SELECT payload_hash FROM reservations", String.class)).isEqualTo(hash);
+        var result = transaction.execute(status -> lifecycleService.release(reservation.toString(),
+                new ReleaseRequest(order.toString(), reservation.toString(), "FAILED"), releaseKey(request)));
+        assertThat(result.status()).isEqualTo("RELEASED");
+        assertThat(legacy.queryForObject("SELECT reserved_quantity FROM inventory", Integer.class)).isZero();
+        var replayAfterRelease = transaction.execute(status -> service.reserve(request, key));
+        assertThat(replayAfterRelease).isEqualTo(original);
+        assertThatThrownBy(() -> legacy.update("DELETE FROM inventory_order_guards WHERE order_id = ?", order.toString()))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> legacy.update("DELETE FROM reservations WHERE reservation_id = ?", reservation.toString()))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> legacy.update("INSERT INTO inventory_operations(idempotency_key, order_id, operation, payload_hash, response_code, response_payload) "
+                + "VALUES ('orphan', 'MISSING', 'RESERVE', ?, 200, '{}'::jsonb)", hash))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> legacy.update("INSERT INTO inventory_order_guards(order_id) VALUES (?)", "x".repeat(129)))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
     private ReserveRequest reserveRequest() {
-        return new ReserveRequest(UUID.randomUUID(), UUID.randomUUID(), "STORE", List.of(new Item("A", 2), new Item("B", 3)));
+        return new ReserveRequest(UUID.randomUUID().toString(), UUID.randomUUID().toString(), "STORE", List.of(new Item("A", 2), new Item("B", 3)));
     }
     private String reserveKey(ReserveRequest r) { return "reserve:" + r.orderId() + ":v1"; }
     private String releaseKey(ReserveRequest r) { return "inventory:release:" + r.orderId() + ":" + r.reservationId() + ":v1"; }
-    private String cancelKey(UUID order) { return "inventory:cancel:" + order + ":v1"; }
-    private String releasePath(UUID reservationId) { return "/api/v1/inventory/reservations/" + reservationId + "/release"; }
+    private String cancelKey(String order) { return "inventory:cancel:" + order + ":v1"; }
+    private String releasePath(String reservationId) { return "/api/v1/inventory/reservations/" + reservationId + "/release"; }
     private ReleaseResult release(ReserveRequest r) {
         return lifecycle.release(r.reservationId(), new ReleaseRequest(r.orderId(), r.reservationId(), "FAILED"), releaseKey(r));
     }
-    private CancelResult cancel(UUID order) {
+    private CancelResult cancel(String order) {
         return lifecycle.cancel(order, new CancelRequest(order, "EXPIRED"), cancelKey(order));
     }
     private void assertStock(int reservedA) {

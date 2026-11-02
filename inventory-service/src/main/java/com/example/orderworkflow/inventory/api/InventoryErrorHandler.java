@@ -37,7 +37,7 @@ public class InventoryErrorHandler {
                     .map(field -> new ErrorDetail(field.getField(), field.getDefaultMessage())).toList()
                 : List.of();
         String code = e instanceof MethodArgumentTypeMismatchException ? "INVALID_IDENTIFIER" : "INVALID_REQUEST";
-        return error(request, 400, code, "Check required fields, UUIDs and positive integer quantities", details);
+        return error(request, 400, code, "Check required fields, identifiers and positive integer quantities", details);
     }
 
     private ResponseEntity<?> error(HttpServletRequest request, int status, String code,

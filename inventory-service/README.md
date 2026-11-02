@@ -30,6 +30,12 @@ Flyway tự chạy migration khi khởi động. Profile `demo` nạp hai sản 
 
 ## 2. API
 
+Order ID và Reservation ID hiện dùng Identifier dạng chuỗi 1–128 ký tự theo
+PR #39: chữ cái/số ASCII ở đầu, các ký tự tiếp theo là chữ cái/số, `_` hoặc `-`.
+Ví dụ `ORD-001`, `RES-001`; UUID dạng chuỗi vẫn hợp lệ. V005 chuyển toàn bộ cột
+Order/Reservation và khôi phục các FK, giữ nguyên key, hash và snapshot kết quả
+cũ để replay. Bước này chưa thay đổi `productId` hay bên sinh Reservation ID.
+
 Đồng bộ từng bước với PR #39: các endpoint bên dưới hiện cũng nhận prefix
 `/internal/v1` thay cho `/api/v1/inventory`. Bổ sung tra cứu
 `GET /internal/v1/reservations/by-order/{orderId}` (không có bản ghi trả 404).

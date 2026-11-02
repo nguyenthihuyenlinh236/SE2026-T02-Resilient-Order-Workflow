@@ -54,9 +54,9 @@ class InventoryRollbackTests {
     void itemInsertFailureRollsBackAllStockAndReservationWritesThenAllowsRetry() {
         UUID firstProduct = UUID.fromString("00000000-0000-4000-8000-000000000001");
         UUID secondProduct = UUID.fromString("00000000-0000-4000-8000-000000000002");
-        UUID orderId = UUID.randomUUID();
+        String orderId = UUID.randomUUID().toString();
         String key = "reserve:" + orderId + ":v1";
-        var request = new ReserveRequest(orderId, UUID.randomUUID(), "TEST-STORE",
+        var request = new ReserveRequest(orderId, UUID.randomUUID().toString(), "TEST-STORE",
                 List.of(new Item("A", 2), new Item("B", 3)));
 
         for (UUID product : List.of(firstProduct, secondProduct)) {

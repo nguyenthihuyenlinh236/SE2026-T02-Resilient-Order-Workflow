@@ -22,13 +22,13 @@ public class InventoryController {
     }
 
     @PostMapping("/reservations/{reservationId}/release")
-    public ReleaseResult release(@PathVariable UUID reservationId, @Valid @RequestBody ReleaseRequest request,
+    public ReleaseResult release(@PathVariable String reservationId, @Valid @RequestBody ReleaseRequest request,
             @RequestHeader("Idempotency-Key") String key) {
         return lifecycle.release(reservationId, request, key);
     }
 
     @PostMapping("/orders/{orderId}/cancel")
-    public CancelResult cancel(@PathVariable UUID orderId, @Valid @RequestBody CancelRequest request,
+    public CancelResult cancel(@PathVariable String orderId, @Valid @RequestBody CancelRequest request,
             @RequestHeader("Idempotency-Key") String key) {
         return lifecycle.cancel(orderId, request, key);
     }
@@ -51,13 +51,13 @@ public class InventoryController {
     }
 
     @GetMapping("/reservations/{reservationId}")
-    public Reservation reservation(@PathVariable UUID reservationId) { return service.reservation(reservationId); }
+    public Reservation reservation(@PathVariable String reservationId) { return service.reservation(reservationId); }
 
     @GetMapping("/reservations/by-order/{orderId}")
-    public Reservation reservationByOrder(@PathVariable UUID orderId) { return service.lookup(orderId, null); }
+    public Reservation reservationByOrder(@PathVariable String orderId) { return service.lookup(orderId, null); }
 
     @GetMapping("/reservations")
-    public Reservation lookup(@RequestParam(required = false) UUID orderId,
+    public Reservation lookup(@RequestParam(required = false) String orderId,
             @RequestParam(required = false) String reserveKey,
             @RequestParam(required = false) String idempotencyKey) {
         if (reserveKey != null && idempotencyKey != null) {

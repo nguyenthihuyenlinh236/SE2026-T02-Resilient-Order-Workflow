@@ -1,7 +1,6 @@
 package com.example.orderworkflow.inventory.repository;
 
 import java.util.Optional;
-import java.util.UUID;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -32,7 +31,7 @@ public class InventoryOperations {
         catch (JsonProcessingException e) { throw new IllegalStateException("Invalid persisted command response", e); }
     }
 
-    public void save(UUID orderId, String key, String operation, String hash, Object response) {
+    public void save(String orderId, String key, String operation, String hash, Object response) {
         try {
             jdbc.update("INSERT INTO inventory_operations(idempotency_key, order_id, operation, payload_hash, response_code, response_payload) "
                             + "VALUES (?, ?, ?, ?, 200, CAST(? AS jsonb))",

@@ -32,6 +32,8 @@ public class InventoryService {
     @Transactional
     public Reservation reserve(ReserveRequest request, String key) {
         if (request == null || request.orderId() == null) { throw invalid("orderId is required"); }
+        Identifiers.require(request.orderId(), "orderId");
+        Identifiers.require(request.reservationId(), "reservationId");
         if (request.reservationId() == null || request.storeId() == null || request.storeId().isBlank()
                 || request.storeId().length() > 100) { throw invalid("reservationId and storeId are required"); }
         if (!("reserve:" + request.orderId() + ":v1").equals(key)) {
@@ -82,11 +84,15 @@ public class InventoryService {
     }
 
     @Transactional(readOnly = true)
-    public Reservation reservation(UUID id) { return repository.byId(id).orElseThrow(InventoryService::notFound); }
+    public Reservation reservation(String id) {
+        Identifiers.require(id, "reservationId");
+        return repository.byId(id).orElseThrow(InventoryService::notFound);
+    }
 
     @Transactional(readOnly = true)
-    public Reservation lookup(UUID orderId, String key) {
+    public Reservation lookup(String orderId, String key) {
         if ((orderId == null) == (key == null)) { throw invalid("Provide exactly one of orderId or reserveKey"); }
+        if (orderId != null) { Identifiers.require(orderId, "orderId"); }
         return (orderId != null ? repository.byOrder(orderId) : repository.byKey(key))
                 .orElseThrow(InventoryService::notFound);
     }

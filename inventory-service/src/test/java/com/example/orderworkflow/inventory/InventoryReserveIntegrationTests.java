@@ -95,7 +95,7 @@ class InventoryReserveIntegrationTests {
 
     @Test
     void multiItemRejectionDoesNotAllocatePartialStock() {
-        var request = new ReserveRequest(UUID.randomUUID(), UUID.randomUUID(), "STORE-A",
+        var request = new ReserveRequest(UUID.randomUUID().toString(), UUID.randomUUID().toString(), "STORE-A",
                 List.of(new Item("ITEM", 2), new Item("EMPTY", 1)));
         assertThat(post(request).getBody().status()).isEqualTo("REJECTED");
         assertThat(service.stock("STORE-A", "ITEM").reservedQuantity()).isZero();
@@ -103,7 +103,7 @@ class InventoryReserveIntegrationTests {
 
     @Test
     void duplicateItemsAreCombinedAndEquivalentReorderedPayloadReplays() {
-        var request = new ReserveRequest(UUID.randomUUID(), UUID.randomUUID(), "STORE-A",
+        var request = new ReserveRequest(UUID.randomUUID().toString(), UUID.randomUUID().toString(), "STORE-A",
                 List.of(new Item("ITEM", 1), new Item("ITEM", 2)));
         var first = post(request).getBody();
         var combined = new ReserveRequest(request.orderId(), request.reservationId(), request.storeId(),
@@ -119,7 +119,7 @@ class InventoryReserveIntegrationTests {
         for (int i = 0; i < 10; i++) { assertThat(post(request).getBody()).isEqualTo(first); }
         for (var changed : List.of(
                 new ReserveRequest(request.orderId(), request.reservationId(), "STORE-A", List.of(new Item("ITEM", 3))),
-                new ReserveRequest(request.orderId(), UUID.randomUUID(), "STORE-A", request.items()),
+                new ReserveRequest(request.orderId(), UUID.randomUUID().toString(), "STORE-A", request.items()),
                 new ReserveRequest(request.orderId(), request.reservationId(), "STORE-B", request.items()))) {
             var response = http.exchange("/api/v1/inventory/reservations", HttpMethod.POST,
                     entity(changed, key(request)), ApiError.class);
@@ -134,7 +134,7 @@ class InventoryReserveIntegrationTests {
     void reservationIdCannotBeReusedForAnotherOrderAndStockRollsBack() {
         var first = request("STORE-A", "ITEM", 2);
         post(first);
-        var second = new ReserveRequest(UUID.randomUUID(), first.reservationId(), "STORE-A", first.items());
+        var second = new ReserveRequest(UUID.randomUUID().toString(), first.reservationId(), "STORE-A", first.items());
         var response = http.exchange("/api/v1/inventory/reservations", HttpMethod.POST,
                 entity(second, key(second)), ApiError.class);
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
@@ -158,7 +158,7 @@ class InventoryReserveIntegrationTests {
 
     @Test
     void missingCommandFieldsHeaderAndWrongKeyAre400() {
-        UUID id = UUID.randomUUID();
+        String id = UUID.randomUUID().toString();
         for (String json : List.of("{}",
                 "{\"orderId\":\"bad-uuid\",\"items\":[]}",
                 "{\"orderId\":\"" + id + "\",\"storeId\":\"STORE-A\",\"items\":[{\"sku\":\"ITEM\",\"quantity\":1}]}")) {
@@ -172,11 +172,11 @@ class InventoryReserveIntegrationTests {
 
     @Test
     void lookupNotFoundAndInvalidSelectorsHaveCorrectStatus() {
-        assertThat(http.getForEntity("/api/v1/inventory/reservations/" + UUID.randomUUID(), ApiError.class)
+        assertThat(http.getForEntity("/api/v1/inventory/reservations/" + UUID.randomUUID().toString(), ApiError.class)
                 .getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         assertThat(http.getForEntity("/api/v1/inventory/reservations", ApiError.class)
                 .getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(http.getForEntity("/api/v1/inventory/reservations?orderId=" + UUID.randomUUID()
+        assertThat(http.getForEntity("/api/v1/inventory/reservations?orderId=" + UUID.randomUUID().toString()
                         + "&reserveKey=key", ApiError.class).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(http.getForEntity("/api/v1/inventory/stock?storeId=STORE-A&sku=ITEM", Stock.class)
                 .getBody().availableQuantity()).isEqualTo(8);
@@ -207,7 +207,7 @@ class InventoryReserveIntegrationTests {
         assertThat(legacy.queryForObject("SELECT reserved_quantity FROM inventory", Integer.class)).isEqualTo(2);
         assertThat(legacy.queryForObject("SELECT store_id FROM reservations", String.class)).isEqualTo("DEMO-STORE");
         assertThat(legacy.queryForObject("SELECT sku FROM reservation_items", String.class)).isEqualTo("DEMO-ITEM");
-        assertThat(legacy.queryForObject("SELECT reservation_id FROM reservations", UUID.class)).isEqualTo(reservationId);
+        assertThat(legacy.queryForObject("SELECT reservation_id FROM reservations", String.class)).isEqualTo(reservationId.toString());
     }
 
     @Test
@@ -280,7 +280,7 @@ class InventoryReserveIntegrationTests {
     }
 
     private ReserveRequest request(String store, String sku, int quantity) {
-        return new ReserveRequest(UUID.randomUUID(), UUID.randomUUID(), store, List.of(new Item(sku, quantity)));
+        return new ReserveRequest(UUID.randomUUID().toString(), UUID.randomUUID().toString(), store, List.of(new Item(sku, quantity)));
     }
 
     private String key(ReserveRequest request) { return "reserve:" + request.orderId() + ":v1"; }

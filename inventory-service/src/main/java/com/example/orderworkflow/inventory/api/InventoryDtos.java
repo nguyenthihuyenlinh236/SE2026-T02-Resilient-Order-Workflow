@@ -17,11 +17,11 @@ public final class InventoryDtos {
 
     public record Item(@NotBlank @Size(max = 128) String sku, @NotNull @Positive Integer quantity) { }
 
-    public record ReserveRequest(@NotNull UUID orderId, @NotNull UUID reservationId,
+    public record ReserveRequest(@Identifier String orderId, @Identifier String reservationId,
             @NotBlank @Size(max = 100) String storeId,
             @NotEmpty @Size(max = 20) List<@NotNull @Valid Item> items) { }
 
-    public record Reservation(UUID reservationId, UUID orderId, String storeId, String reserveKey,
+    public record Reservation(String reservationId, String orderId, String storeId, String reserveKey,
             String status, String rejectionReason, List<Item> items, Instant createdAt) { }
 
     public record Stock(UUID productId, String sku, String storeId, String productName, int onHandQuantity,
@@ -34,16 +34,16 @@ public final class InventoryDtos {
             String correlationId, boolean retryable) { }
     public record ErrorDetail(String field, String reason) { }
 
-    public record ReleaseRequest(@NotNull UUID orderId, @NotNull UUID reservationId,
+    public record ReleaseRequest(@Identifier String orderId, @Identifier String reservationId,
             @NotBlank @Size(max = 255) String reason) { }
 
-    public record CancelRequest(@NotNull UUID orderId, @NotBlank @Size(max = 255) String reason) { }
+    public record CancelRequest(@Identifier String orderId, @NotBlank @Size(max = 255) String reason) { }
 
-    public record ReleaseResult(UUID orderId, UUID reservationId, String idempotencyKey,
+    public record ReleaseResult(String orderId, String reservationId, String idempotencyKey,
             String status, Instant releasedAt) { }
 
-    public record CancelResult(UUID orderId, String idempotencyKey, String status,
-            UUID reservationId, String reservationStatus, Instant cancelledAt) { }
+    public record CancelResult(String orderId, String idempotencyKey, String status,
+            String reservationId, String reservationStatus, Instant cancelledAt) { }
 
     public record OperationResult(String operation, String idempotencyKey, int responseCode,
             JsonNode responsePayload, Instant completedAt) { }

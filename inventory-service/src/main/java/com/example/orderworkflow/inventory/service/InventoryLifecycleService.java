@@ -5,7 +5,6 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.UUID;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -26,9 +25,12 @@ public class InventoryLifecycleService {
     }
 
     @Transactional
-    public ReleaseResult release(UUID pathId, ReleaseRequest request, String key) {
+    public ReleaseResult release(String pathId, ReleaseRequest request, String key) {
+        Identifiers.require(pathId, "reservationId");
         if (request == null || request.orderId() == null || request.reservationId() == null
                 || !request.reservationId().equals(pathId)) { throw invalid("Order and matching Reservation IDs are required"); }
+        Identifiers.require(request.orderId(), "orderId");
+        Identifiers.require(request.reservationId(), "reservationId");
         validateReason(request.reason());
         if (!("inventory:release:" + request.orderId() + ":" + request.reservationId() + ":v1").equals(key)) {
             throw invalid("Invalid Release idempotency key");
@@ -57,7 +59,8 @@ public class InventoryLifecycleService {
     }
 
     @Transactional
-    public CancelResult cancel(UUID pathId, CancelRequest request, String key) {
+    public CancelResult cancel(String pathId, CancelRequest request, String key) {
+        Identifiers.require(pathId, "orderId");
         if (request == null || request.orderId() == null || !request.orderId().equals(pathId)) {
             throw invalid("Matching Order ID is required");
         }
@@ -71,7 +74,7 @@ public class InventoryLifecycleService {
         if (saved.isPresent()) { return saved.get(); }
         var reservation = repository.byOrder(request.orderId());
         String status = "NOT_CREATED";
-        UUID reservationId = null;
+        String reservationId = null;
         if (reservation.isPresent()) {
             var found = reservation.get();
             reservationId = found.reservationId();

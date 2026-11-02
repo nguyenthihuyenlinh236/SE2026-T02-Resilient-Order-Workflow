@@ -38,11 +38,11 @@ class InventoryLifecycleServiceTests {
         var repository = mock(InventoryRepository.class);
         var operations = mock(InventoryOperations.class);
         var service = new InventoryLifecycleService(repository, operations);
-        UUID order = UUID.randomUUID();
-        UUID reservation = UUID.randomUUID();
+        String order = UUID.randomUUID().toString();
+        String reservation = UUID.randomUUID().toString();
         String key = "inventory:release:" + order + ":" + reservation + ":v1";
         assertThatThrownBy(() -> service.release(reservation, null, key)).isInstanceOf(InventoryException.class);
-        assertThatThrownBy(() -> service.release(UUID.randomUUID(), new ReleaseRequest(order, reservation, "FAILED"), key))
+        assertThatThrownBy(() -> service.release(UUID.randomUUID().toString(), new ReleaseRequest(order, reservation, "FAILED"), key))
                 .isInstanceOf(InventoryException.class);
         assertThatThrownBy(() -> service.release(reservation, new ReleaseRequest(order, reservation, " "), key))
                 .isInstanceOf(InventoryException.class);
@@ -56,10 +56,10 @@ class InventoryLifecycleServiceTests {
         var repository = mock(InventoryRepository.class);
         var operations = mock(InventoryOperations.class);
         var service = new InventoryLifecycleService(repository, operations);
-        UUID order = UUID.randomUUID();
+        String order = UUID.randomUUID().toString();
         String key = "inventory:cancel:" + order + ":v1";
         assertThatThrownBy(() -> service.cancel(order, null, key)).isInstanceOf(InventoryException.class);
-        assertThatThrownBy(() -> service.cancel(UUID.randomUUID(), new CancelRequest(order, "EXPIRED"), key))
+        assertThatThrownBy(() -> service.cancel(UUID.randomUUID().toString(), new CancelRequest(order, "EXPIRED"), key))
                 .isInstanceOf(InventoryException.class);
         assertThatThrownBy(() -> service.cancel(order, new CancelRequest(order, "x".repeat(256)), key))
                 .isInstanceOf(InventoryException.class);
