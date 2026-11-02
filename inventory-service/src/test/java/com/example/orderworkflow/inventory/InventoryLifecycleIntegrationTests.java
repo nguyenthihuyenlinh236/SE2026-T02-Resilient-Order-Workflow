@@ -1115,6 +1115,56 @@ class InventoryLifecycleIntegrationTests {
         assertThat(inventory.stock("STORE", "A").reservedQuantity()).isEqualTo(2);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"RESERVE:40001", "RELEASE:40001", "RESERVE:23514", "RELEASE:23514"})
+    void httpPersistenceFailureReturnsSafeEnvelopeRollsBackAndAllowsSameKeyRetry(String scenario) {
+        String operation = scenario.split(":")[0];
+        String sqlState = scenario.split(":")[1];
+        boolean temporary = sqlState.equals("40001");
+        var request = reserveRequest();
+        if (operation.equals("RELEASE")) { inventory.reserve(request, reserveKey(request)); }
+        Object body = operation.equals("RELEASE")
+                ? new InternalReleaseRequest("cmd-db-failure", request.orderId(), "corr-001") : request;
+        String path = operation.equals("RELEASE")
+                ? "/internal/v1/reservations/" + request.reservationId() + "/release" : "/internal/v1/reservations";
+        String key = operation.equals("RELEASE") ? releaseKey(request) : reserveKey(request);
+        // Fail after stock/resource changes, at the command snapshot insert.
+        jdbc.execute("CREATE FUNCTION test_http_snapshot_failure() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                + "BEGIN RAISE EXCEPTION 'private-db-detail' USING ERRCODE = '" + sqlState + "'; END $$");
+        jdbc.execute("CREATE TRIGGER test_http_snapshot_failure BEFORE INSERT ON inventory_operations "
+                + "FOR EACH ROW WHEN (NEW.operation = '" + operation + "') EXECUTE FUNCTION test_http_snapshot_failure()");
+        try {
+            var response = http.exchange(path, HttpMethod.POST, entity(body, key), ContractErrorResponse.class);
+            assertThat(response.getStatusCode()).isEqualTo(temporary ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.INTERNAL_SERVER_ERROR);
+            var error = response.getBody().error();
+            assertThat(error.code()).isEqualTo(temporary ? "SERVICE_UNAVAILABLE" : "INTERNAL_SERVER_ERROR");
+            assertThat(error.retryable()).isEqualTo(temporary);
+            assertThat(error.correlationId()).isEqualTo("corr-001");
+            assertThat(response.getHeaders().getFirst("X-Correlation-Id")).isEqualTo(error.correlationId());
+            assertThat(error.details()).isEmpty();
+            assertThat(error.message()).doesNotContain("private-db-detail", "test_http_snapshot_failure", "INSERT", sqlState);
+            assertStock(operation.equals("RELEASE") ? 2 : 0);
+            assertThat(count("inventory_operations")).isEqualTo(operation.equals("RELEASE") ? 1 : 0);
+            if (operation.equals("RELEASE")) {
+                assertThat(inventory.reservation(request.reservationId()).status()).isEqualTo("RESERVED");
+                assertThat(jdbc.queryForObject("SELECT released_at FROM reservations", java.sql.Timestamp.class)).isNull();
+                assertThat(jdbc.queryForObject("SELECT cancellation_recorded FROM inventory_order_guards", Boolean.class)).isFalse();
+            } else {
+                assertThat(count("inventory_order_guards")).isZero();
+                assertThat(count("reservations")).isZero();
+                assertThat(count("reservation_items")).isZero();
+            }
+        } finally {
+            jdbc.execute("DROP TRIGGER test_http_snapshot_failure ON inventory_operations");
+            jdbc.execute("DROP FUNCTION test_http_snapshot_failure()");
+        }
+        var retry = http.exchange(path, HttpMethod.POST, entity(body, key), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(retry.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(retry.getBody().get("status").asText()).isEqualTo(operation.equals("RELEASE") ? "RELEASED" : "RESERVED");
+        assertStock(operation.equals("RELEASE") ? 0 : 2);
+        assertThat(count("inventory_operations")).isEqualTo(operation.equals("RELEASE") ? 2 : 1);
+    }
+
     private static class DefaultTraceHeader implements org.springframework.http.client.ClientHttpRequestInterceptor {
         @Override
         public org.springframework.http.client.ClientHttpResponse intercept(org.springframework.http.HttpRequest request,

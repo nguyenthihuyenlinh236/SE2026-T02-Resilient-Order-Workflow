@@ -163,7 +163,9 @@ Các field response trên luôn có mặt. Reserve REJECTED có reservationId/re
 
 Release nội bộ lấy Reservation ID từ path, không nhận reason hoặc reservationId trong body. commandId/correlationId không trắng, tối đa 128 ký tự. Giữ nguyên key/body khi retry. Hash cấu trúc gồm RELEASE_INTERNAL_V1, orderId, reservationId, commandId, correlationId; đổi tracing trong body cùng key trả 409. Header không tham gia hash. Đổi thứ tự field/whitespace JSON không đổi kết quả. Snapshot reason-based cũ không được diễn giải lại thành body mới: trả conflict, không trả tồn thêm.
 
-Các lỗi validation, không tìm thấy và xung đột do handler Inventory xử lý dùng `{error:{code,message,details,correlationId,retryable}}`. Validation dùng VALIDATION_ERROR; ID sai trên path dùng INVALID_IDENTIFIER; các lỗi 4xx này có retryable=false. Chưa chuẩn hóa mọi lỗi 5xx/routing theo envelope chung, chưa triển khai xác thực/phân quyền nội bộ.
+Các lỗi validation, không tìm thấy và xung đột do handler Inventory xử lý dùng `{error:{code,message,details,correlationId,retryable}}`. Validation dùng VALIDATION_ERROR; ID sai trên path dùng INVALID_IDENTIFIER; các lỗi 4xx này có retryable=false.
+
+DataAccessException, TransactionException và IllegalStateException cũng được ánh xạ an toàn: lỗi DB transient/recoverable, mất kết nối, không tạo được transaction hoặc timeout transaction trả 503 SERVICE_UNAVAILABLE/retryable=true; các lỗi toàn vẹn/trạng thái và transaction còn lại trả 500 INTERNAL_SERVER_ERROR/retryable=false. Không trả message exception, SQL hoặc chi tiết kết nối cho caller. Response giữ correlation header; lỗi phía service không trở thành kết quả REJECTED. Caller vẫn phải query trước khi retry và giữ nguyên key/payload; retryable không xác nhận tác dụng nghiệp vụ đã xảy ra hay chưa. Chưa chuẩn hóa mọi loại exception/routing, chưa triển khai xác thực/phân quyền nội bộ.
 
 Cancel/operation và các alias tra cứu khác tại `/internal/v1` là phần mở rộng hiện có; không mặc nhiên thuộc contract #39. Cancel chưa có Reservation chỉ lưu guard; GET Reservation vẫn 404. Reserve đến sau guard bị từ chối; replay Cancel giữ kết quả NOT_CREATED ban đầu. Release 404 không lưu guard hoặc snapshot thành công. Reserve/Release/Cancel dùng cùng khóa Order, không trả tồn hai lần.
 
@@ -177,7 +179,7 @@ Cancel/operation và các alias tra cứu khác tại `/internal/v1` là phần 
 
 Tra cứu operation chấp nhận key 1–512 ký tự ASCII hiển thị không whitespace. Công thức key POST vẫn được kiểm tra chính xác; giới hạn 512 không cho phép dùng key tùy ý thay công thức. Không tự sửa payload hash hoặc dựng snapshot lịch sử khi thiếu bằng chứng.
 
-Lần kiểm thử người thực hiện cung cấp gần nhất: `mvn -pl inventory-service test`, 134 test, 0 failure/error/skipped, BUILD SUCCESS (2026-11-03). Bao gồm unit test, PostgreSQL/HTTP integration, migration, replay và rollback. Đây không phải kết quả thử tải hay phục hồi đầy đủ Order/Saga. Các sửa tài liệu sau lần chạy này không thay đổi code.
+Lần chạy toàn bộ test gần nhất: `mvn -pl inventory-service test`, 148 test, 0 failure/error/skipped, BUILD SUCCESS (2026-11-03). Bao gồm unit test, PostgreSQL/HTTP integration, migration, replay và rollback. Đây không phải kết quả thử tải hay phục hồi đầy đủ Order/Saga. Các sửa tài liệu sau lần chạy này không thay đổi code.
 
 | Nội dung | Bằng chứng trong inventory-service/src/test/java |
 |---|---|
@@ -198,6 +200,6 @@ Lần kiểm thử người thực hiện cung cấp gần nhất: `mvn -pl inve
 | Tracing | Regex tracing, header/body khác nhau và việc loại tracing body khỏi hash | Chỉ kiểm tra giới hạn hiện tại; không chọn nguồn ưu tiên, không đổi hash cũ |
 | Cancel | #39 chưa định nghĩa endpoint/schema/key/quyền và ý nghĩa reasonCode khi mới có guard | Giữ extension #29; không đổi Release 404 thành thành công |
 | Xác minh Order | #39 có ORDER_NOT_FOUND nhưng chưa chốt cách Inventory xác minh Order | Không truy vấn xuyên DB hoặc tự thêm call vòng sang Order |
-| Error/auth | Envelope cho mọi lỗi 5xx/routing và cơ chế identity nội bộ chưa triển khai | Không tuyên bố tuân thủ đầy đủ lỗi/bảo mật của #39 |
+| Error/auth | Đã ánh xạ lỗi DB/transaction/trạng thái; chưa bao phủ mọi exception/routing hoặc có identity nội bộ | Không tuyên bố tuân thủ đầy đủ lỗi/bảo mật của #39 |
 
 Request Reserve nguyên bản trong #39 hiện chưa được hỗ trợ. Chỉ chốt hoàn tất đồng bộ sau khi các điểm trên được giải quyết và các ví dụ contract tương ứng có integration test.

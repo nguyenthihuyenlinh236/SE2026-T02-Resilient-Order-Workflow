@@ -66,8 +66,16 @@ Lỗi validation/xung đột/không tìm thấy do Inventory xử lý dùng enve
 }
 ```
 
-Chưa chuẩn hóa mọi lỗi 5xx, lỗi routing hoặc lỗi từ tầng ngoài service theo
-envelope này. Xác thực/phân quyền API nội bộ chưa được triển khai.
+Lỗi DataAccessException, TransactionException và IllegalStateException trong xử
+lý Inventory cũng dùng envelope này. Lỗi kết nối, timeout transaction hoặc lỗi
+DB được phân loại transient/recoverable trả 503 SERVICE_UNAVAILABLE với
+retryable=true. Các lỗi toàn vẹn dữ liệu/trạng thái hoặc transaction còn lại trả
+500 INTERNAL_SERVER_ERROR với retryable=false để tránh retry tự động không có
+căn cứ. Exception chi tiết chỉ ghi ở log server; response không trả SQL hoặc
+thông tin kết nối. Query kết quả trước khi retry; nếu retry vẫn giữ nguyên key
+và payload. HTTP 5xx không được suy ra thành REJECTED/FAILED của nghiệp vụ.
+Chưa chuẩn hóa mọi loại exception, lỗi routing hoặc lỗi từ tầng ngoài service.
+Xác thực/phân quyền API nội bộ chưa được triển khai.
 
 ### API tương thích #28–#29
 
@@ -263,7 +271,7 @@ V004 mở rộng cột key lên 512 ký tự. V005 đổi Order/Reservation ID v
 sang VARCHAR(128); UUID dạng chuỗi vẫn giữ nguyên, hash và snapshot cũ không bị
 ghi lại. Không sửa migration đã chạy hoặc xóa volume để nâng cấp.
 
-Kết quả gần nhất được cung cấp ngày 2026-11-03: **134 test, 0 failure/error/skipped,
+Kết quả chạy toàn bộ test gần nhất ngày 2026-11-03: **148 test, 0 failure/error/skipped,
 BUILD SUCCESS**. Chi tiết phạm vi và phần còn thiếu ở
 [mục 10–11 của contract](../docs/architecture/14-inventory-api-contract.md#10-migration-và-bằng-chứng-kiểm-thử).
 
