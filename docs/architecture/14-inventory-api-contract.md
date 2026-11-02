@@ -25,7 +25,7 @@ Header bắt buộc: `Idempotency-Key: reserve:{orderId}:v1`.
 |---|---|
 | orderId, reservationId | UUID, bắt buộc; reservationId do bên gọi cấp |
 | storeId | Không trắng, tối đa 100 ký tự; bắt buộc cho command nội bộ |
-| items | 1–20 dòng, không có phần tử null |
+| items | 1–100 dòng, không có phần tử null |
 | sku | Không trắng, tối đa 128 ký tự, phân biệt hoa/thường; không tự trim |
 | quantity | Số nguyên dương; số thập phân bị từ chối, gộp SKU trùng không được tràn integer |
 

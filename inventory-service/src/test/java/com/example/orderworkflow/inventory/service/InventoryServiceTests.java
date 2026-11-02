@@ -45,11 +45,17 @@ class InventoryServiceTests {
                 .containsExactly(new Item("A", 2), new Item("B", 4));
     }
 
+    @Test
+    void normalizeAccepts100Items() {
+        var items = java.util.stream.IntStream.range(0, 100).mapToObj(i -> new Item("ITEM-" + i, 1)).toList();
+        assertThat(InventoryService.normalize(items)).hasSize(100);
+    }
+
     static Stream<List<Item>> invalidItems() {
         return Stream.of(null, List.of(), Arrays.asList((Item) null), List.of(new Item(null, 1)),
                 List.of(new Item(" ", 1)), List.of(new Item("A", null)), List.of(new Item("A", 0)),
                 List.of(new Item("A", -1)), List.of(new Item("X".repeat(129), 1)),
-                java.util.Collections.nCopies(21, new Item("A", 1)),
+                java.util.Collections.nCopies(101, new Item("A", 1)),
                 List.of(new Item("A", Integer.MAX_VALUE), new Item("A", 1)));
     }
 

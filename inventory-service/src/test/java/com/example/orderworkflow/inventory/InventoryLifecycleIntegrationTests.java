@@ -618,6 +618,48 @@ class InventoryLifecycleIntegrationTests {
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {21, 100})
+    void reserveAcceptsUpTo100ItemsWithoutPartialAllocation(int size) {
+        var items = java.util.stream.IntStream.range(0, size)
+                .mapToObj(i -> new Item("MISSING-" + i, 1)).toList();
+        var request = new ReserveRequest("ORD-100", "RES-100", "STORE", items);
+        var response = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), Reservation.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody().status()).isEqualTo("REJECTED");
+        assertThat(response.getBody().rejectionReason()).isEqualTo("PRODUCT_NOT_FOUND");
+        assertThat(response.getBody().items()).hasSize(size);
+        assertThat(inventory.reserve(request, reserveKey(request))).isEqualTo(response.getBody());
+        assertStock(0);
+    }
+
+    @Test
+    void reserveRejects101ItemsBeforeWriting() {
+        var items = java.util.stream.IntStream.range(0, 101).mapToObj(i -> new Item("ITEM-" + i, 1)).toList();
+        var request = new ReserveRequest("ORD-101", "RES-101", "STORE", items);
+        var response = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), ContractErrorResponse.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().error().code()).isEqualTo("VALIDATION_ERROR");
+        assertThat(count("inventory_order_guards")).isZero();
+        assertThat(count("inventory_operations")).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\"2\"", "\"2.0\"", "2.0", "2.5", "true", "null", "2147483648"})
+    void reserveRejectsNonIntegerQuantityWithoutWrites(String quantity) {
+        String body = "{\"orderId\":\"ORD-QTY\",\"reservationId\":\"RES-QTY\",\"storeId\":\"STORE\","
+                + "\"items\":[{\"sku\":\"A\",\"quantity\":" + quantity + "}]}";
+        var response = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(body, "reserve:ORD-QTY:v1"), ContractErrorResponse.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().error().code()).isEqualTo("VALIDATION_ERROR");
+        assertThat(count("inventory_order_guards")).isZero();
+        assertThat(count("inventory_operations")).isZero();
+        assertStock(0);
+    }
+
     private ReserveRequest reserveRequest() {
         return new ReserveRequest(UUID.randomUUID().toString(), UUID.randomUUID().toString(), "STORE", List.of(new Item("A", 2), new Item("B", 3)));
     }

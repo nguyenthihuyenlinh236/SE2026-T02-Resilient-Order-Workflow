@@ -11,15 +11,17 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 
 public final class InventoryDtos {
     private InventoryDtos() { }
 
-    public record Item(@NotBlank @Size(max = 128) String sku, @NotNull @Positive Integer quantity) { }
+    public record Item(@NotBlank @Size(max = 128) String sku,
+            @NotNull @Positive @JsonDeserialize(using = StrictQuantityDeserializer.class) Integer quantity) { }
 
     public record ReserveRequest(@Identifier String orderId, @Identifier String reservationId,
             @NotBlank @Size(max = 100) String storeId,
-            @NotEmpty @Size(max = 20) List<@NotNull @Valid Item> items) { }
+            @NotEmpty @Size(max = 100) List<@NotNull @Valid Item> items) { }
 
     public record Reservation(String reservationId, String orderId, String storeId, String reserveKey,
             String status, String rejectionReason, List<Item> items, Instant createdAt) { }

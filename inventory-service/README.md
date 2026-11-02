@@ -30,6 +30,14 @@ Flyway tự chạy migration khi khởi động. Profile `demo` nạp hai sản 
 
 ## 2. API
 
+Phần 2 đồng bộ #39 hiện hoàn thành validation 1–100 item và quantity là JSON
+integer dương trong phạm vi Java Integer; không nhận chuỗi số, float hoặc boolean.
+Payload `productId` chưa nối vào Reserve: #39 chưa xác định productId là UUID
+nội bộ hay SKU, cũng chưa quy định chọn kho khi không có storeId. Không tự chọn
+kho mặc định hoặc gom tồn nhiều kho. Việc chuyển sang Inventory sinh reservationId
+sẽ làm cùng payload mới sau khi chốt ánh xạ sản phẩm/kho và tương thích replay.
+Giới hạn quantity theo cấu hình và định dạng tracing ID cụ thể cũng cần được chốt.
+
 Order ID và Reservation ID hiện dùng Identifier dạng chuỗi 1–128 ký tự theo
 PR #39: chữ cái/số ASCII ở đầu, các ký tự tiếp theo là chữ cái/số, `_` hoặc `-`.
 Ví dụ `ORD-001`, `RES-001`; UUID dạng chuỗi vẫn hợp lệ. V005 chuyển toàn bộ cột
@@ -63,7 +71,7 @@ cho toàn bộ request thành công. API `/api/v1/inventory` vẫn trả lỗi `
 | GET | `/api/v1/inventory/reservations?orderId={orderId}` | Tra cứu theo Order |
 | GET | `/api/v1/inventory/reservations?reserveKey={key}` | Tra cứu theo khóa Reserve |
 
-Tra cứu yêu cầu đúng một selector: `orderId`, `reserveKey` hoặc alias `idempotencyKey`. Request Reserve bắt buộc header `Idempotency-Key: reserve:{orderId}:v1`. Body có `orderId`, `reservationId` UUID, `storeId` không trắng tối đa 100 ký tự và `items` từ 1–20 dòng. Mỗi dòng có `sku` không trắng tối đa 128 ký tự và `quantity` nguyên dương. SKU trùng được gộp; từ chối nếu tổng lượng tràn integer hoặc quantity là số thập phân.
+Tra cứu yêu cầu đúng một selector: `orderId`, `reserveKey` hoặc alias `idempotencyKey`. Request Reserve bắt buộc header `Idempotency-Key: reserve:{orderId}:v1`. Body có `orderId`, `reservationId` dạng Identifier, `storeId` không trắng tối đa 100 ký tự và `items` từ 1–100 dòng. Mỗi dòng có `sku` không trắng tối đa 128 ký tự và `quantity` nguyên dương. SKU trùng được gộp; từ chối nếu tổng lượng tràn integer hoặc quantity là số thập phân.
 
 Order Service sinh và giữ nguyên reservationId qua các lần retry. Inventory giữ hàng theo `(storeId, sku)` và lưu ID bên gọi cung cấp theo payload ReserveInventory trong draft contract. `productId` chỉ là định danh tồn kho nội bộ. Hợp đồng chi tiết: [Inventory API Contract](../docs/architecture/14-inventory-api-contract.md). Chưa triển khai RabbitMQ envelope/consumer.
 

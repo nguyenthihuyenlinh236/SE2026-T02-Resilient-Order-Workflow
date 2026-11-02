@@ -98,7 +98,7 @@ public class InventoryService {
     }
 
     static List<Item> normalize(List<Item> items) {
-        if (items == null || items.isEmpty() || items.size() > 20) { throw invalid("items must contain 1 to 20 lines"); }
+        if (items == null || items.isEmpty() || items.size() > 100) { throw invalid("items must contain 1 to 100 lines"); }
         var quantities = new TreeMap<String, Integer>();
         try {
             for (Item item : items) {
