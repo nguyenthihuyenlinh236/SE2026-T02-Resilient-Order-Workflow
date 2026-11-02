@@ -361,6 +361,42 @@ class InventoryLifecycleIntegrationTests {
         assertThat(legacy.queryForObject("SELECT payload_hash FROM reservations", String.class)).isEqualTo(hash);
     }
 
+    @Test
+    void v004PreservesExistingResultsAndExpandsBothKeyColumnsTo512Characters() {
+        String schema = "upgrade_v3_keys";
+        var flyway = org.flywaydb.core.Flyway.configure()
+                .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+                .schemas(schema).defaultSchema(schema);
+        flyway.target("3").load().migrate();
+        var upgraded = new JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                POSTGRES.getJdbcUrl() + (POSTGRES.getJdbcUrl().contains("?") ? "&" : "?") + "currentSchema=" + schema,
+                POSTGRES.getUsername(), POSTGRES.getPassword()));
+        UUID orderId = UUID.randomUUID();
+        UUID reservationId = UUID.randomUUID();
+        String hash = "a".repeat(64);
+        upgraded.update("INSERT INTO inventory_order_guards(order_id) VALUES (?)", orderId);
+        upgraded.update("INSERT INTO reservations(reservation_id, order_id, reserve_key, payload_hash, status, store_id, rejection_reason) "
+                + "VALUES (?, ?, 'legacy-key', ?, 'REJECTED', 'STORE', 'INSUFFICIENT_STOCK')", reservationId, orderId, hash);
+        upgraded.update("INSERT INTO inventory_operations(idempotency_key, order_id, operation, payload_hash, response_code, response_payload) "
+                + "VALUES ('legacy-key', ?, 'RESERVE', ?, 200, '{\"status\":\"REJECTED\"}'::jsonb)", orderId, hash);
+
+        flyway.target("4").load().migrate();
+
+        assertThat(upgraded.queryForObject("SELECT reserve_key FROM reservations", String.class)).isEqualTo("legacy-key");
+        assertThat(upgraded.queryForObject("SELECT payload_hash FROM reservations", String.class)).isEqualTo(hash);
+        assertThat(upgraded.queryForObject("SELECT response_payload->>'status' FROM inventory_operations", String.class))
+                .isEqualTo("REJECTED");
+        String longestKey = "k".repeat(512);
+        assertThat(upgraded.update("UPDATE reservations SET reserve_key = ?", longestKey)).isEqualTo(1);
+        assertThat(upgraded.update("UPDATE inventory_operations SET idempotency_key = ?", longestKey)).isEqualTo(1);
+        assertThat(upgraded.queryForObject("SELECT reserve_key FROM reservations", String.class)).isEqualTo(longestKey);
+        assertThat(upgraded.queryForObject("SELECT idempotency_key FROM inventory_operations", String.class)).isEqualTo(longestKey);
+        assertThatThrownBy(() -> upgraded.update("UPDATE reservations SET reserve_key = ?", longestKey + "x"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> upgraded.update("UPDATE inventory_operations SET idempotency_key = ?", longestKey + "x"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
     private ReserveRequest reserveRequest() {
         return new ReserveRequest(UUID.randomUUID(), UUID.randomUUID(), "STORE", List.of(new Item("A", 2), new Item("B", 3)));
     }
