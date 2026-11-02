@@ -3,6 +3,7 @@ package com.example.orderworkflow.inventory.api;
 import java.util.UUID;
 
 import jakarta.validation.Valid;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.*;
 
 import com.example.orderworkflow.inventory.api.InventoryDtos.*;
@@ -37,9 +38,10 @@ public class InventoryController {
     public OperationResult operation(@RequestParam String idempotencyKey) { return lifecycle.operation(idempotencyKey); }
 
     @PostMapping("/reservations")
-    public Reservation reserve(@Valid @RequestBody ReserveRequest request,
-            @RequestHeader("Idempotency-Key") String key) {
-        return service.reserve(request, key);
+    public Object reserve(@Valid @RequestBody ReserveRequest request,
+            @RequestHeader("Idempotency-Key") String key, HttpServletRequest http) {
+        var result = service.reserve(request, key);
+        return internal(http) ? InventoryContractResponses.reserve(result) : result;
     }
 
     @GetMapping("/products/{productId}")
@@ -54,7 +56,14 @@ public class InventoryController {
     public Reservation reservation(@PathVariable String reservationId) { return service.reservation(reservationId); }
 
     @GetMapping("/reservations/by-order/{orderId}")
-    public Reservation reservationByOrder(@PathVariable String orderId) { return service.lookup(orderId, null); }
+    public Object reservationByOrder(@PathVariable String orderId, HttpServletRequest http) {
+        var result = service.lookup(orderId, null);
+        return internal(http) ? InventoryContractResponses.reservation(result) : result;
+    }
+
+    private static boolean internal(HttpServletRequest http) {
+        return http.getRequestURI().substring(http.getContextPath().length()).startsWith("/internal/v1/");
+    }
 
     @GetMapping("/reservations")
     public Reservation lookup(@RequestParam(required = false) String orderId,

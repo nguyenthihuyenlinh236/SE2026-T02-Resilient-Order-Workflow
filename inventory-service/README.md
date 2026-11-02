@@ -30,6 +30,15 @@ Flyway tự chạy migration khi khởi động. Profile `demo` nạp hai sản 
 
 ## 2. API
 
+Response `POST /internal/v1/reservations` theo #39 gồm `reservationId`,
+`orderId`, `status`, `reservedAt`, `reasonCode`. REJECTED trả reservationId và
+reservedAt là null; mã từ chối là INVENTORY_NOT_AVAILABLE, PRODUCT_NOT_FOUND,
+ORDER_ALREADY_RELEASED. GET `/internal/v1/reservations/by-order/{orderId}` trả
+reservationId, orderId, status, idempotencyKey, reasonCode (đều có mặt).
+Đây là lớp ánh xạ response: snapshot trong DB và response API cũ được giữ nguyên.
+Retry Reserve sau Release vẫn trả kết quả Reserve gốc; GET trả trạng thái hiện tại.
+Request Reserve mới theo #39 còn chờ chốt ánh xạ sản phẩm/kho ở phần 2.
+
 Phần 2 đồng bộ #39 hiện hoàn thành validation 1–100 item và quantity là JSON
 integer dương trong phạm vi Java Integer; không nhận chuỗi số, float hoặc boolean.
 Payload `productId` chưa nối vào Reserve: #39 chưa xác định productId là UUID
@@ -47,7 +56,7 @@ cũ để replay. Bước này chưa thay đổi `productId` hay bên sinh Reser
 Đồng bộ từng bước với PR #39: các endpoint bên dưới hiện cũng nhận prefix
 `/internal/v1` thay cho `/api/v1/inventory`. Bổ sung tra cứu
 `GET /internal/v1/reservations/by-order/{orderId}` (không có bản ghi trả 404).
-Bước này chỉ bổ sung đường dẫn; request/response vẫn dùng schema hiện tại của
+Request Reserve vẫn dùng schema hiện tại của
 #28–#29, chưa phải toàn bộ schema đề xuất trong #39. Tra cứu Reservation trả
 trạng thái hiện tại; retry Reserve cùng key và payload trả kết quả lệnh gốc.
 

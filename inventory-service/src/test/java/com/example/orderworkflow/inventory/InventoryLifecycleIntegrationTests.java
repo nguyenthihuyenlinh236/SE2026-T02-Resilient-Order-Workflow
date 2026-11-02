@@ -95,7 +95,7 @@ class InventoryLifecycleIntegrationTests {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"/api/v1/inventory", "/internal/v1"})
+    @ValueSource(strings = {"/api/v1/inventory"})
     void reservationRoutesSupportReserveLookupReleaseAndReplay(String prefix) {
         var request = reserveRequest();
         var reserved = http.exchange(prefix + "/reservations", HttpMethod.POST,
@@ -511,14 +511,14 @@ class InventoryLifecycleIntegrationTests {
         String order = "ORD-001" + "x".repeat(length - 7);
         String reservation = "RES-001" + "x".repeat(length - 7);
         var request = new ReserveRequest(order, reservation, "STORE", List.of(new Item("A", 2), new Item("B", 3)));
-        var reserved = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+        var reserved = http.exchange("/api/v1/inventory/reservations", HttpMethod.POST,
                 entity(request, reserveKey(request)), Reservation.class);
         assertThat(reserved.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(reserved.getBody().orderId()).isEqualTo(order);
         assertThat(reserved.getBody().reservationId()).isEqualTo(reservation);
-        var found = http.getForEntity("/internal/v1/reservations/by-order/" + order, Reservation.class);
+        var found = http.getForEntity("/api/v1/inventory/reservations/by-order/" + order, Reservation.class);
         assertThat(found.getBody()).isEqualTo(reserved.getBody());
-        var released = http.exchange("/internal/v1/reservations/" + reservation + "/release", HttpMethod.POST,
+        var released = http.exchange("/api/v1/inventory/reservations/" + reservation + "/release", HttpMethod.POST,
                 entity(new ReleaseRequest(order, reservation, "FAILED"), releaseKey(request)), ReleaseResult.class);
         assertThat(released.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(released.getBody().reservationId()).isEqualTo(reservation);
@@ -624,7 +624,7 @@ class InventoryLifecycleIntegrationTests {
         var items = java.util.stream.IntStream.range(0, size)
                 .mapToObj(i -> new Item("MISSING-" + i, 1)).toList();
         var request = new ReserveRequest("ORD-100", "RES-100", "STORE", items);
-        var response = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+        var response = http.exchange("/api/v1/inventory/reservations", HttpMethod.POST,
                 entity(request, reserveKey(request)), Reservation.class);
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody().status()).isEqualTo("REJECTED");
@@ -657,6 +657,63 @@ class InventoryLifecycleIntegrationTests {
         assertThat(response.getBody().error().code()).isEqualTo("VALIDATION_ERROR");
         assertThat(count("inventory_order_guards")).isZero();
         assertThat(count("inventory_operations")).isZero();
+        assertStock(0);
+    }
+
+    @Test
+    void internalReserveAndLookupUseContractFieldsAndPreserveReplayAfterRelease() {
+        var request = reserveRequest();
+        var reserved = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(reserved.getStatusCode()).isEqualTo(HttpStatus.OK);
+        var original = reserved.getBody();
+        assertThat(original.properties()).extracting(java.util.Map.Entry::getKey)
+                .containsExactlyInAnyOrder("reservationId", "orderId", "status", "reservedAt", "reasonCode");
+        assertThat(original.get("reservationId").asText()).isEqualTo(request.reservationId());
+        assertThat(original.get("orderId").asText()).isEqualTo(request.orderId());
+        assertThat(original.get("status").asText()).isEqualTo("RESERVED");
+        assertThat(java.time.Instant.parse(original.get("reservedAt").asText())).isNotNull();
+        assertThat(original.get("reasonCode").isNull()).isTrue();
+        var query = http.getForEntity("/internal/v1/reservations/by-order/" + request.orderId(),
+                com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(query.getBody().properties()).extracting(java.util.Map.Entry::getKey)
+                .containsExactlyInAnyOrder("reservationId", "orderId", "status", "idempotencyKey", "reasonCode");
+        assertThat(query.getBody().get("idempotencyKey").asText()).isEqualTo(reserveKey(request));
+        assertThat(query.getBody().get("status").asText()).isEqualTo("RESERVED");
+        release(request);
+        var replay = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(replay.getBody()).isEqualTo(original);
+        var current = http.getForEntity("/internal/v1/reservations/by-order/" + request.orderId(),
+                com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(current.getBody().get("status").asText()).isEqualTo("RELEASED");
+        assertThat(current.getBody().get("reasonCode").isNull()).isTrue();
+        assertStock(0);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"INVENTORY_NOT_AVAILABLE", "PRODUCT_NOT_FOUND", "ORDER_ALREADY_RELEASED"})
+    void internalRejectedReserveReturnsNullResourceFieldsAndContractReason(String reason) {
+        var base = reserveRequest();
+        if (reason.equals("ORDER_ALREADY_RELEASED")) { cancel(base.orderId()); }
+        var request = new ReserveRequest(base.orderId(), base.reservationId(), "STORE",
+                List.of(new Item(reason.equals("PRODUCT_NOT_FOUND") ? "MISSING" : "A",
+                        reason.equals("INVENTORY_NOT_AVAILABLE") ? 11 : 1)));
+        var response = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody().get("status").asText()).isEqualTo("REJECTED");
+        assertThat(response.getBody().get("reservationId").isNull()).isTrue();
+        assertThat(response.getBody().get("reservedAt").isNull()).isTrue();
+        assertThat(response.getBody().get("reasonCode").asText()).isEqualTo(reason);
+        var query = http.getForEntity("/internal/v1/reservations/by-order/" + request.orderId(),
+                com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(query.getBody().get("reservationId").isNull()).isTrue();
+        assertThat(query.getBody().get("reasonCode").asText()).isEqualTo(reason);
+        assertThat(query.getBody().get("idempotencyKey").asText()).isEqualTo(reserveKey(request));
+        var replay = http.exchange("/internal/v1/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(replay.getBody()).isEqualTo(response.getBody());
         assertStock(0);
     }
 
