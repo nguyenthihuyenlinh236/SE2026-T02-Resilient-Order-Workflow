@@ -259,7 +259,7 @@ Quy tắc:
 - Kiểm tra và cập nhật tồn kho phải nguyên tử.
 - Một Order không được tạo nhiều reservation có hiệu lực do retry.
 - Cùng key/cùng payload trả lại kết quả đã lưu; cùng key/khác payload bị từ chối.
-- Nếu reserve timeout, không gửi release khi chưa xác minh kết quả reserve; query bằng key ổn định trước.
+- Nếu reserve timeout, không gửi release khi chưa xác minh kết quả reserve; query theo `orderId` qua API mục 5.2 để đối chiếu reserve key ổn định trước.
 - Inventory phải xử lý quy tắc reserve đến muộn sau release của cùng Order theo D-01.5/A-13; chi tiết triển khai cần Dev xác nhận.
 
 Response khi không đủ tồn kho (`200 OK`):
@@ -275,6 +275,8 @@ Response khi không đủ tồn kho (`200 OK`):
 ```
 
 ### 5.2. Tra cứu Reservation
+
+Trong contract này, “tra cứu theo reserve key” được thực hiện bằng `GET /internal/v1/reservations/by-order/{orderId}`. Inventory tìm bản ghi kết quả Reserve của Order tương ứng với key `reserve:{orderId}:v1` và trả key đó trong `idempotencyKey`; Order Service đối chiếu với key đã lưu trước khi sử dụng kết quả. Không có endpoint tra cứu Reserve theo key riêng trong phiên bản này.
 
 **Schema response:** `reservationId: Identifier|null`, `orderId: Identifier`, `status: RESERVED|RELEASED|REJECTED|UNKNOWN`, `idempotencyKey: string`, `reasonCode: string|null` đều bắt buộc có mặt. `orderId`, `status`, `idempotencyKey` không null. `reservationId` không null khi `RESERVED/RELEASED`, null khi `REJECTED`; khi `UNKNOWN`, trả ID nếu đã biết, nếu chưa thì null. `reasonCode` dùng enum mục 5.1 khi `REJECTED`, null ở các trạng thái khác. Chỉ trả `UNKNOWN` nếu Inventory có bản ghi đang cần xác minh; không có bản ghi thì trả `404`. Path `orderId` theo Identifier.
 
@@ -742,7 +744,7 @@ Các giá trị ID và timestamp trong ví dụ chỉ minh họa cấu trúc, kh
 
 | Thao tác | Tình huống | Trạng thái cần lưu ở Order/Saga | Hành động bắt buộc |
 |---|---|---|---|
-| Reserve | Timeout/mất phản hồi | Reservation `UNKNOWN`; Saga `RECONCILING` | Query bằng reserve key; chưa xác minh thì không capture và không release mù |
+| Reserve | Timeout/mất phản hồi | Reservation `UNKNOWN`; Saga `RECONCILING` | Query theo `orderId` qua API mục 5.2, đối chiếu `idempotencyKey = reserve:{orderId}:v1`; chưa xác minh thì không capture và không release mù |
 | Reserve | Không đủ tồn kho đã xác minh | Reservation `REJECTED`; claim nhánh thất bại nếu Order còn `PENDING` | Không capture; hoàn tất nhánh thất bại theo State Machine |
 | Capture | Timeout/mất phản hồi | Capture `UNKNOWN`; Saga `RECONCILING` | Query theo paymentId/capture key; không coi là FAILED |
 | Capture | `FAILED` đã xác minh | Capture `FAILED` | Claim nhánh thất bại bằng conditional update; release reservation đã xác minh |
