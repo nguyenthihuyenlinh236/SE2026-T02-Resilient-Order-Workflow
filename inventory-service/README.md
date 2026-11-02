@@ -30,119 +30,69 @@ Flyway tự chạy migration khi khởi động. Profile `demo` nạp hai sản 
 
 ## 2. API
 
-Cancel và Reserve đến muộn (mục 6): Cancel theo Order hiện là phần mở rộng của
-#29, chưa được PR #39 định nghĩa endpoint/payload/key. Giữ nguyên contract Cancel
-hiện có; không tự xem Cancel là Release thành công trong contract #39.
+Đang đồng bộ từng phần với PR #39, **chưa tương thích toàn bộ contract**.
+Chi tiết schema, migration và các điểm còn chờ chốt nằm trong
+[Inventory API Contract, mục 9–11](../docs/architecture/14-inventory-api-contract.md#9-api-nội-bộ-đang-đồng-bộ-với-pr-39).
 
-| Tình huống | Hành vi hiện tại |
-|---|---|
-| Cancel commit trước Reserve | Guard chặn giữ hàng; Reserve trả REJECTED/ORDER_ALREADY_RELEASED ở API nội bộ |
-| Reserve commit trước Cancel | Cancel chuyển Reservation sang RELEASED và trả tồn một lần |
-| Chỉ có guard, chưa có Reserve | GET Reservation trả 404; Cancel replay vẫn NOT_CREATED |
-| Release không tìm thấy Reservation | Trả 404; không commit guard hoặc snapshot lỗi; Reserve đến sau vẫn có thể chạy |
-| Retry Reserve sau Release | POST trả snapshot Reserve gốc; GET trả RELEASED |
-| Release và Cancel cạnh tranh | Cùng khóa guard Order; chỉ một lần giảm reserved_quantity, giữ nguyên released_at |
+### API nội bộ
 
-Điểm cần chốt với người viết #39: có công bố Cancel theo Order hay không; schema,
-key và quyền gọi Cancel; cách biểu diễn ORDER_ALREADY_RELEASED khi guard đến từ
-Cancel chưa có Reservation. Chưa tự thay Release 404 bằng thành công hoặc tạo
-Reservation giả. Order/Saga phải xác minh Reserve/Payment trước compensation;
-Inventory không tự xác minh Payment hoặc chốt trạng thái Order.
+Mọi request `/internal/v1/**` bắt buộc header `X-Correlation-Id` không trắng,
+tối đa 128 ký tự ASCII hiển thị được. `X-Command-Id` tùy chọn; nếu gửi phải hợp lệ.
+Response thành công và các lỗi được Inventory xử lý trả correlation header.
+Thiếu/sai correlation trả 400; response lỗi dùng UUID thay thế để truy vết.
 
-Tracing nội bộ (mục 5): mọi endpoint `/internal/v1/**` yêu cầu header
-`X-Correlation-Id`. `X-Command-Id` là optional; nếu có thì phải hợp lệ.
-Header tracing không trắng, tối đa 128 ký tự ASCII hiển thị được. Response thành
-công/lỗi giữ nguyên correlation header hợp lệ. Thiếu/sai correlation trả 400
-VALIDATION_ERROR trước khi gọi nghiệp vụ; response lỗi dùng UUID thay thế để truy
-vết lỗi đó. API cũ không bắt buộc tracing header.
+| Method | Path | Request và response hiện tại |
+|---|---|---|
+| POST | `/internal/v1/reservations` | Request còn dùng caller reservationId/storeId/sku; response đã ánh xạ sang reservedAt/reasonCode theo #39 |
+| GET | `/internal/v1/reservations/by-order/{orderId}` | Trạng thái hiện tại, idempotencyKey và reasonCode; REJECTED có reservationId=null |
+| POST | `/internal/v1/reservations/{reservationId}/release` | Body commandId/orderId/correlationId; response reservationId/orderId/status/releasedAt |
+| POST | `/internal/v1/orders/{orderId}/cancel` | Phần mở rộng #29; chưa có contract tương ứng được chốt trong #39 |
+| GET | `/internal/v1/operations?idempotencyKey={key}` | Snapshot đã commit; phần mở rộng #29 |
 
-Hash được tạo từ cấu trúc dữ liệu đã parse, không hash nguyên văn JSON. Đổi thứ
-tự field hoặc whitespace JSON không làm đổi hash. Header tracing không tham gia
-hash; body commandId/correlationId của Release nội bộ vẫn tham gia như mục 4.
-Không cập nhật lại hash hoặc snapshot cũ khi retry/đổi header.
+Các API tra cứu tồn kho và Reservation khác cũng có alias `/internal/v1`, hiện
+trả schema API cũ. Chỉ các endpoint nêu trong #39 được xem xét đồng bộ contract.
 
-Các điểm #39 chưa chốt và được để lại: regex tracing ID chính thức; xử lý khi
-header khác body; có loại tracing field trong body khỏi payload hash hay không.
-Chưa tự chọn header/body làm nguồn ưu tiên. Tracing trong body Reserve mới chờ
-hoàn thiện payload Reserve ở phần 2.
+Lỗi validation/xung đột/không tìm thấy do Inventory xử lý dùng envelope:
 
-Release nội bộ theo #39:
-
-```http
-POST /internal/v1/reservations/RES-001/release
-Content-Type: application/json
-Idempotency-Key: inventory:release:ORD-001:RES-001:v1
-X-Correlation-Id: corr-001
-
-{"commandId":"cmd-release-001","orderId":"ORD-001","correlationId":"corr-001"}
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Check required fields, identifiers and positive integer quantities",
+    "details": [],
+    "correlationId": "corr-demo-001",
+    "retryable": false
+  }
+}
 ```
 
-Body không nhận reason hoặc reservationId; Reservation ID lấy từ path. Response
-có đúng reservationId, orderId, status=RELEASED, releasedAt. Retry giữ nguyên key
-và toàn bộ body, trả cùng releasedAt; không giảm reserved_quantity lần nữa.
-Hash request nội bộ gồm cả commandId/correlationId: thay đổi chúng cùng key trả
-409. API cũ dùng body reason vẫn được hỗ trợ tại `/api/v1/inventory`.
-Không chuyển đổi hash/snapshot Release cũ sang body mới; dùng key của command cũ
-với body mới trả IDEMPOTENCY_KEY_CONFLICT, không thực hiện tác dụng phụ lần nữa.
-Validation tracing hiện kiểm tra bắt buộc/không trắng/tối đa 128 ký tự; định dạng
-tracing và kiểm tra khớp header/body còn ở mục 5. Điều kiện Payment/Saga do Order
-xác minh trước khi gửi Release, Inventory không đọc trạng thái Payment.
+Chưa chuẩn hóa mọi lỗi 5xx, lỗi routing hoặc lỗi từ tầng ngoài service theo
+envelope này. Xác thực/phân quyền API nội bộ chưa được triển khai.
 
-Response `POST /internal/v1/reservations` theo #39 gồm `reservationId`,
-`orderId`, `status`, `reservedAt`, `reasonCode`. REJECTED trả reservationId và
-reservedAt là null; mã từ chối là INVENTORY_NOT_AVAILABLE, PRODUCT_NOT_FOUND,
-ORDER_ALREADY_RELEASED. GET `/internal/v1/reservations/by-order/{orderId}` trả
-reservationId, orderId, status, idempotencyKey, reasonCode (đều có mặt).
-Đây là lớp ánh xạ response: snapshot trong DB và response API cũ được giữ nguyên.
-Retry Reserve sau Release vẫn trả kết quả Reserve gốc; GET trả trạng thái hiện tại.
-Request Reserve mới theo #39 còn chờ chốt ánh xạ sản phẩm/kho ở phần 2.
-
-Phần 2 đồng bộ #39 hiện hoàn thành validation 1–100 item và quantity là JSON
-integer dương trong phạm vi Java Integer; không nhận chuỗi số, float hoặc boolean.
-Payload `productId` chưa nối vào Reserve: #39 chưa xác định productId là UUID
-nội bộ hay SKU, cũng chưa quy định chọn kho khi không có storeId. Không tự chọn
-kho mặc định hoặc gom tồn nhiều kho. Việc chuyển sang Inventory sinh reservationId
-sẽ làm cùng payload mới sau khi chốt ánh xạ sản phẩm/kho và tương thích replay.
-Giới hạn quantity theo cấu hình và định dạng tracing ID cụ thể cũng cần được chốt.
-
-Order ID và Reservation ID hiện dùng Identifier dạng chuỗi 1–128 ký tự theo
-PR #39: chữ cái/số ASCII ở đầu, các ký tự tiếp theo là chữ cái/số, `_` hoặc `-`.
-Ví dụ `ORD-001`, `RES-001`; UUID dạng chuỗi vẫn hợp lệ. V005 chuyển toàn bộ cột
-Order/Reservation và khôi phục các FK, giữ nguyên key, hash và snapshot kết quả
-cũ để replay. Bước này chưa thay đổi `productId` hay bên sinh Reservation ID.
-
-Đồng bộ từng bước với PR #39: các endpoint bên dưới hiện cũng nhận prefix
-`/internal/v1` thay cho `/api/v1/inventory`. Bổ sung tra cứu
-`GET /internal/v1/reservations/by-order/{orderId}` (không có bản ghi trả 404).
-Request Reserve vẫn dùng schema hiện tại của
-#28–#29, chưa phải toàn bộ schema đề xuất trong #39. Tra cứu Reservation trả
-trạng thái hiện tại; retry Reserve cùng key và payload trả kết quả lệnh gốc.
-
-Các lỗi validation, xung đột và không tìm thấy do Inventory xử lý tại
-`/internal/v1` dùng envelope `{"error":{"code","message","details","correlationId","retryable"}}`
-(các tên trong ví dụ biểu thị trường). Validation dùng `VALIDATION_ERROR`, ID sai
-định dạng dùng `INVALID_IDENTIFIER`. Lỗi 4xx này có `retryable=false`.
-`X-Correlation-Id` hợp lệ được giữ trong body và header response; nếu thiếu hoặc
-sai định dạng, response lỗi sinh UUID thay thế. Đây chưa phải validation tracing
-cho toàn bộ request thành công. API `/api/v1/inventory` vẫn trả lỗi `{code,message}`.
+### API tương thích #28–#29
 
 | Method | Path | Kết quả |
 |---|---|---|
 | POST | `/api/v1/inventory/reservations` | RESERVED hoặc REJECTED; HTTP 200 cho kết quả nghiệp vụ xác định |
-| POST | `/api/v1/inventory/reservations/{reservationId}/release` | Giải phóng đúng Reservation một lần |
-| POST | `/api/v1/inventory/orders/{orderId}/cancel` | Ghi dấu hủy; giải phóng nếu đã giữ, chặn Reserve muộn |
+| POST | `/api/v1/inventory/reservations/{reservationId}/release` | Body orderId/reservationId/reason; giải phóng đúng Reservation một lần |
+| POST | `/api/v1/inventory/orders/{orderId}/cancel` | Ghi dấu hủy và giải phóng nếu đã giữ |
 | GET | `/api/v1/inventory/operations?idempotencyKey={key}` | Snapshot kết quả lệnh đã commit |
-| GET | `/api/v1/inventory/products/{productId}` | Tổng tồn, lượng giữ, cam kết khác và tồn khả dụng |
-| GET | `/api/v1/inventory/stock?storeId={storeId}&sku={sku}` | Tồn kho SKU trong đúng cửa hàng |
-| GET | `/api/v1/inventory/reservations/{reservationId}` | Reservation đã lưu |
+| GET | `/api/v1/inventory/products/{productId}` | Tồn kho theo UUID sản phẩm nội bộ |
+| GET | `/api/v1/inventory/stock?storeId={storeId}&sku={sku}` | Tồn SKU trong đúng cửa hàng |
+| GET | `/api/v1/inventory/reservations/{reservationId}` | Reservation hiện tại |
 | GET | `/api/v1/inventory/reservations?orderId={orderId}` | Tra cứu theo Order |
-| GET | `/api/v1/inventory/reservations?reserveKey={key}` | Tra cứu theo khóa Reserve |
+| GET | `/api/v1/inventory/reservations?reserveKey={key}` | Tra cứu theo khóa Reserve; idempotencyKey là alias |
 
-Tra cứu yêu cầu đúng một selector: `orderId`, `reserveKey` hoặc alias `idempotencyKey`. Request Reserve bắt buộc header `Idempotency-Key: reserve:{orderId}:v1`. Body có `orderId`, `reservationId` dạng Identifier, `storeId` không trắng tối đa 100 ký tự và `items` từ 1–100 dòng. Mỗi dòng có `sku` không trắng tối đa 128 ký tự và `quantity` nguyên dương. SKU trùng được gộp; từ chối nếu tổng lượng tràn integer hoặc quantity là số thập phân.
+Order/Reservation ID là Identifier 1–128 ký tự: chữ cái/số ASCII ở đầu, sau đó
+là chữ cái/số, `_` hoặc `-`; UUID dạng chuỗi vẫn hợp lệ. Request Reserve hiện yêu
+cầu caller reservationId, storeId không trắng tối đa 100 ký tự, 1–100 item với
+sku không trắng tối đa 128 ký tự và quantity là JSON integer dương trong phạm vi
+Java Integer. Không nhận chuỗi số, float, boolean hoặc tràn số; SKU trùng vẫn
+được gộp trong schema hiện tại. Không tự chọn kho mặc định hoặc gom tồn nhiều kho.
 
-Order Service sinh và giữ nguyên reservationId qua các lần retry. Inventory giữ hàng theo `(storeId, sku)` và lưu ID bên gọi cung cấp theo payload ReserveInventory trong draft contract. `productId` chỉ là định danh tồn kho nội bộ. Hợp đồng chi tiết: [Inventory API Contract](../docs/architecture/14-inventory-api-contract.md). Chưa triển khai RabbitMQ envelope/consumer.
-
-Lỗi đầu vào trả 400 INVALID_REQUEST; không tìm thấy resource trả 404; cùng Order/key khác nội dung trả 409 IDEMPOTENCY_KEY_CONFLICT. Thiếu tồn kho hoặc sản phẩm không tồn tại trả REJECTED với INSUFFICIENT_STOCK/PRODUCT_NOT_FOUND và lưu kết quả để tra cứu. GET không tìm thấy Reservation không phải bằng chứng một Reserve đang bay đã bị hủy.
+API cũ không bắt buộc tracing header và trả lỗi `{code,message}`. Thiếu tồn trả
+REJECTED/INSUFFICIENT_STOCK, SKU không tồn tại trả REJECTED/PRODUCT_NOT_FOUND.
+GET 404 không phải bằng chứng một Reserve đang bay đã bị hủy.
 
 ## 3. Kiểm tra thủ công
 
@@ -214,7 +164,7 @@ Kỳ vọng CANCELLATION_RECORDED, reservationStatus=NOT_CREATED, reservationId=
 | Kịch bản | Kỳ vọng |
 |---|---|
 | Cùng key đổi quantity | 409, tồn không đổi |
-| Quantity 0/âm hoặc thiếu UUID | 400, không có tác dụng tồn kho |
+| Quantity 0/âm hoặc thiếu/sai Identifier | 400, không có tác dụng tồn kho |
 | Order mới, yêu cầu lớn hơn tồn | REJECTED/INSUFFICIENT_STOCK |
 | Order mới, SKU không tồn tại trong store | REJECTED/PRODUCT_NOT_FOUND |
 | Cùng key đổi reservationId hoặc storeId | 409, không giữ thêm tồn |
@@ -223,6 +173,51 @@ Kỳ vọng CANCELLATION_RECORDED, reservationStatus=NOT_CREATED, reservationId=
 | Đơn nhiều sản phẩm có một dòng thiếu tồn | Không giữ một phần đơn |
 
 Các lần test dùng Order ID mới trừ trường hợp cố tình kiểm tra replay/conflict. Không chạy lại kịch bản cạnh tranh với giả định tồn ban đầu chưa được kiểm tra.
+
+### Kiểm tra API nội bộ đang hỗ trợ
+
+Ví dụ này dùng request Reserve hiện tại (caller ID/store/SKU), không phải request
+Reserve nguyên bản của #39. Chạy với Order mới, còn đủ ít nhất 2 DEMO-ITEM;
+giữ biến trong cùng terminal. Không dùng lại key đã Release bằng API cũ.
+
+```powershell
+$internalOrder = [guid]::NewGuid().ToString()
+$internalReservation = [guid]::NewGuid().ToString()
+$trace = "corr-demo-$internalOrder"
+$internalReserveKey = "reserve:${internalOrder}:v1"
+$internalReserveBody = @{
+    orderId = $internalOrder
+    reservationId = $internalReservation
+    storeId = "DEMO-STORE"
+    items = @(@{ sku = "DEMO-ITEM"; quantity = 2 })
+} | ConvertTo-Json -Depth 5
+
+Invoke-RestMethod -Method Post `
+    -Uri "http://localhost:8082/internal/v1/reservations" `
+    -Headers @{ "Idempotency-Key" = $internalReserveKey; "X-Correlation-Id" = $trace } `
+    -ContentType "application/json" -Body $internalReserveBody
+
+$internalReleaseKey = "inventory:release:${internalOrder}:${internalReservation}:v1"
+$internalReleaseBody = @{
+    commandId = "cmd-release-$internalOrder"
+    orderId = $internalOrder
+    correlationId = $trace
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post `
+    -Uri "http://localhost:8082/internal/v1/reservations/$internalReservation/release" `
+    -Headers @{ "Idempotency-Key" = $internalReleaseKey; "X-Correlation-Id" = $trace } `
+    -ContentType "application/json" -Body $internalReleaseBody
+
+Invoke-RestMethod `
+    -Uri "http://localhost:8082/internal/v1/reservations/by-order/$internalOrder" `
+    -Headers @{ "X-Correlation-Id" = $trace }
+```
+
+Reserve thành công trả RESERVED/reservedAt; Release trả RELEASED/releasedAt;
+GET cuối trả RELEASED cùng reserve idempotencyKey. Gửi lại POST Reserve nguyên
+body/key vẫn trả RESERVED ban đầu và không giữ hàng lại. Nếu Reserve REJECTED,
+không tiếp tục Release: xem reasonCode và kiểm tra tồn trước kịch bản mới.
 
 ## 4. Test tự động
 
@@ -236,10 +231,10 @@ Các lớp test:
 
 - `InventoryServiceApplicationTests`: HTTP health smoke test độc lập DB/RabbitMQ, không chứng minh nghiệp vụ Reserve.
 - `InventoryServiceTests`: unit test gộp/sắp SKU, dữ liệu sai, tràn lượng, command/key không hợp lệ và validation trước khi truy cập Repository.
-- `InventoryReserveIntegrationTests`: HTTP thật + PostgreSQL riêng; Reserve theo caller ID, store isolation, rejection, replay/conflict, lookup theo ID/Order/key, validation, 12 request tranh tồn và 12 request trùng đồng thời. Kiểm tra migration V001 → V002 giữ dữ liệu cũ.
+- `InventoryReserveIntegrationTests`: HTTP thật + PostgreSQL riêng; Reserve theo caller ID, store isolation, rejection, replay/conflict, lookup theo ID/Order/key, validation, 12 request tranh tồn và 12 request trùng đồng thời. Kiểm tra nâng cấp từ V001 đến migration hiện tại giữ dữ liệu cũ.
 - `InventoryRollbackTests`: PostgreSQL 16 riêng bằng Testcontainers, Flyway chạy migration thật. Constraint chỉ trong DB test gây lỗi ở dòng Reservation thứ hai sau khi đã cập nhật tồn và ghi header/dòng đầu. Test xác minh toàn bộ tồn kho, Reservation, items, guard rollback và retry cùng Order/key thành công.
 - `InventoryLifecycleServiceTests`: validation Release/Cancel trước khi truy cập DB.
-- `InventoryLifecycleIntegrationTests`: Release/Cancel, snapshot Reserve sau Release, sai Order, thiếu Reservation, conflict, request đồng thời, rollback khi lưu snapshot, đọc kết quả bằng repository mới và nâng cấp V002 → V003.
+- `InventoryLifecycleIntegrationTests`: Release/Cancel, snapshot Reserve sau Release, sai Order, thiếu Reservation, conflict, request đồng thời, rollback khi lưu snapshot, đọc kết quả bằng repository mới nâng cấp V002–V005, response nội bộ, tracing, HTTP Cancel/Release/Reserve đến muộn.
 
 Chạy riêng rollback:
 
@@ -258,6 +253,14 @@ mvn -pl inventory-service "-Dtest=InventoryServiceTests" test
 V002 nâng cấp database demo đã có, không sửa V001 hoặc xóa volume. Giữ nguyên tồn và Reservation cũ; payload mới bắt buộc SKU/store/caller ID. Request mẫu productId trước đây không còn hợp lệ. Dữ liệu V001 vẫn query được; không replay hash legacy bằng payload contract mới. Các Order test mới dùng ID mới và lượng tồn hiện tại, không mặc định tồn quay về 10.
 
 V003 thêm inventory_operations, dấu hủy và released_at. Backfill response Reserve từ resource RESERVED/REJECTED có thể xác minh, giữ hash cũ. Không dựng response RESERVED giả cho dữ liệu đã RELEASED từ bên ngoài. Replay thiếu lịch sử gốc trả 409 RESERVE_HISTORY_UNAVAILABLE; Release legacy thiếu timestamp trả 409 RELEASE_HISTORY_UNAVAILABLE. Trường hợp này phải điều tra dữ liệu thay vì tạo tác dụng mới.
+
+V004 mở rộng cột key lên 512 ký tự. V005 đổi Order/Reservation ID và các cột FK
+sang VARCHAR(128); UUID dạng chuỗi vẫn giữ nguyên, hash và snapshot cũ không bị
+ghi lại. Không sửa migration đã chạy hoặc xóa volume để nâng cấp.
+
+Kết quả gần nhất được cung cấp ngày 2026-11-03: **134 test, 0 failure/error/skipped,
+BUILD SUCCESS**. Chi tiết phạm vi và phần còn thiếu ở
+[mục 10–11 của contract](../docs/architecture/14-inventory-api-contract.md#10-migration-và-bằng-chứng-kiểm-thử).
 
 Chạy riêng test #29:
 
