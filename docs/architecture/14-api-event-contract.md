@@ -54,7 +54,7 @@ Order Service không phát `OrderCreated` trong contract domain event tối thi�
 | Kiểu logic | Kiểu JSON | Quy tắc |
 |---|---|---|
 | Identifier | string | Không rỗng, tối đa 128 ký tự; dạng `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`; ID do service sở hữu tài nguyên sinh. |
-| Idempotency key | header string | Bắt buộc với POST có tác dụng phụ; 1–128 ký tự ASCII, không có khoảng trắng; giữ nguyên khi retry cùng hành động. |
+| Idempotency key | header string | Bắt buộc với POST có tác dụng phụ; 1–512 ký tự ASCII hiển thị được, không có khoảng trắng hoặc ký tự điều khiển; giữ nguyên khi retry cùng hành động. |
 | commandId / correlationId | string | Không rỗng, tối đa 128 ký tự; UUID hoặc mã tracing hợp lệ. |
 | quantity | integer | Số nguyên dương; không chấp nhận float, chuỗi số, 0 hoặc âm; giới hạn tối đa cấu hình. |
 | amount | decimal string | Khớp toàn bộ chuỗi theo regex `^(0\|[1-9][0-9]{0,11})(\.[0-9]{1,2})?$`; giá trị lớn hơn 0; không dùng float/double. |
@@ -63,6 +63,8 @@ Order Service không phát `OrderCreated` trong contract domain event tối thi�
 | enum/status | string | Chỉ nhận tập giá trị được endpoint/state machine công bố. |
 
 Quy tắc `items`: mảng bắt buộc, không rỗng, 1–100 phần tử; mỗi phần tử có `productId` hợp lệ và `quantity` integer dương; `productId` không trùng trong request (client phải gộp các dòng trùng); tổng quantity theo sản phẩm không vượt giới hạn cấu hình.
+
+Key nội bộ giữ nguyên công thức tại mục 10.1, không cắt ngắn. Với ID tối đa 128 ký tự, key Release dài tối đa 278 ký tự và Refund 275 ký tự, đều nằm trong giới hạn 512. Validation HTTP và cột lưu key phải hỗ trợ cùng giới hạn này. Khi đưa key vào path tra cứu, client percent-encode toàn bộ key như một path segment; server giải mã trước khi so khớp key gốc.
 
 ### 3.2. Header chuẩn
 
@@ -202,7 +204,19 @@ Các API này là internal API, chỉ Order Service/Saga Orchestrator được g
 
 ### 5.1. Reserve Inventory
 
-**Schema request:** `commandId: string`, `orderId: string ID`, `correlationId: string` bắt buộc; `items` bắt buộc 1–100 phần tử, không rỗng; `items[].productId: string ID` không trùng; `items[].quantity: integer > 0`. **Response:** `reservationId: string ID` khi RESERVED; `orderId: string ID`; `status: RESERVED|REJECTED`; `reservedAt: ISO-8601 UTC|null`; `reasonCode: string|null`.
+**Schema request:** `commandId: string`, `orderId: string ID`, `correlationId: string` bắt buộc; `items` bắt buộc 1–100 phần tử, không rỗng; `items[].productId: string ID` không trùng; `items[].quantity: integer > 0`. Các trường request đều bắt buộc, không được null; áp dụng validation mục 3.1.1.
+
+**Schema response Reserve:** Tất cả trường dưới đây bắt buộc có mặt.
+
+| Trường | Kiểu | Null / quy tắc |
+|---|---|---|
+| `reservationId` | Identifier hoặc null | Có giá trị khi `RESERVED`; null khi `REJECTED` |
+| `orderId` | Identifier | Không null; đúng Order trong request |
+| `status` | string | Không null; `RESERVED` hoặc `REJECTED` |
+| `reservedAt` | ISO-8601 UTC hoặc null | Thời điểm giữ hàng khi `RESERVED`; null khi `REJECTED` |
+| `reasonCode` | string hoặc null | Null khi `RESERVED`; khi `REJECTED` bắt buộc là một mã bên dưới |
+
+Mã từ chối: `INVENTORY_NOT_AVAILABLE` (thiếu tồn kho), `PRODUCT_NOT_FOUND` (sản phẩm hợp lệ về định dạng nhưng không tồn tại), `ORDER_ALREADY_RELEASED` (Order đã được Inventory ghi nhận release, không giữ hàng lại). JSON/field sai định dạng trả `400 VALIDATION_ERROR`, không dùng `REJECTED`. Kết quả từ chối phải được lưu theo reserve key để retry/query trả được kết quả đã xác minh.
 
 | Thuộc tính | Đặc tả |
 |---|---|
@@ -236,7 +250,8 @@ Response mẫu:
   "reservationId": "RSV-001",
   "orderId": "ORD-001",
   "status": "RESERVED",
-  "reservedAt": "2026-10-29T10:00:02Z"
+  "reservedAt": "2026-10-29T10:00:02Z",
+  "reasonCode": null
 }
 ```
 
@@ -247,9 +262,21 @@ Quy tắc:
 - Nếu reserve timeout, không gửi release khi chưa xác minh kết quả reserve; query bằng key ổn định trước.
 - Inventory phải xử lý quy tắc reserve đến muộn sau release của cùng Order theo D-01.5/A-13; chi tiết triển khai cần Dev xác nhận.
 
+Response khi không đủ tồn kho (`200 OK`):
+
+```json
+{
+  "reservationId": null,
+  "orderId": "ORD-002",
+  "status": "REJECTED",
+  "reservedAt": null,
+  "reasonCode": "INVENTORY_NOT_AVAILABLE"
+}
+```
+
 ### 5.2. Tra cứu Reservation
 
-**Schema response:** `reservationId: string ID` nếu tồn tại; `orderId: string ID`; `status: RESERVED|RELEASED|REJECTED|UNKNOWN`; `idempotencyKey: string`. Path `orderId` theo Identifier.
+**Schema response:** `reservationId: Identifier|null`, `orderId: Identifier`, `status: RESERVED|RELEASED|REJECTED|UNKNOWN`, `idempotencyKey: string`, `reasonCode: string|null` đều bắt buộc có mặt. `orderId`, `status`, `idempotencyKey` không null. `reservationId` không null khi `RESERVED/RELEASED`, null khi `REJECTED`; khi `UNKNOWN`, trả ID nếu đã biết, nếu chưa thì null. `reasonCode` dùng enum mục 5.1 khi `REJECTED`, null ở các trạng thái khác. Chỉ trả `UNKNOWN` nếu Inventory có bản ghi đang cần xác minh; không có bản ghi thì trả `404`. Path `orderId` theo Identifier.
 
 | Thuộc tính | Đặc tả |
 |---|---|
@@ -266,7 +293,8 @@ Response mẫu:
   "reservationId": "RSV-001",
   "orderId": "ORD-001",
   "status": "RESERVED",
-  "idempotencyKey": "reserve:ORD-001:v1"
+  "idempotencyKey": "reserve:ORD-001:v1",
+  "reasonCode": null
 }
 ```
 
@@ -274,7 +302,7 @@ Nếu không tìm thấy bản ghi theo `orderId`, trả `404 RESERVATION_NOT_FO
 
 ### 5.3. Release Inventory
 
-**Schema request:** `commandId: string`, `orderId: string ID`, `correlationId: string` bắt buộc. **Response:** `reservationId/orderId: string ID`; `status: RELEASED|ALREADY_RELEASED`; `releasedAt: ISO-8601 UTC` khi đã release. Path reservationId theo Identifier.
+**Schema request:** `commandId: string`, `orderId: string ID`, `correlationId: string` bắt buộc. Mọi trường request bắt buộc, không null. **Response:** `reservationId/orderId: Identifier`, `status: RELEASED`, `releasedAt: ISO-8601 UTC` đều bắt buộc, không null. Path `reservationId` theo Identifier. Chỉ dùng `RELEASED`, không có status `ALREADY_RELEASED`: release lại reservation đã giải phóng vẫn trả `200 RELEASED`, giữ nguyên `releasedAt` lần đầu và không tăng tồn kho lần nữa.
 
 | Thuộc tính | Đặc tả |
 |---|---|
@@ -586,7 +614,8 @@ Envelope JSON thống nhất:
   "producer": "order-service",
   "payload": {
     "orderId": "ORD-001",
-    "status": "CONFIRMED"
+    "status": "CONFIRMED",
+    "confirmedAt": "2026-10-29T10:00:06Z"
   }
 }
 ```
@@ -610,7 +639,26 @@ Quy tắc:
 - Không đưa dữ liệu nhạy cảm hoặc thông tin thanh toán không cần thiết vào event.
 - Payload chỉ chứa dữ liệu cần cho consumer; Notification Service không được tự suy diễn trạng thái từ một event khác.
 
-### 8.3. Payload mẫu
+### 8.3. Schema payload và ví dụ
+
+Các trường được liệt kê dưới đây đều bắt buộc và không được null. Field bổ sung optional tuân theo mục 11. `orderId` theo Identifier tại mục 3.1.1; timestamp phải là ISO-8601 UTC. Envelope phiên bản này dùng `schemaVersion = 1`, `producer = order-service`; chỉ `commandId` được null.
+
+| Event | Trường payload | Kiểu / giá trị |
+|---|---|---|
+| `OrderConfirmed` | `orderId` | Identifier |
+| `OrderConfirmed` | `status` | Hằng `CONFIRMED` |
+| `OrderConfirmed` | `confirmedAt` | ISO-8601 UTC; thời điểm Order chuyển CONFIRMED |
+| `OrderFailed` | `orderId` | Identifier |
+| `OrderFailed` | `status` | Hằng `FAILED` |
+| `OrderFailed` | `failedAt` | ISO-8601 UTC; thời điểm Order chuyển FAILED |
+| `OrderFailed` | `reasonCode` | `INVENTORY_REJECTED` hoặc `PAYMENT_FAILED` |
+| `OrderExpired` | `orderId` | Identifier |
+| `OrderExpired` | `status` | Hằng `EXPIRED` |
+| `OrderExpired` | `expiredAt` | ISO-8601 UTC; thời điểm chốt EXPIRED, không phải hạn expireAt |
+
+`INVENTORY_REJECTED` ứng với nhánh thất bại do Reserve bị từ chối đã xác minh (T-02); `PAYMENT_FAILED` ứng với Capture thất bại đã xác minh (T-03). Lưu nguyên nhân khi claim nhánh thất bại và giữ nguyên qua compensation. Timeout, retry vượt ngưỡng hoặc compensation chưa xong không được biến thành lý do phát `OrderFailed`.
+
+`occurredAt` bằng timestamp chuyển trạng thái trong payload. Producer kiểm tra eventType/status/timestamp khớp nhau trước khi ghi Outbox; consumer kiểm tra schema trước khi xử lý. Thiếu field bắt buộc, null sai quy định hoặc enum không hỗ trợ phải cách ly/ghi lỗi theo mục 10, không tự suy diễn.
 
 **OrderConfirmed**
 
@@ -670,7 +718,7 @@ Quy tắc:
 }
 ```
 
-Các giá trị ID và timestamp trong ví dụ chỉ minh họa cấu trúc, không phải dữ liệu cố định. `reasonCode` cần được thống nhất thành enum trong schema triển khai.
+Các giá trị ID và timestamp trong ví dụ chỉ minh họa cấu trúc, không phải dữ liệu cố định. Enum `reasonCode` được quy định tại mục 8.3; thêm giá trị phải tuân theo quy tắc tiến hóa schema tại mục 11.
 
 ## 9. Quy tắc Outbox, Inbox và xử lý trùng
 
