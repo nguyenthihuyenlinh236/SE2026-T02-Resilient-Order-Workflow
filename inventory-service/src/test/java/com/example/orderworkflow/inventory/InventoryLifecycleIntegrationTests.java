@@ -94,6 +94,40 @@ class InventoryLifecycleIntegrationTests {
         assertThat(operation.getBody().completedAt()).isNotNull();
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"/api/v1/inventory", "/internal/v1"})
+    void reservationRoutesSupportReserveLookupReleaseAndReplay(String prefix) {
+        var request = reserveRequest();
+        var reserved = http.exchange(prefix + "/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), Reservation.class);
+        assertThat(reserved.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(reserved.getBody().status()).isEqualTo("RESERVED");
+        var found = http.getForEntity(prefix + "/reservations/by-order/" + request.orderId(), Reservation.class);
+        assertThat(found.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(found.getBody()).isEqualTo(reserved.getBody());
+        var body = new ReleaseRequest(request.orderId(), request.reservationId(), "FAILED");
+        var released = http.exchange(prefix + "/reservations/" + request.reservationId() + "/release",
+                HttpMethod.POST, entity(body, releaseKey(request)), ReleaseResult.class);
+        assertThat(released.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(released.getBody().status()).isEqualTo("RELEASED");
+        var replay = http.exchange(prefix + "/reservations", HttpMethod.POST,
+                entity(request, reserveKey(request)), Reservation.class);
+        assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(replay.getBody()).isEqualTo(reserved.getBody());
+        var current = http.getForEntity(prefix + "/reservations/by-order/" + request.orderId(), Reservation.class);
+        assertThat(current.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(current.getBody().status()).isEqualTo("RELEASED");
+        assertStock(0);
+        assertThat(count("inventory_operations")).isEqualTo(2);
+    }
+
+    @Test
+    void internalLookupReturns404ForUnknownOrder() {
+        var response = http.getForEntity("/internal/v1/reservations/by-order/" + UUID.randomUUID(), ApiError.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(response.getBody().code()).isEqualTo("RESERVATION_NOT_FOUND");
+    }
+
     @Test
     void changedReleaseReasonIsConflictWithoutSecondStockReturn() {
         var request = reserveRequest();

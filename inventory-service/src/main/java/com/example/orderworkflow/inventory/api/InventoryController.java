@@ -11,7 +11,7 @@ import com.example.orderworkflow.inventory.service.InventoryException;
 import com.example.orderworkflow.inventory.service.InventoryLifecycleService;
 
 @RestController
-@RequestMapping("/api/v1/inventory")
+@RequestMapping({"/api/v1/inventory", "/internal/v1"})
 public class InventoryController {
     private final InventoryService service;
     private final InventoryLifecycleService lifecycle;
@@ -52,6 +52,9 @@ public class InventoryController {
 
     @GetMapping("/reservations/{reservationId}")
     public Reservation reservation(@PathVariable UUID reservationId) { return service.reservation(reservationId); }
+
+    @GetMapping("/reservations/by-order/{orderId}")
+    public Reservation reservationByOrder(@PathVariable UUID orderId) { return service.lookup(orderId, null); }
 
     @GetMapping("/reservations")
     public Reservation lookup(@RequestParam(required = false) UUID orderId,

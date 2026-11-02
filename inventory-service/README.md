@@ -30,6 +30,13 @@ Flyway tự chạy migration khi khởi động. Profile `demo` nạp hai sản 
 
 ## 2. API
 
+Đồng bộ từng bước với PR #39: các endpoint bên dưới hiện cũng nhận prefix
+`/internal/v1` thay cho `/api/v1/inventory`. Bổ sung tra cứu
+`GET /internal/v1/reservations/by-order/{orderId}` (không có bản ghi trả 404).
+Bước này chỉ bổ sung đường dẫn; request/response vẫn dùng schema hiện tại của
+#28–#29, chưa phải toàn bộ schema đề xuất trong #39. Tra cứu Reservation trả
+trạng thái hiện tại; retry Reserve cùng key và payload trả kết quả lệnh gốc.
+
 | Method | Path | Kết quả |
 |---|---|---|
 | POST | `/api/v1/inventory/reservations` | RESERVED hoặc REJECTED; HTTP 200 cho kết quả nghiệp vụ xác định |
