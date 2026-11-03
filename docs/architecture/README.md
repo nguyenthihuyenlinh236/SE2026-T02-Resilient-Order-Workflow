@@ -13,6 +13,10 @@ Tài liệu tập trung vào cách các thành phần phối hợp để xử l�
 | [11-sequence-diagrams.md](11-sequence-diagrams.md) | Biểu đồ tuần tự mô tả tương tác giữa các service và các nhánh lỗi |
 | [12-acceptance-criteria.md](12-acceptance-criteria.md) | Acceptance Criteria theo Given–When–Then, liên kết với Use Case và yêu cầu |
 
+## Thiết kế phục hồi Saga
+
+- [16-saga-persistence-and-recovery.md](16-saga-persistence-and-recovery.md): dữ liệu lưu bền vững, transaction boundary, claim/lease, ma trận crash và các quyết định cần thống nhất của Issue #22.
+
 ## Phạm vi kiến trúc
 
 Các thành phần và cơ chế được mô tả trong nhóm tài liệu này gồm:
