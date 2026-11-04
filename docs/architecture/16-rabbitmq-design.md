@@ -184,3 +184,51 @@ Outbox chưa publish, Inbox còn bảo vệ replay, task chưa hoàn tất và b
 Metrics: số/tuổi Outbox NEW, confirm timeout/nack/return, queue ready/unacked, redelivery, consumer count, task pending/retry/unknown, tuổi task, số bản cách ly, disk/memory alarms. Cảnh báo khi không có consumer mà queue tăng, background retry phát sinh hoặc lỗi schema/identity. Giá trị ngưỡng theo môi trường, không tự gán tham số bài cá nhân.
 
 Provision topology bằng identity riêng. Runtime Order chỉ publish exchange đã cho phép, Notification consume queue đã cho phép; không cấp quyền đọc DB xuyên service. TLS và secret ngoài repo khi triển khai ngoài local. Readiness kiểm tra đúng queue type, arguments và ba binding; ping broker khỏe không chứng minh routing đúng.
+
+## 10. Ma trận kiểm chứng cho issue triển khai
+
+| ID | Kịch bản | Kết quả bắt buộc |
+|---|---|---|
+| MQ-01 | Phát từng event hợp lệ | Đúng routing key/queue; đủ một tác vụ logic/event/channel |
+| MQ-02 | Routing key không có binding | basic.return dù có confirm; Outbox không PUBLISHED |
+| MQ-03 | Broker nack hoặc confirm timeout | Event còn NEW, ID/payload giữ nguyên |
+| MQ-04 | Crash sau publish trước mark | Duplicate xuất hiện; không tạo task logic thứ hai |
+| MQ-05 | Crash trước/sau commit Inbox | Trước: redelivery xử lý; sau: dedupe và ACK |
+| MQ-06 | Hai replica cùng eventId | Unique phân xử, một bộ task; không mất event |
+| MQ-07 | Cùng ID khác payload | Cách ly, không ghi đè hoặc gửi tác dụng thứ hai |
+| MQ-08 | DB consumer ngừng lâu, nhiều lần restart | Không ACK sớm, không hot loop, không tự drop do delivery-limit |
+| MQ-09 | Notification endpoint ngừng qua 8 lần | Retry nền 60 giây, restart không reset; Order không đổi |
+| MQ-10 | Schema sai/version chưa hỗ trợ, kho cách ly lỗi | Không mất raw event; chỉ ACK sau lưu bền vững |
+| MQ-11 | Broker restart với volume còn | Event chưa ACK được xử lý lại an toàn |
+| MQ-12 | Queue đạt giới hạn cấu hình | Reject publish/confirm nack; Outbox giữ event, không drop-head |
+| MQ-13 | Callback muộn/capture UNKNOWN | Không suy kết quả Saga từ broker ACK; không tạo event kết thúc giả |
+| MQ-14 | Worker crash sau gửi trước ghi kết quả | Dùng key cũ, đối soát; ghi rõ giới hạn chống trùng bên ngoài |
+| MQ-15 | Replay event cũ trong cửa sổ retention | Inbox/task dedupe còn hiệu lực |
+| MQ-16 | Đọc ba payload event | eventType/status/occurredAt và reasonCode khớp API Contract |
+
+Kiểm chứng tài liệu: bảng tên và binding nhất quán; JSON mẫu parse được; sơ đồ thể hiện điểm commit/ACK; rà soát từng MQ-01–16 bằng lập luận lỗi. Kiểm chứng runtime phải dùng RabbitMQ/PostgreSQL thật trong issue triển khai; CI Maven hiện tại không chứng minh các kịch bản này.
+
+## 11. Quyết định bàn giao và review còn lại
+
+| Chủ đề | Quyết định của bản thiết kế | Việc cần người phụ trách xác nhận |
+|---|---|---|
+| HTTP hay broker | Saga HTTP; broker chỉ ba event kết thúc | Order/Inventory/Payment đối chiếu PR #41 |
+| Delay/retry | DB scheduler; 8 lần rồi retry nền | Owner Notification xác nhận dữ liệu task/worker |
+| Delivery limit | Vô hạn ở broker demo, pause/backoff và cách ly tại app | Người triển khai pin RabbitMQ và kiểm thử MQ-08 |
+| Notification storage | Kho do Notification sở hữu, Inbox/task/cách ly | Chốt module/deployment và migration ở issue phát triển |
+| HA | Demo một node không bảo đảm mất volume | Nếu cần HA, triển khai cluster và fault test riêng |
+| Review | Tài liệu sẵn sàng review | Chưa thay thế approve của thành viên nhóm |
+
+Giữ đúng tên bàn giao 16-rabbitmq-design.md theo Issue #24. File 16-saga-persistence-and-recovery.md ở PR #40 là tài liệu khác; không ghi đè hoặc đổi tên phần việc của Issue #22.
+
+## 12. Tài liệu tham chiếu
+
+- [Issue #24](https://github.com/nguyenthihuyenlinh236/SE2026-T02-Resilient-Order-Workflow/issues/24).
+- [Design Decisions – D-02, D-03](../requirements/06-design-decisions.md).
+- [State Machine](09-state-machine.md), [Saga Workflow](10-saga-workflow-and-compensation.md), [Sequence Diagrams](11-sequence-diagrams.md).
+- [API/Event Contract – bản đối chiếu 28473fb](https://github.com/nguyenthihuyenlinh236/SE2026-T02-Resilient-Order-Workflow/blob/28473fbceeb41b1c171323426cf2c5684b218c9d/docs/architecture/14-api-event-contract.md) – PR #41 chưa merge tại thời điểm soạn.
+- [Database Design – bản đối chiếu d628fdf](https://github.com/nguyenthihuyenlinh236/SE2026-T02-Resilient-Order-Workflow/blob/d628fdf55aa25f391cdb397b1a643d1dbb378201/docs/architecture/15-database-design.md).
+- [R1 – RabbitMQ: Consumer Acknowledgements and Publisher Confirms](https://www.rabbitmq.com/docs/confirms).
+- [R2 – RabbitMQ: Quorum Queues, data safety và delivery limit](https://www.rabbitmq.com/docs/quorum-queues).
+
+Nguồn RabbitMQ được kiểm tra ngày 2026-11-04; tài liệu online có thể hiển thị phiên bản mới hơn image demo. Trước triển khai phải xác minh trên phiên bản broker đã pin. Các lịch retry, tên topology, schema task và ma trận kiểm chứng là quyết định thiết kế của dự án.
