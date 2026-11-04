@@ -56,7 +56,7 @@ Chỉ chốt `EXPIRED` khi đáp ứng tất cả điều kiện áp dụng:
 5. Nếu payment đã thu tiền nhưng đơn không thể xác nhận, việc hoàn tiền bắt buộc đã được xác minh thành công.
 6. Trạng thái Order và sự kiện `OrderExpired` được ghi bền vững thông qua Outbox trong cùng giao dịch lưu trữ phù hợp.
 
-Nếu compensation chưa hoàn tất, lưu tiến trình bù trừ chưa hoàn tất hoặc trạng thái `COMPENSATION_FAILED`; tiếp tục retry, theo dõi và cảnh báo. Không được chốt `EXPIRED` chỉ vì đã gửi yêu cầu giải phóng hàng hoặc hoàn tiền.
+Nếu compensation chưa hoàn tất, Order giữ `EXPIRING` và lưu tiến trình bù trừ; nếu release/refund lỗi tạm thời vượt ngưỡng thì Saga chuyển `COMPENSATION_FAILED`, khi retry nền Saga trở lại `COMPENSATING`. Order không chuyển sang `COMPENSATION_FAILED` ở nhánh hết hạn; tiếp tục retry, theo dõi và cảnh báo. Không được chốt `EXPIRED` chỉ vì đã gửi yêu cầu giải phóng hàng hoặc hoàn tiền.
 
 ### BR-13.5 – Thanh toán và hết hạn đồng thời
 
