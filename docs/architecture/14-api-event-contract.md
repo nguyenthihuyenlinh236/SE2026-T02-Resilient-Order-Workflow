@@ -140,6 +140,8 @@ Bảng này là checklist triển khai ở mức field-level cho tất cả HTTP
 
 | `POST /internal/v1/orders/{orderId}/cancel` | Path orderId Identifier; header key inventory:cancel:{orderId}:v1; body orderId, reason bắt buộc/non-null theo mục 5.4. | 200; schema Cancel đầy đủ mục 5.4, reservationId nullable chỉ khi NOT_CREATED. | 400 VALIDATION_ERROR/INVALID_IDENTIFIER; 409 IDEMPOTENCY_KEY_CONFLICT; 5xx. |
 
+| `GET /internal/v1/operations?idempotencyKey={key}` | Query key bắt buộc theo mục 5.5; không body/key header. | 200; operation, idempotencyKey, responseCode, responsePayload, completedAt theo mục 5.5. | 400 VALIDATION_ERROR; 404 OPERATION_NOT_FOUND; 5xx. |
+
 ### 3.4.3. Internal API – Payment Service
 
 | Endpoint / method | Input (nguồn; kiểu; bắt buộc/null; validation) | Output 2xx | HTTP error và mã lỗi |
@@ -423,6 +425,47 @@ Cancel và Reserve/Release khóa cùng guard theo Order. Reserve thắng trướ
 
 Cancel chưa có Reservation chỉ tạo guard; GET Reservation vẫn 404. CANCELLATION_RECORDED là kết quả command, không phải trạng thái Reservation/Order. Cancel response là bằng chứng chặn Reserve muộn sau khi đã commit; 404 của GET hoặc Release không thay thế bằng chứng này. Replay Cancel có thể vẫn NOT_CREATED dù Reserve muộn đã tạo bản ghi REJECTED. Orchestrator phải đối chiếu orderId/key, hoàn tất cả nghĩa vụ Payment/Refund trước khi kết thúc Saga.
 
+### 5.5. Tra cứu snapshot command Inventory
+
+`GET /internal/v1/operations?idempotencyKey={key}`. Không body/Idempotency-Key header; X-Correlation-Id bắt buộc. Query key percent-encode như một query value, decode rồi validate 1–512 ASCII hiển thị không whitespace. Không tìm thấy kết quả đã commit trả 404 OPERATION_NOT_FOUND; lỗi validation 400 VALIDATION_ERROR; 5xx không có nghĩa command thất bại.
+
+| Field response | Kiểu / quy tắc |
+|---|---|
+| operation | RESERVE/RELEASE/CANCEL, bắt buộc/non-null |
+| idempotencyKey | string, bắt buộc/non-null, đúng key đã tìm |
+| responseCode | integer, hằng 200 |
+| responsePayload | object, bắt buộc/non-null; snapshot theo operation bên dưới |
+| completedAt | timestamp UTC, bắt buộc/non-null |
+
+Snapshot lưu trong inventory_operations hiện dùng schema gốc, không phải lúc nào cũng trùng response đã ánh xạ của POST nội bộ:
+
+| Operation | responsePayload: tất cả field bắt buộc có mặt |
+|---|---|
+| RESERVE | reservationId và orderId Identifier non-null (kể cả REJECTED); storeId string; reserveKey string; status RESERVED/REJECTED; rejectionReason null khi RESERVED hoặc INSUFFICIENT_STOCK/PRODUCT_NOT_FOUND/ORDER_CANCELLED khi REJECTED; items gồm sku/quantity đã chuẩn hóa; createdAt timestamp UTC |
+| RELEASE | orderId, reservationId Identifier; idempotencyKey string; status RELEASED; releasedAt timestamp UTC; mọi field non-null |
+| CANCEL | Schema Cancel mục 5.4; reservationId có thể null theo reservationStatus |
+
+```json
+{
+  "operation": "CANCEL",
+  "idempotencyKey": "inventory:cancel:ORD-003:v1",
+  "responseCode": 200,
+  "responsePayload": {
+    "orderId": "ORD-003",
+    "idempotencyKey": "inventory:cancel:ORD-003:v1",
+    "status": "CANCELLATION_RECORDED",
+    "reservationId": null,
+    "reservationStatus": "NOT_CREATED",
+    "cancelledAt": "2026-10-29T10:15:10Z"
+  },
+  "completedAt": "2026-10-29T10:15:10Z"
+}
+```
+
+Caller phải chọn schema theo operation, kiểm tra key và Order ID. POST Reserve nội bộ ánh xạ createdAt → reservedAt khi RESERVED, ẩn ID/thời điểm khi REJECTED và ánh xạ INSUFFICIENT_STOCK → INVENTORY_NOT_AVAILABLE, ORDER_CANCELLED → ORDER_ALREADY_RELEASED; PRODUCT_NOT_FOUND giữ nguyên. Snapshot đã commit không bị sửa khi GET resource chuyển RELEASED. Không lấy snapshot RESERVED cũ làm bằng chứng hiện vẫn giữ hàng.
+
+404 operation chỉ cho biết chưa thấy kết quả tại thời điểm query, không chứng minh lệnh đang bay đã bị hủy. Retry giữ nguyên key/body. Không dùng API cũ và mới luân phiên cho cùng key Release vì hash khác schema.
+
 ## 6. API Contract – Payment Service
 
 Các API này là internal API. Payment Service sở hữu trạng thái capture/refund; Order Service chỉ lưu bản kết quả đã xác minh.
@@ -668,6 +711,7 @@ Các command dưới đây là hành động nghiệp vụ được gọi qua AP
 | `GetReservation` | Inventory | `GET /internal/v1/reservations/by-order/{orderId}` | Không áp dụng (query) |
 | `ReleaseInventory` | Inventory | `POST /internal/v1/reservations/{reservationId}/release` | `inventory:release:{orderId}:{reservationId}:v1` |
 | `CancelInventoryOrder` | Inventory | `POST /internal/v1/orders/{orderId}/cancel` | `inventory:cancel:{orderId}:v1` |
+| `GetInventoryOperation` | Inventory | `GET /internal/v1/operations?idempotencyKey={key}` | Không áp dụng (query) |
 | `CapturePayment` | Payment | `POST /internal/v1/payments/captures` | `payment:capture:{orderId}:v1` |
 | `GetPayment` | Payment | `GET /internal/v1/payments/{paymentId}` hoặc tra cứu theo key | Không áp dụng (query) |
 | `RefundPayment` | Payment | `POST /internal/v1/payments/{paymentId}/refunds` | `payment:refund:{orderId}:{paymentId}:v1` |
@@ -834,7 +878,7 @@ Các giá trị ID và timestamp trong ví dụ chỉ minh họa cấu trúc, kh
 | Reserve | Không đủ tồn kho đã xác minh | Reservation `REJECTED`; claim nhánh thất bại nếu Order còn `PENDING` | Không capture; hoàn tất nhánh thất bại theo State Machine |
 | Capture | Timeout/mất phản hồi | Capture `UNKNOWN`; Saga `RECONCILING` | Query theo paymentId/capture key; không coi là FAILED |
 | Capture | `FAILED` đã xác minh | Capture `FAILED` | Claim nhánh thất bại bằng conditional update; release reservation đã xác minh |
-| Release | Timeout/mất phản hồi | Release `UNKNOWN`; Saga `RECONCILING` | Query/retry cùng release key; không tuyên bố đã release |
+| Release | Timeout/mất phản hồi | Release `UNKNOWN`; Saga `RECONCILING` | GET operation theo release key hoặc GET Reservation theo orderId; retry nguyên body/key, không tuyên bố đã release khi chưa xác minh |
 | Cancel | Timeout/mất phản hồi | Bước CANCEL UNKNOWN; giữ nhánh Order đã claim | GET operation theo cancel key hoặc retry nguyên body/key; chưa xác minh thì không chốt đã chặn Reserve muộn |
 | Refund | Timeout/mất phản hồi | Refund `UNKNOWN`; Saga `RECONCILING` | Query theo refundId/refund key; không tạo refund key mới |
 | Refund | `FAILED` đã xác minh | Refund `FAILED`; Saga cần xử lý ngoại lệ/đối soát | Không đánh dấu Saga hoàn tất; xử lý theo Q-08 |
