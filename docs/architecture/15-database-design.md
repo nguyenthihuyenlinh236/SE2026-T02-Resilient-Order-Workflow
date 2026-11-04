@@ -9,6 +9,7 @@ Phạm vi gồm ERD, Data Dictionary, khóa và ràng buộc, index, transaction
 ## 2. Nguyên tắc và quy ước
 
 - Mỗi service sở hữu một database: `order_db`, `inventory_db`, `payment_db`. Chỉ service sở hữu được ghi dữ liệu của mình.
+- Order Service sở hữu `product_catalog` trong `order_db` làm nguồn tên, giá hiện tại, currency và trạng thái cho phép đặt mua. Inventory Service chỉ sở hữu tồn kho và khả năng Reserve; hai phía liên kết logic bằng `(store_id, sku)`.
 - Không tạo Foreign Key, JOIN hoặc transaction xuyên database. Các ID liên service là tham chiếu logic, được kiểm tra qua API/command/event.
 - Order Service lưu bản kết quả đã xác minh từ Inventory và Payment để kiểm tra chuyển trạng thái trong transaction cục bộ.
 - Tên bảng/cột dùng `snake_case`; ID trao đổi Order/Reservation/Payment/Refund và event dùng `varchar(128)` theo Identifier API; ID kỹ thuật cục bộ (Saga, step, attempt, claim, mock transaction) vẫn dùng `uuid`. Khóa idempotency dùng `varchar(512)`; payload hash dùng `char(64)` chứa SHA-256 của payload nghiệp vụ đã chuẩn hóa.
@@ -24,7 +25,8 @@ Identifier có CHECK `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`; UUID dạng chuỗi v�
 
 | Database | Bảng | Trách nhiệm |
 |---|---|---|
-| `order_db` | `orders`, `order_items` | Đơn và các dòng sản phẩm |
+| `order_db` | `product_catalog` | Danh mục sản phẩm, giá hiện tại, currency và trạng thái cho phép đặt mua |
+| `order_db` | `orders`, `order_items` | Đơn và snapshot các dòng sản phẩm tại thời điểm tạo |
 | `order_db` | `sagas`, `saga_steps`, `saga_attempts` | Điều phối, retry, đối soát và lịch sử xử lý |
 | `order_db` | `idempotency_records`, `outbox_events`, `inbox_messages` | Chống trùng và phát/nhận event bền vững |
 | `inventory_db` | `inventory`, `inventory_order_guards` | Tồn kho và bảo vệ trước lệnh đến muộn |
@@ -39,12 +41,21 @@ Một Order có nhiều dòng sản phẩm và một Reservation logic. Capture 
 
 ```mermaid
 erDiagram
+    PRODUCT_CATALOG ||--o{ ORDER_ITEMS : supplies_snapshot
     ORDERS ||--|{ ORDER_ITEMS : contains
     ORDERS ||--|| SAGAS : orchestrates
     SAGAS ||--|{ SAGA_STEPS : tracks
     SAGA_STEPS ||--o{ SAGA_ATTEMPTS : records
     ORDERS ||--o{ IDEMPOTENCY_RECORDS : identifies
     ORDERS ||--o{ OUTBOX_EVENTS : emits
+    PRODUCT_CATALOG {
+        varchar store_id PK
+        varchar sku PK
+        varchar product_name
+        numeric unit_price
+        varchar currency
+        boolean active
+    }
     ORDERS {
         varchar order_id PK
         varchar store_id
@@ -77,9 +88,25 @@ erDiagram
     }
 ```
 
-Inbox không có FK tới Order vì có thể tiếp nhận event sai tham chiếu cần cách ly. ERD chỉ thể hiện quan hệ trong `order_db`.
+Quan hệ `PRODUCT_CATALOG`–`ORDER_ITEMS` biểu diễn bước tra cứu và chốt snapshot bằng cặp `(orders.store_id, order_items.sku)`, không phải FK: Order đã tạo phải giữ được snapshot ngay cả khi sản phẩm đổi giá hoặc ngừng bán. Inbox không có FK tới Order vì có thể tiếp nhận event sai tham chiếu cần cách ly. ERD chỉ thể hiện quan hệ trong `order_db`.
 
-### 4.2. Bảng `orders`
+### 4.2. Bảng `product_catalog`
+
+| Cột | Kiểu | Ràng buộc / mặc định | Ý nghĩa |
+|---|---|---|---|
+| `store_id` | `varchar(100)` | PK thành phần, NOT NULL, CHECK không trắng | Cửa hàng bán sản phẩm |
+| `sku` | `varchar(128)` | PK thành phần, NOT NULL, CHECK không trắng | Mã sản phẩm trong cửa hàng, phân biệt hoa/thường |
+| `product_name` | `varchar(255)` | NOT NULL, CHECK không trắng | Tên sản phẩm phục vụ đặt hàng |
+| `unit_price` | `numeric(19,2)` | NOT NULL, CHECK > 0 | Đơn giá hiện tại |
+| `currency` | `varchar(3)` | NOT NULL, CHECK `^[A-Z]{3}$` | Mã tiền tệ viết hoa gồm ba chữ cái ASCII |
+| `active` | `boolean` | NOT NULL, default true | Sản phẩm hiện được phép đặt mua |
+| `created_at`, `updated_at` | `timestamptz` | NOT NULL | Thời điểm tạo/cập nhật danh mục |
+
+PRIMARY KEY `(store_id, sku)` đồng thời phục vụ truy vấn một hoặc nhiều SKU trong cùng store bằng điều kiện `store_id = ? AND sku IN (...)`. Các CHECK được đặt tên rõ ràng khi triển khai: `length(btrim(store_id)) > 0`, `length(btrim(sku)) > 0`, `length(btrim(product_name)) > 0`, `unit_price > 0`, currency khớp `^[A-Z]{3}$`, và `updated_at >= created_at`. CHECK không sửa dữ liệu đầu vào: SKU hợp lệ được lưu nguyên ký tự, phân biệt hoa/thường; service không tự trim, đổi hoa/thường hoặc chuẩn hóa SKU.
+
+Không tạo FK hoặc JOIN sang `inventory_db`. Cặp `(store_id, sku)` phải có cùng giá trị ở Catalog và Inventory, nhưng mỗi service tự xác minh phần dữ liệu mình sở hữu. Bảng chỉ chứa dữ liệu trực tiếp cần để tạo Order; quản trị danh mục, lịch sử giá và khuyến mãi nằm ngoài phạm vi.
+
+### 4.3. Bảng `orders`
 
 | Cột | Kiểu | Ràng buộc / mặc định | Ý nghĩa |
 |---|---|---|---|
@@ -119,7 +146,7 @@ Capture: `NOT_STARTED`, `IN_PROGRESS`, `SUCCEEDED`, `FAILED`, `UNKNOWN`. Refund:
 
 CHECK bảo đảm `terminal_at` và timestamp tương ứng tồn tại khi Order ở trạng thái cuối. Với trạng thái trung gian, `terminal_at` là NULL. Ba cột claim cùng NULL hoặc cùng có giá trị, với `lease_until > claimed_at`.
 
-### 4.3. Bảng `order_items`
+### 4.4. Bảng `order_items`
 
 | Cột | Kiểu | Ràng buộc / mặc định | Ý nghĩa |
 |---|---|---|---|
@@ -131,7 +158,7 @@ CHECK bảo đảm `terminal_at` và timestamp tương ứng tồn tại khi Ord
 
 PK `(order_id, sku)` loại bỏ dòng SKU trùng trong một Order; mỗi Order thuộc một `orders.store_id`. Request được gộp các dòng trùng SKU và chuẩn hóa trước khi hash. Trong transaction tạo Order, xác minh có ít nhất một dòng và `total_amount = SUM(quantity * unit_price)`. Đây là kiểm tra nhiều dòng trong nghiệp vụ, không dùng CHECK truy vấn bảng khác. Dữ liệu giá được cố định khi tiếp nhận, không cập nhật theo giá sản phẩm về sau.
 
-#### 4.3.1. Ánh xạ Order–Inventory và phục hồi Reserve
+#### 4.4.1. Ánh xạ Order–Inventory và phục hồi Reserve
 
 - Client bắt buộc gửi customerId, storeId và items[{sku, quantity}]. StoreId không trắng, tối đa 100 ký tự; không chọn kho mặc định ngầm. Order lưu customerId cùng snapshot cửa hàng và SKU trước khi chấp nhận.
 - `order_items.sku` lưu nguyên SKU đã xác thực từ request (tối đa 128 ký tự, phân biệt hoa/thường, không tự trim); quantity lưu tổng sau gộp. Với một Order, cặp `(orders.store_id, order_items.sku)` là định danh logic dùng để yêu cầu giữ hàng.
@@ -140,7 +167,7 @@ PK `(order_id, sku)` loại bỏ dòng SKU trùng trong một Order; mỗi Order
 - Sau restart, worker đọc bước đã lưu, query Reservation theo orderId và đối chiếu idempotencyKey; cần snapshot gốc thì dùng GET /internal/v1/operations?idempotencyKey={key}; chỉ gửi lại cùng payload/key khi cần. Không sinh reservationId mới, đổi store theo cấu hình mới, tra danh mục hiện tại để dựng lại SKU hoặc thay đổi số lượng. Hash được tính từ cùng dữ liệu nghiệp vụ đã chuẩn hóa; metadata retry không làm đổi hash. Order/items và payload của bước Reserve không được sửa sau khi lệnh đã có thể được gửi.
 - Nếu worker tiếp quản khi Order đã rời PENDING, không gửi Reserve mới; tiếp tục đối soát hoặc nhánh bù trừ theo State Machine. Các tham chiếu product_id là thông tin bổ sung, không phải nguồn tái dựng lệnh.
 
-### 4.4. Bảng `sagas`
+### 4.5. Bảng `sagas`
 
 | Cột | Kiểu | Ràng buộc / mặc định | Ý nghĩa |
 |---|---|---|---|
@@ -158,7 +185,7 @@ Saga có các trạng thái `RUNNING`, `RECONCILING`, `RECONCILIATION_REQUIRED`,
 
 Khi Capture thành công được phát hiện sau `EXPIRED`, giữ Order `EXPIRED`; dùng lại Saga để theo dõi Refund muộn, chuyển `COMPLETED → COMPENSATING` và xóa `completed_at` trong khi xử lý. Khi Refund hoàn tất mới đặt lại `completed_at`. Không tạo Saga thứ hai hoặc phát `OrderConfirmed`.
 
-### 4.5. Bảng `saga_steps`
+### 4.6. Bảng `saga_steps`
 
 | Cột | Kiểu | Ràng buộc / mặc định | Ý nghĩa |
 |---|---|---|---|
@@ -182,7 +209,7 @@ Khi Capture thành công được phát hiện sau `EXPIRED`, giữ Order `EXPIR
 
 `UNIQUE(saga_id, operation)` bảo đảm một tác dụng mỗi loại trong demo v1. `FAILED` ở đây là kết quả nghiệp vụ đã xác minh; lỗi mạng ghi `last_error` và lịch retry/đối soát, không tự biến thành kết quả cuối.
 
-### 4.6. Bảng `saga_attempts`
+### 4.7. Bảng `saga_attempts`
 
 | Cột | Kiểu | Ràng buộc | Ý nghĩa |
 |---|---|---|---|
@@ -510,6 +537,7 @@ Ngoài PK/UNIQUE tự tạo index, bổ sung các index theo truy vấn:
 
 | Database / bảng | Index | Truy vấn phục vụ |
 |---|---|---|
+| product_catalog | PK `(store_id, sku)` | Lấy đồng thời toàn bộ SKU của một Order trong đúng store; không cần index riêng trùng PK |
 | orders | `(expire_at, order_id) WHERE status = 'PENDING'` | Quét Order đến hạn |
 | orders | `(lease_until, order_id) WHERE status = 'EXPIRING'` | Tiếp quản hết lease |
 | orders | `(terminal_at) WHERE terminal_at IS NOT NULL` | Ứng viên retention |
@@ -577,7 +605,7 @@ Sử dụng Flyway với migration SQL có phiên bản, mỗi service quản l�
 
 | Database | Thứ tự |
 |---|---|
-| order_db | orders → order_items/sagas → saga_steps → saga_attempts → idempotency/outbox/inbox → index |
+| order_db | product_catalog → orders → order_items/sagas → saga_steps → saga_attempts → idempotency/outbox/inbox → index |
 | inventory_db | inventory → inventory_order_guards → reservations → reservation_items → inventory_operations → index |
 | payment_db | captures → refunds → idempotency → index |
 
