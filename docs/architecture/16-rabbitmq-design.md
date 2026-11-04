@@ -143,3 +143,22 @@ Inbox unique (consumer_name, event_id); lưu canonical hash của toàn envelope
 Notification task unique (event_id, notification_type, channel), key notification:{eventId}:{notificationType}:{channel}. Inbox tiếp nhận và mọi task dự kiến phải cùng commit. Inbox processed_at biểu thị hoàn tất tiếp nhận/tạo task, không biểu thị đã gửi ra ngoài. Replica không dùng consumerName riêng để né dedupe.
 
 Kho cách ly do Notification sở hữu, không phải DLQ RabbitMQ hay trạng thái DEAD_LETTER của notification. Lưu raw body (giới hạn theo chính sách kích thước), thuộc tính cần thiết, fingerprint, eventId nếu parse được, lỗi và timestamp; không chỉ ghi log rồi ACK. Raw body vượt giới hạn phải được lưu đủ vào kho bền vững có tham chiếu trước ACK hoặc dừng nhận, không cắt mất bản gốc rồi báo đã lưu. Khi kho này cũng lỗi, giữ delivery chưa ACK và pause. Sửa consumer rồi replay dữ liệu hợp lệ qua cùng đường validate/dedupe với eventId cũ; event xung đột không tự ghi đè hoặc phát lại mù.
+
+## 8. Retry và phân loại lỗi
+
+Chọn lịch retry trong DB thay vì TTL/DLX hoặc delayed-message plugin. Consumer chỉ tiếp nhận bền vững rồi ACK; worker riêng gửi notification. Vì vậy service ngoài chậm không giữ delivery unacked lâu. Quyết định này thực hiện D-03, không tạo thông báo lần hai chỉ vì Publisher gửi lại event.
+
+| Công việc | Lịch demo (cấu hình được) | Sau ngưỡng |
+|---|---|---|
+| Publish Outbox | 8 lần chính tính cả lần đầu; chờ 1, 2, 4, 8, 16, 32, 60 giây | Giữ NEW; cảnh báo, thử nền mỗi 60 giây |
+| Gửi notification với lỗi tạm thời | 8 lần chính tính cả lần đầu; cùng backoff | Giữ chờ gửi lại; mỗi 60 giây, không đổi Order, không DEAD_LETTER |
+| Tiếp nhận khi DB consumer hỏng | Pause, reconnect/backoff có trần 60 giây | Tiếp tục khi DB khỏe; không tính là lần gửi notification |
+| Schema/identity/payload không hợp lệ | Không retry tác dụng nghiệp vụ | Cách ly, cảnh báo và can thiệp |
+| Lỗi bên ngoài xác định không retry được | Lưu lỗi và chờ can thiệp | Không bỏ task; không tạo khóa mới |
+| Timeout gửi ra ngoài | Lưu kết quả chưa xác định | Query theo key nếu bên nhận hỗ trợ, hoặc retry cùng key; công bố khả năng gửi lặp nếu không hỗ trợ |
+
+Task lưu tối thiểu: eventId, type/channel/key, payload snapshot, status, attempt_count, next_attempt_at, started_at, last_error, provider_reference nếu có, claim_token, lease_until, completed_at. Tên trạng thái cụ thể ánh xạ State Machine khi triển khai; không đưa trạng thái delivery vào Order.status.
+
+Worker claim bằng conditional update/lease; tăng attempt trước gọi mạng, ghi kết quả sau gọi bằng token hợp lệ. Crash khi đang gửi không được coi là chưa gửi: đối soát hoặc retry cùng key. Lưu next_attempt_at theo DB UTC, restart tiếp tục từ lịch đã lưu, không reset bộ đếm hoặc phát dồn toàn bộ lượt bị lỡ. Worker mất lease không được ghi đè kết quả worker mới.
+
+Inbox unique chỉ bảo đảm một tác vụ logic nội bộ. Nếu bên nhận không hỗ trợ idempotency/tra cứu, crash sau gửi trước ghi SENT vẫn có thể tạo thông báo trùng; không tuyên bố exactly-once. Retry notification không rollback Order đã CONFIRMED/FAILED/EXPIRED.
