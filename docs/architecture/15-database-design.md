@@ -84,6 +84,7 @@ Inbox không có FK tới Order vì có thể tiếp nhận event sai tham chi�
 | Cột | Kiểu | Ràng buộc / mặc định | Ý nghĩa |
 |---|---|---|---|
 | `order_id` | `varchar(128)` | PK | Định danh Order |
+| `customer_id` | `varchar(128)` | NOT NULL, Identifier | Snapshot customerId từ Create Order; không dùng thay phạm vi xác thực |
 | `client_id` | `varchar(128)` | NOT NULL | Phạm vi khóa tạo đơn; định danh client, không thay thế xác thực |
 | `store_id` | `varchar(100)` | NOT NULL, không trắng | Snapshot cửa hàng đã xác định khi tiếp nhận Order; nguồn storeId cho Reserve |
 | `status` | `varchar(32)` | NOT NULL, default `PENDING`, CHECK | Trạng thái Order |
@@ -92,7 +93,7 @@ Inbox không có FK tới Order vì có thể tiếp nhận event sai tham chi�
 | `reservation_id` | `varchar(128)` | NOT NULL, UNIQUE | Order Service sinh một lần khi tạo Order, lưu trước khi gửi Reserve; tham chiếu logic Inventory |
 | `reservation_status` | `varchar(32)` | NOT NULL, default `NOT_CREATED`, CHECK | Bản trạng thái Reservation cục bộ |
 | `reservation_verified` | `boolean` | NOT NULL, default false | Kết quả đã được Inventory xác minh |
-| `unknown_operation` | `varchar(16)` | NULL hoặc `RESERVE`/`RELEASE` | Thao tác Reservation cần đối soát |
+| `unknown_operation` | `varchar(16)` | NULL hoặc `RESERVE`/`RELEASE`/`CANCEL` | Thao tác Reservation cần đối soát |
 | `payment_id` | `varchar(128)` | NULL cho đến khi nhận kết quả | Tham chiếu Capture |
 | `capture_status` | `varchar(32)` | NOT NULL, default `NOT_STARTED`, CHECK | Bản trạng thái Capture cục bộ |
 | `capture_verified` | `boolean` | NOT NULL, default false | Kết quả Capture đã xác minh |
@@ -132,11 +133,11 @@ PK `(order_id, sku)` loại bỏ dòng SKU trùng trong một Order; mỗi Order
 
 #### 4.3.1. Ánh xạ Order–Inventory và phục hồi Reserve
 
-- Client gửi `storeId` và `items[{sku, quantity}]` khi đặt hàng. Nếu API tạo Order cho phép thiếu storeId, Order Service chọn cửa hàng mặc định theo cấu hình đã được nhóm thống nhất, kiểm tra không trắng/tối đa 100 ký tự và lưu giá trị cụ thể vào `orders.store_id` trước khi chấp nhận. Không xác định được cửa hàng thì từ chối yêu cầu; không để worker tự chọn mặc định lại sau restart.
+- Client bắt buộc gửi customerId, storeId và items[{sku, quantity}]. StoreId không trắng, tối đa 100 ký tự; không chọn kho mặc định ngầm. Order lưu customerId cùng snapshot cửa hàng và SKU trước khi chấp nhận.
 - `order_items.sku` lưu nguyên SKU đã xác thực từ request (tối đa 128 ký tự, phân biệt hoa/thường, không tự trim); quantity lưu tổng sau gộp. Với một Order, cặp `(orders.store_id, order_items.sku)` là định danh logic dùng để yêu cầu giữ hàng.
 - Inventory phân giải cặp `(store_id, sku)` sang `inventory.product_id` bằng UNIQUE tương ứng trong database của nó. Order không suy ra SKU từ UUID, không JOIN Inventory DB và không cần product_id để gửi Reserve. Cột product_id ở Order chỉ được bổ sung nếu Order nhận được ánh xạ đã xác minh qua API Inventory, ví dụ tra cứu tồn theo store/SKU; có thể để NULL, không giả định luôn tồn tại sản phẩm trước Reserve.
 - Khi tạo Order, Order Service sinh reservationId và ghi Order, items, Saga cùng bước RESERVE với key `reserve:{orderId}:v1` trong transaction cục bộ. `saga_steps.request_payload` lưu snapshot `{"orderId":..., "reservationId":..., "storeId":..., "items":[{"sku":..., "quantity":...}]}` đã gộp/sắp SKU và phiên bản schema của command. Bước đã lưu bền vững trước khi gửi mạng.
-- Sau restart, worker đọc bước đã lưu, query kết quả theo key rồi chỉ gửi lại cùng payload/key khi cần. Không sinh reservationId mới, đổi store theo cấu hình mới, tra danh mục hiện tại để dựng lại SKU hoặc thay đổi số lượng. Hash được tính từ cùng dữ liệu nghiệp vụ đã chuẩn hóa; metadata retry không làm đổi hash. Order/items và payload của bước Reserve không được sửa sau khi lệnh đã có thể được gửi.
+- Sau restart, worker đọc bước đã lưu, query Reservation theo orderId và đối chiếu idempotencyKey; cần snapshot gốc thì dùng GET /internal/v1/operations?idempotencyKey={key}; chỉ gửi lại cùng payload/key khi cần. Không sinh reservationId mới, đổi store theo cấu hình mới, tra danh mục hiện tại để dựng lại SKU hoặc thay đổi số lượng. Hash được tính từ cùng dữ liệu nghiệp vụ đã chuẩn hóa; metadata retry không làm đổi hash. Order/items và payload của bước Reserve không được sửa sau khi lệnh đã có thể được gửi.
 - Nếu worker tiếp quản khi Order đã rời PENDING, không gửi Reserve mới; tiếp tục đối soát hoặc nhánh bù trừ theo State Machine. Các tham chiếu product_id là thông tin bổ sung, không phải nguồn tái dựng lệnh.
 
 ### 4.4. Bảng `sagas`
@@ -147,7 +148,7 @@ PK `(order_id, sku)` loại bỏ dòng SKU trùng trong một Order; mỗi Order
 | `order_id` | `varchar(128)` | NOT NULL, UNIQUE, FK → orders | Một Saga cho một Order |
 | `status` | `varchar(32)` | NOT NULL, default `RUNNING`, CHECK | Tiến trình điều phối |
 | `branch` | `varchar(16)` | NOT NULL, default `FORWARD`, CHECK | `FORWARD`, `FAILURE`, `EXPIRATION` |
-| `current_operation` | `varchar(16)` | NULL hoặc RESERVE/CAPTURE/RELEASE/REFUND | Bước đang xử lý |
+| `current_operation` | `varchar(16)` | NULL hoặc RESERVE/CAPTURE/RELEASE/CANCEL/REFUND | Bước đang xử lý |
 | `last_error` | `text` | NULL khi chưa lỗi | Nguyên nhân lỗi gần nhất |
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | Mốc tạo/cập nhật |
 | `completed_at` | `timestamptz` | NULL khi chưa hoàn tất | Mốc hoàn tất gần nhất |
@@ -163,7 +164,7 @@ Khi Capture thành công được phát hiện sau `EXPIRED`, giữ Order `EXPIR
 |---|---|---|---|
 | `step_id` | `uuid` | PK | Định danh bước |
 | `saga_id` | `uuid` | NOT NULL, FK → sagas | Saga sở hữu |
-| `operation` | `varchar(16)` | NOT NULL, CHECK | RESERVE/CAPTURE/RELEASE/REFUND |
+| `operation` | `varchar(16)` | NOT NULL, CHECK | RESERVE/CAPTURE/RELEASE/CANCEL/REFUND |
 | `idempotency_key` | `varchar(512)` | NOT NULL, UNIQUE | Khóa tác dụng nghiệp vụ |
 | `request_payload` | `jsonb` | NOT NULL | Dữ liệu để gửi lại cùng lệnh |
 | `status` | `varchar(32)` | NOT NULL, CHECK | NOT_STARTED/IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN |
@@ -390,7 +391,7 @@ Thêm `UNIQUE(payment_id, order_id)` trên Capture và FK kép từ Refund để
 
 Trong `order_db`, thêm `order_id varchar(128)` nullable, FK → orders để liên kết yêu cầu tạo đơn thành công. PK `(scope, idempotency_key)` tương ứng `UNIQUE(clientId, idempotencyKey)` cho tạo Order. Với command nội bộ dùng scope cố định của service; không đưa operation vào scope để tránh cùng khóa bị tái sử dụng cho nghiệp vụ khác.
 
-Chuẩn hóa payload bằng cấu trúc JSON cố định, biểu diễn số và danh sách sản phẩm đã gộp/sắp theo SKU. Hash Reserve bao gồm operation, orderId, reservationId, storeId và items; Release gồm operation, hai ID và reason; Cancel gồm operation, orderId và reason. Không ghép chuỗi bằng delimiter có thể xuất hiện trong SKU/storeId. Các lệnh thanh toán còn gồm số tiền/currency; không hash trace ID, thời gian gửi hay số retry. Inventory lưu snapshot ba lệnh trong inventory_operations (mục 5.6); không nhân bản vào idempotency_records hoặc guard.
+Chuẩn hóa payload bằng cấu trúc JSON cố định, biểu diễn số và danh sách sản phẩm đã gộp/sắp theo SKU. Hash Reserve bao gồm operation, orderId, reservationId, storeId và items; Release API cũ gồm operation, hai ID và reason; Release nội bộ dùng discriminator RELEASE_INTERNAL_V1, orderId, reservationId, commandId và correlationId trong body. Cancel gồm operation, orderId và reason. Không ghép chuỗi bằng delimiter có thể xuất hiện trong SKU/storeId. Các lệnh thanh toán còn gồm số tiền/currency; không hash thời gian gửi hay số retry. Ngoại lệ tương thích: Release nội bộ hiện hash cả commandId/correlationId trong body nên phải lưu và replay nguyên body; header tracing không tham gia hash. Inventory lưu snapshot ba lệnh trong inventory_operations (mục 5.6); không nhân bản vào idempotency_records hoặc guard.
 
 Cùng khóa/cùng hash: đọc record đã lưu. Cùng khóa/khác hash: trả `409 IDEMPOTENCY_KEY_CONFLICT`, không đổi dữ liệu. Record `COMPLETED` phải có response code, payload và completed_at. Record `IN_PROGRESS` trả trạng thái đang xử lý hoặc được truy vấn; không cho worker thứ hai thực hiện tác dụng mới. Không coi response tiến trình ban đầu là kết quả cuối và không ghi đè Capture/Refund đã xác minh bằng UNKNOWN.
 
@@ -484,7 +485,7 @@ Release dùng khóa `inventory:release:{orderId}:{reservationId}:v1`, khóa guar
 
 Nếu Reservation đã RELEASED, trả kết quả hiện tại, không cộng hàng lần nữa. Nếu chưa tìm thấy Reservation, không hoàn trả tồn kho và không khẳng định release thành công; tra cứu theo Reserve key hoặc dùng Cancel theo Order.
 
-Không chuyển REJECTED thành RELEASED. Release không tồn tại/sai chủ sở hữu/validation lỗi không commit dấu hủy hoặc snapshot thành công; NOT_FOUND không lưu thành kết quả cuối vì Reserve đang bay có thể xuất hiện sau đó. Cancel trả trạng thái lệnh CANCELLATION_RECORDED và reservationStatus riêng (NOT_CREATED/RELEASED/REJECTED), không tạo trạng thái Reservation mới. GET operation theo key trả snapshot lệnh; GET Reservation trả resource hiện tại. Phần contract HTTP chi tiết được quản lý trong `14-inventory-api-contract.md` ở nhánh Inventory #28.
+Không chuyển REJECTED thành RELEASED. Release không tồn tại/sai chủ sở hữu/validation lỗi không commit dấu hủy hoặc snapshot thành công; NOT_FOUND không lưu thành kết quả cuối vì Reserve đang bay có thể xuất hiện sau đó. Cancel trả trạng thái lệnh CANCELLATION_RECORDED và reservationStatus riêng (NOT_CREATED/RELEASED/REJECTED), không tạo trạng thái Reservation mới. GET operation theo key trả snapshot lệnh; GET Reservation trả resource hiện tại. Contract HTTP thống nhất nằm trong 14-api-event-contract.md, mục 5; tài liệu 14-inventory-api-contract.md trên nhánh Inventory mô tả API cũ và trạng thái triển khai.
 
 Cancel khóa cùng guard rồi ghi dấu hủy. Nếu Reserve đã thắng trước đó, Cancel giải phóng Reservation trong cùng transaction; nếu Cancel thắng trước, Reserve bị từ chối. Tra cứu không thấy Reservation chỉ an toàn để kết thúc khi không còn khả năng Reserve đang bay tạo giữ hàng mới; kết quả Cancel là bằng chứng chặn tác dụng muộn. Gửi lại Cancel cùng khóa khác hash phải xung đột.
 
@@ -521,7 +522,7 @@ TTL mặc định 15 phút, scan 5 giây, lease 30 giây, gia hạn khoảng 10 
 
 | Công việc | Lịch lưu bền vững |
 |---|---|
-| Reserve/Capture/Release/Refund | Tối đa 5 lần gửi chính tính cả lần đầu; backoff 1, 2, 4, 8 giây |
+| Reserve/Capture/Release/Cancel/Refund | Tối đa 5 lần gửi chính tính cả lần đầu; backoff 1, 2, 4, 8 giây |
 | Kết quả UNKNOWN của các thao tác | 12 query mỗi 5 giây, tiếp 18 query mỗi 30 giây; lịch chính tối đa 30 query trong 10 phút |
 | UNKNOWN hết lịch chính | Saga RECONCILIATION_REQUIRED; query nền mỗi 5 phút |
 | Release/Refund lỗi tạm thời vượt ngưỡng | Saga COMPENSATION_FAILED; retry nền mỗi 60 giây |
