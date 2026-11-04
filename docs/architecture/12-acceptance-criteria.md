@@ -201,8 +201,23 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 - Hệ thống sử dụng cùng khóa `inventory:release:{orderId}:{reservationId}:v1` cho cùng một hành động release.
 - Tổng số lần gửi tự động tối đa là 5, tính cả lần gửi đầu tiên; các lần retry dùng backoff cấu hình `1s, 2s, 4s, 8s`.
 - Nếu kết quả release chưa rõ, hệ thống truy vấn bằng khóa ổn định trước khi kết luận; không giả định Reservation đã được giải phóng.
-- Khi đã vượt ngưỡng gửi mà compensation vẫn chưa hoàn tất, Saga được ghi `COMPENSATION_FAILED` và tiếp tục retry nền mỗi 60 giây.
-- Order không được chuyển sang trạng thái kết thúc `FAILED` khi Reservation vẫn chưa được giải quyết. Trạng thái Order trong nhánh thất bại phải tuân theo State Machine; nhánh hết hạn giữ Order ở `EXPIRING` trong khi compensation còn tồn đọng.
+- Nếu release lỗi tạm thời đã xác định vượt ngưỡng gửi, cả Order và Saga chuyển `COMPENSATING → COMPENSATION_FAILED` (T-06, S-07); lưu công việc còn tồn đọng và lịch retry nền mỗi 60 giây. Kết quả `UNKNOWN` phải được đối soát, không áp dụng chuyển trạng thái này chỉ vì hết số lần gửi.
+- Order không được chuyển sang trạng thái kết thúc `FAILED` khi Reservation vẫn chưa được giải quyết. Nhánh hết hạn tuân theo AC-06.5 và giữ Order `EXPIRING`.
+
+### AC-04.3 – Recovery retry compensation ở nhánh thất bại thông thường
+
+**Given**
+- Order và Saga đều `COMPENSATION_FAILED` do release/refund lỗi tạm thời vượt ngưỡng; còn bù trừ bắt buộc chưa hoàn tất.
+
+**When**
+- Đến lịch retry nền mỗi 60 giây và Recovery Worker nhận được quyền xử lý hợp lệ.
+
+**Then**
+- Trước khi retry, cả Order và Saga chuyển `COMPENSATION_FAILED → COMPENSATING` bằng cập nhật có điều kiện (T-07, S-08); nếu cập nhật 0 dòng, đọc lại trạng thái và không ghi đè.
+- Dùng cùng khóa idempotency, tiếp tục từ kết quả đã lưu và không lặp tác động đã hoàn tất.
+- Nếu lại vượt ngưỡng lỗi tạm thời, cả hai trở về `COMPENSATION_FAILED`; chưa phát `OrderFailed`.
+- Chỉ khi mọi bù trừ bắt buộc đã được xác minh mới chốt Order `COMPENSATING → FAILED`, Saga `COMPLETED` và Outbox `OrderFailed` trong cùng transaction (T-05).
+- Không chuyển thẳng Order `COMPENSATION_FAILED → FAILED`, không chuyển sang nhánh `EXPIRING`.
 
 ## 7. AC-05 – Thanh toán timeout và UNKNOWN
 
@@ -335,6 +350,22 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 - Các hành động đã thực hiện được kiểm tra bằng idempotency key trước khi gửi lại.
 - Không tạo thêm capture, Reservation, release hoặc refund chỉ vì worker được khởi động lại.
 
+### AC-06.5 – Compensation lỗi tạm thời vượt ngưỡng trong nhánh hết hạn
+
+**Given**
+- TTL Worker đã claim thành công Order `PENDING → EXPIRING`.
+- Saga đang `COMPENSATING`; release/refund còn bắt buộc và gặp lỗi tạm thời đã xác định vượt ngưỡng gửi.
+
+**When**
+- Hệ thống ghi nhận vượt ngưỡng và Recovery Worker tiếp tục khi đến lịch retry nền mỗi 60 giây.
+
+**Then**
+- Khi vượt ngưỡng, Saga chuyển `COMPENSATION_FAILED`, Order vẫn `EXPIRING`.
+- Trước retry, Saga chuyển lại `COMPENSATING`, Order vẫn `EXPIRING`; worker phải nhận quyền xử lý bằng conditional update và có `claimToken`/lease hợp lệ. Nếu không nhận được quyền, đọc lại trạng thái, không xử lý song song.
+- Nếu tiếp tục vượt ngưỡng, chỉ Saga trở lại `COMPENSATION_FAILED`; không có chuyển Order `EXPIRING → COMPENSATION_FAILED` hoặc `COMPENSATION_FAILED → EXPIRING`.
+- Retry dùng cùng khóa; nếu kết quả `UNKNOWN`, thực hiện đối soát thay vì giả định đã release/refund thành công.
+- Chỉ khi đủ mọi điều kiện T-08 (gồm xác minh release, capture/refund và claim/lease hợp lệ) mới chốt Order `EXPIRING → EXPIRED`, Saga `COMPLETED` và Outbox `OrderExpired` trong cùng transaction; nếu thiếu điều kiện, giữ Order `EXPIRING`.
+
 ## 9. AC-07 – Refund
 
 ### AC-07.1 – Refund sau capture thành công
@@ -367,7 +398,7 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 - Hệ thống đối soát refund hoặc thử lại theo chính sách tương ứng.
 - Tổng số lần gửi refund tự động tối đa là 5, tính cả lần đầu; retry dùng cùng khóa `payment:refund:{orderId}:{paymentId}:v1` và backoff cấu hình `1s, 2s, 4s, 8s`.
 - Nếu refund timeout hoặc vẫn `UNKNOWN`, hệ thống truy vấn/đối soát theo chính sách; không tạo refund mới bằng khóa khác.
-- Nếu lỗi tạm thời vượt ngưỡng gửi, Saga ghi `COMPENSATION_FAILED`, phát cảnh báo và tiếp tục retry nền mỗi 60 giây.
+- Nếu lỗi tạm thời vượt ngưỡng gửi, Saga ghi `COMPENSATION_FAILED`, phát cảnh báo và tiếp tục retry nền mỗi 60 giây. Với Order thuộc nhánh thất bại chưa kết thúc, áp dụng T-06/T-07 và AC-04.3 cho cả Order/Saga; với nhánh hết hạn, giữ Order `EXPIRING` theo AC-06.5. Ngoại lệ refund muộn sau `EXPIRED` theo AC-07.3 không mở lại Order.
 - Nếu Payment Service xác minh refund `FAILED` (không phải timeout/UNKNOWN), Saga chuyển `RECONCILIATION_REQUIRED` để theo dõi/can thiệp theo chính sách; không đánh đồng lỗi nghiệp vụ đã xác minh với kết quả chưa rõ.
 - Không kết luận refund thành công khi chưa được xác minh.
 
@@ -577,7 +608,7 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 | Tính nhất quán dưới tải | UC-01, UC-02, UC-03, UC-06 | FR-03, FR-06, FR-09, NFR-C01, NFR-02 | Non-functional Requirements, State Machine |
 | Lưu giữ dữ liệu và phản hồi Change Request | Áp dụng quy trình W2 | NFR-C02, NFR-C03 | Non-functional Requirements |
 
-**Lưu ý khi chốt với nhóm:** Tên trạng thái `COMPENSATION_FAILED` cần được dùng rõ theo từng đối tượng. Trong State Machine, Order có trạng thái này; Saga cũng có trạng thái này. Với nhánh hết hạn, Order giữ `EXPIRING` trong khi Saga ghi nhận compensation lỗi. Cần giữ quy tắc này nhất quán giữa `09-state-machine.md`, `10-saga-workflow-and-compensation.md` và tiêu chí tương ứng ở đây.
+**Quy tắc đối chiếu:** `09-state-machine.md` là nguồn chuẩn cho Order. Nhánh thất bại thông thường chuyển cả Order/Saga `COMPENSATING → COMPENSATION_FAILED → COMPENSATING` khi lỗi tạm thời vượt ngưỡng rồi retry nền; đủ điều kiện mới chốt Order `FAILED`, Saga `COMPLETED`. Nhánh hết hạn giữ Order `EXPIRING` khi Saga lỗi/retry; đủ T-08 mới chốt Order `EXPIRED`, Saga `COMPLETED`. AC-04.2, AC-04.3 và AC-06.5 phải được kiểm tra riêng cho hai nhánh.
 
 ## 15. Điều kiện hoàn thành
 
