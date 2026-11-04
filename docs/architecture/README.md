@@ -12,7 +12,6 @@ Tài liệu tập trung vào cách các thành phần phối hợp để xử l�
 | [10-saga-workflow-and-compensation.md](10-saga-workflow-and-compensation.md) | Luồng Saga, các bước xử lý, retry và compensation |
 | [11-sequence-diagrams.md](11-sequence-diagrams.md) | Biểu đồ tuần tự mô tả tương tác giữa các service và các nhánh lỗi |
 | [12-acceptance-criteria.md](12-acceptance-criteria.md) | Acceptance Criteria theo Given–When–Then, liên kết với Use Case và yêu cầu |
-
 | [16-rabbitmq-design.md](16-rabbitmq-design.md) | RabbitMQ topology, HTTP/event boundary, ACK, Outbox/Inbox, retry nền và phục hồi (#24) |
 
 ## Phạm vi kiến trúc
