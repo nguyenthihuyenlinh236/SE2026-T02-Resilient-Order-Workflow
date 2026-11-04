@@ -11,7 +11,7 @@ Phạm vi gồm ERD, Data Dictionary, khóa và ràng buộc, index, transaction
 - Mỗi service sở hữu một database: `order_db`, `inventory_db`, `payment_db`. Chỉ service sở hữu được ghi dữ liệu của mình.
 - Không tạo Foreign Key, JOIN hoặc transaction xuyên database. Các ID liên service là tham chiếu logic, được kiểm tra qua API/command/event.
 - Order Service lưu bản kết quả đã xác minh từ Inventory và Payment để kiểm tra chuyển trạng thái trong transaction cục bộ.
-- Tên bảng/cột dùng `snake_case`; ID trao đổi Order/Reservation/Payment/Refund và event dùng `varchar(128)` theo Identifier API; ID kỹ thuật cục bộ (Saga, step, attempt, claim, mock transaction) vẫn dùng `uuid`. Khóa idempotency dùng `varchar(255)`; payload hash dùng `char(64)` chứa SHA-256 của payload nghiệp vụ đã chuẩn hóa.
+- Tên bảng/cột dùng `snake_case`; ID trao đổi Order/Reservation/Payment/Refund và event dùng `varchar(128)` theo Identifier API; ID kỹ thuật cục bộ (Saga, step, attempt, claim, mock transaction) vẫn dùng `uuid`. Khóa idempotency dùng `varchar(512)`; payload hash dùng `char(64)` chứa SHA-256 của payload nghiệp vụ đã chuẩn hóa.
 - Timestamp dùng `timestamptz`; kết nối DB đặt timezone UTC. So sánh hạn và lease bằng `clock_timestamp()` tại DB, không dùng đồng hồ của từng tiến trình. `CURRENT_TIMESTAMP` không dùng để phân xử hết hạn trong transaction kéo dài.
 - Số lượng dùng `integer`; số tiền dùng `numeric(19,2)`, không dùng số thực. Currency dùng `varchar(3)` và thống nhất giữa Order, Capture, Refund.
 - Trạng thái dùng `varchar(32) NOT NULL` với `CHECK` giới hạn giá trị. Chuyển trạng thái phải có guard; CHECK danh sách giá trị không tự bảo vệ thứ tự chuyển.
@@ -164,7 +164,7 @@ Khi Capture thành công được phát hiện sau `EXPIRED`, giữ Order `EXPIR
 | `step_id` | `uuid` | PK | Định danh bước |
 | `saga_id` | `uuid` | NOT NULL, FK → sagas | Saga sở hữu |
 | `operation` | `varchar(16)` | NOT NULL, CHECK | RESERVE/CAPTURE/RELEASE/REFUND |
-| `idempotency_key` | `varchar(255)` | NOT NULL, UNIQUE | Khóa tác dụng nghiệp vụ |
+| `idempotency_key` | `varchar(512)` | NOT NULL, UNIQUE | Khóa tác dụng nghiệp vụ |
 | `request_payload` | `jsonb` | NOT NULL | Dữ liệu để gửi lại cùng lệnh |
 | `status` | `varchar(32)` | NOT NULL, CHECK | NOT_STARTED/IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN |
 | `result_payload` | `jsonb` | NULL trước khi có kết quả | Kết quả đã ghi nhận |
@@ -251,7 +251,7 @@ Trong demo `other_commitments = 0`; cột này không bao gồm hàng đã tính
 |---|---|---|---|
 | `order_id` | `varchar(128)` | PK | Tham chiếu Order logic, không FK xuyên DB |
 | `cancellation_recorded` | `boolean` | NOT NULL, default false | Đã nhận nhánh hủy/giải phóng |
-| `cancel_key` | `varchar(255)` | UNIQUE, NULL trước khi hủy | `inventory:cancel:{orderId}:v1` |
+| `cancel_key` | `varchar(512)` | UNIQUE, NULL trước khi hủy | `inventory:cancel:{orderId}:v1` |
 | `cancel_payload_hash` | `char(64)` | NULL trước khi hủy | Kiểm tra nội dung lệnh hủy |
 | `cancel_result` | `jsonb` | NULL trước khi hủy | Kết quả ghi nhận hủy |
 | `cancelled_at` | `timestamptz` | NULL trước khi hủy | Mốc ghi dấu hiệu hủy |
@@ -268,7 +268,7 @@ Cancel theo Order là lệnh bổ sung cho tình huống chưa có `reservation_
 | `reservation_id` | `varchar(128)` | PK | Order Service sinh một lần và truyền trong Reserve; Inventory lưu nguyên ID |
 | `order_id` | `varchar(128)` | NOT NULL, UNIQUE, FK → inventory_order_guards | Một Reservation logic mỗi Order |
 | `store_id` | `varchar(100)` | NOT NULL, không trắng | Store dùng để phân giải SKU trong Reserve |
-| `reserve_key` | `varchar(255)` | NOT NULL, UNIQUE | `reserve:{orderId}:v1` |
+| `reserve_key` | `varchar(512)` | NOT NULL, UNIQUE | `reserve:{orderId}:v1` |
 | `payload_hash` | `char(64)` | NOT NULL | Hash Reserve đã chuẩn hóa, đồng bộ với record lệnh |
 | `status` | `varchar(32)` | NOT NULL, CHECK | RESERVED/RELEASED/REJECTED |
 | `rejection_reason` | `varchar(128)` | NULL nếu không bị từ chối | Lý do REJECTED |
@@ -318,7 +318,7 @@ erDiagram
 |---|---|---|---|
 | `payment_id` | `varchar(128)` | PK | Định danh Capture |
 | `order_id` | `varchar(128)` | NOT NULL, UNIQUE | Tham chiếu Order logic |
-| `idempotency_key` | `varchar(255)` | NOT NULL, UNIQUE | `payment:capture:{orderId}:v1` |
+| `idempotency_key` | `varchar(512)` | NOT NULL, UNIQUE | `payment:capture:{orderId}:v1` |
 | `payload_hash` | `char(64)` | NOT NULL | Hash lệnh Capture |
 | `amount` | `numeric(19,2)` | NOT NULL, CHECK > 0 | Số tiền thu |
 | `currency` | `varchar(3)` | NOT NULL | Loại tiền |
@@ -338,7 +338,7 @@ Không có bản ghi Capture nghĩa là chưa bắt đầu; Order biểu diễn 
 | `refund_id` | `varchar(128)` | PK | Định danh Refund |
 | `payment_id` | `varchar(128)` | NOT NULL, UNIQUE, FK → captures | Một Refund toàn phần mỗi Capture |
 | `order_id` | `varchar(128)` | NOT NULL | Order của Capture |
-| `idempotency_key` | `varchar(255)` | NOT NULL, UNIQUE | `payment:refund:{orderId}:{paymentId}:v1` |
+| `idempotency_key` | `varchar(512)` | NOT NULL, UNIQUE | `payment:refund:{orderId}:{paymentId}:v1` |
 | `payload_hash` | `char(64)` | NOT NULL | Hash yêu cầu |
 | `amount` | `numeric(19,2)` | NOT NULL, CHECK > 0 | Số tiền hoàn toàn phần |
 | `currency` | `varchar(3)` | NOT NULL | Loại tiền |
@@ -358,7 +358,7 @@ Thêm `UNIQUE(payment_id, order_id)` trên Capture và FK kép từ Refund để
 | Cột | Kiểu | Ràng buộc / mặc định | Ý nghĩa |
 |---|---|---|---|
 | `scope` | `varchar(128)` | PK thành phần | Client ID cho tạo đơn; namespace nội bộ cho command |
-| `idempotency_key` | `varchar(255)` | PK thành phần | Định danh tác dụng ổn định |
+| `idempotency_key` | `varchar(512)` | PK thành phần | Định danh tác dụng ổn định |
 | `operation` | `varchar(32)` | NOT NULL | CREATE_ORDER/RESERVE/RELEASE/CAPTURE/REFUND |
 | `payload_hash` | `char(64)` | NOT NULL | Hash payload nghiệp vụ |
 | `request_payload` | `jsonb` | NOT NULL | Payload đã chuẩn hóa, không chứa bí mật |
