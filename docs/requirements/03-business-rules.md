@@ -60,12 +60,17 @@ Nếu compensation chưa hoàn tất, Order giữ `EXPIRING` và lưu tiến tr�
 
 ### BR-13.5 – Thanh toán và hết hạn đồng thời
 
-- Dùng conditional update hoặc cơ chế tương đương để ngăn Order vừa `CONFIRMED` vừa `EXPIRED`.
-- Chỉ một nhánh được phép claim chuyển trạng thái từ `PENDING`: xác nhận đơn (`CONFIRMED`) hoặc bắt đầu hết hạn (`EXPIRING`).
+- Dùng conditional update nguyên tử hoặc cơ chế tương đương để phân xử ba nhánh cạnh tranh có thể chuyển Order khỏi `PENDING`:
+  1. `PENDING → CONFIRMED`: Order đáp ứng đầy đủ điều kiện xác nhận.
+  2. `PENDING → COMPENSATING`: reserve bị từ chối hoặc capture `FAILED` đã được xác minh.
+  3. `PENDING → EXPIRING`: TTL Worker claim Order quá hạn hợp lệ.
+- Chỉ một nhánh được chuyển Order khỏi `PENDING` thành công. Mọi nhánh thua phải nhận biết cập nhật tác động 0 dòng, đọc lại trạng thái Order/Saga hiện tại và tiếp tục theo nhánh đã thắng; không được ghi đè.
 - Nhánh xác nhận chỉ được cập nhật `PENDING -> CONFIRMED` khi reservation đã được xác nhận `RESERVED`, payment được xác minh `SUCCEEDED`, payment hoàn tất hợp lệ trước `expireAt`, và cập nhật có điều kiện thành công.
+- Nhánh thất bại chỉ được cập nhật `PENDING -> COMPENSATING` khi reserve `REJECTED` hoặc capture `FAILED` đã được xác minh, và cập nhật có điều kiện thành công.
 - Nhánh hết hạn chỉ được cập nhật `PENDING -> EXPIRING` khi `currentTime >= expireAt`, payment không còn `UNKNOWN`, và cập nhật có điều kiện thành công.
-- Nếu nhánh xác nhận thắng, tiến trình hết hạn không được chuyển đơn sang `EXPIRING` hoặc `EXPIRED`.
-- Nếu nhánh hết hạn thắng, không được chuyển đơn từ `EXPIRING` hoặc `EXPIRED` trở lại `CONFIRMED`.
+- Nếu nhánh xác nhận thắng, nhánh thất bại và tiến trình hết hạn không được ghi đè Order.
+- Nếu nhánh thất bại thắng, nhánh xác nhận và tiến trình hết hạn không được ghi đè `COMPENSATING`.
+- Nếu nhánh hết hạn thắng, nhánh xác nhận và nhánh thất bại không được ghi đè `EXPIRING`; không được chuyển Order từ `EXPIRING` hoặc `EXPIRED` trở lại `CONFIRMED`.
 - Payment đến muộn sau khi đơn đã hết hạn không làm đơn được xác nhận trở lại. Nếu tiền đã thu, hệ thống phải đối soát và hoàn tiền theo chính sách.
 - Nếu payment là `UNKNOWN`, không claim nhánh hết hạn, không giải phóng reservation và không hoàn tiền dựa trên giả định. Tiếp tục truy vấn/đối soát đến khi có kết quả xác định hoặc chuyển sang xử lý thủ công theo quyết định thiết kế.
 
