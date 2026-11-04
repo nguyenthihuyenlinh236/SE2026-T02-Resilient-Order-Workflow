@@ -350,6 +350,8 @@ erDiagram
 
 Không có bản ghi Capture nghĩa là chưa bắt đầu; Order biểu diễn bằng `NOT_STARTED`. `SUCCEEDED` và `FAILED` chỉ được ghi từ kết quả có thẩm quyền của Payment. Timeout phía Order không chuyển Capture thành `UNKNOWN` nếu Payment đã lưu `SUCCEEDED`.
 
+capturedAt trong API lấy từ completed_at khi SUCCEEDED; còn lại null. API giới hạn amount 12 chữ số nguyên, tối đa 2 chữ số lẻ, >0 và currency=VND; DB numeric(19,2) không làm mở rộng miền hợp lệ của API.
+
 ### 6.3. Bảng `refunds`
 
 | Cột | Kiểu | Ràng buộc / mặc định | Ý nghĩa |
@@ -358,6 +360,7 @@ Không có bản ghi Capture nghĩa là chưa bắt đầu; Order biểu diễn 
 | `payment_id` | `varchar(128)` | NOT NULL, UNIQUE, FK → captures | Một Refund toàn phần mỗi Capture |
 | `order_id` | `varchar(128)` | NOT NULL | Order của Capture |
 | `idempotency_key` | `varchar(512)` | NOT NULL, UNIQUE | `payment:refund:{orderId}:{paymentId}:v1` |
+| `reason` | `varchar(32)` | NOT NULL, CHECK ORDER_FAILED/ORDER_EXPIRED/LATE_CAPTURE | Reason đã lưu để retry và trả response |
 | `payload_hash` | `char(64)` | NOT NULL | Hash yêu cầu |
 | `amount` | `numeric(19,2)` | NOT NULL, CHECK > 0 | Số tiền hoàn toàn phần |
 | `currency` | `varchar(3)` | NOT NULL | Loại tiền |
@@ -367,6 +370,8 @@ Không có bản ghi Capture nghĩa là chưa bắt đầu; Order biểu diễn 
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | Mốc dữ liệu |
 | `completed_at` | `timestamptz` | NULL khi chưa kết thúc | Mốc kết quả cuối |
 | `version` | `bigint` | NOT NULL, default 0 | Kiểm soát cập nhật |
+
+refundedAt lấy completed_at khi SUCCEEDED, còn lại null; createdAt lấy created_at. Không đổi reason sau khi gửi lệnh.
 
 Thêm `UNIQUE(payment_id, order_id)` trên Capture và FK kép từ Refund để bảo đảm Refund thuộc đúng Order. Khi tạo Refund, khóa Capture, kiểm tra `SUCCEEDED`, số tiền và currency khớp Capture trong transaction. CHECK không dùng để so sánh dữ liệu hai bảng. Refund lỗi không thay đổi trạng thái Capture; Refund `FAILED` đã xác minh được chuyển xử lý can thiệp, không tự tạo khóa v2.
 
@@ -391,7 +396,7 @@ Thêm `UNIQUE(payment_id, order_id)` trên Capture và FK kép từ Refund để
 
 Trong `order_db`, thêm `order_id varchar(128)` nullable, FK → orders để liên kết yêu cầu tạo đơn thành công. PK `(scope, idempotency_key)` tương ứng `UNIQUE(clientId, idempotencyKey)` cho tạo Order. Với command nội bộ dùng scope cố định của service; không đưa operation vào scope để tránh cùng khóa bị tái sử dụng cho nghiệp vụ khác.
 
-Chuẩn hóa payload bằng cấu trúc JSON cố định, biểu diễn số và danh sách sản phẩm đã gộp/sắp theo SKU. Hash Reserve bao gồm operation, orderId, reservationId, storeId và items; Release API cũ gồm operation, hai ID và reason; Release nội bộ dùng discriminator RELEASE_INTERNAL_V1, orderId, reservationId, commandId và correlationId trong body. Cancel gồm operation, orderId và reason. Không ghép chuỗi bằng delimiter có thể xuất hiện trong SKU/storeId. Các lệnh thanh toán còn gồm số tiền/currency; không hash thời gian gửi hay số retry. Ngoại lệ tương thích: Release nội bộ hiện hash cả commandId/correlationId trong body nên phải lưu và replay nguyên body; header tracing không tham gia hash. Inventory lưu snapshot ba lệnh trong inventory_operations (mục 5.6); không nhân bản vào idempotency_records hoặc guard.
+Chuẩn hóa payload bằng cấu trúc JSON cố định, biểu diễn số và danh sách sản phẩm đã gộp/sắp theo SKU. Hash Reserve bao gồm operation, orderId, reservationId, storeId và items; Release API cũ gồm operation, hai ID và reason; Release nội bộ dùng discriminator RELEASE_INTERNAL_V1, orderId, reservationId, commandId và correlationId trong body. Cancel gồm operation, orderId và reason. Không ghép chuỗi bằng delimiter có thể xuất hiện trong SKU/storeId. Capture hash dữ liệu nghiệp vụ orderId/amount/currency; Refund hash orderId/paymentId/reason, amount/currency lấy từ Capture đã xác minh; không hash thời gian gửi hay số retry. Ngoại lệ tương thích: Release nội bộ hiện hash cả commandId/correlationId trong body nên phải lưu và replay nguyên body; header tracing không tham gia hash. Inventory lưu snapshot ba lệnh trong inventory_operations (mục 5.6); không nhân bản vào idempotency_records hoặc guard.
 
 Cùng khóa/cùng hash: đọc record đã lưu. Cùng khóa/khác hash: trả `409 IDEMPOTENCY_KEY_CONFLICT`, không đổi dữ liệu. Record `COMPLETED` phải có response code, payload và completed_at. Record `IN_PROGRESS` trả trạng thái đang xử lý hoặc được truy vấn; không cho worker thứ hai thực hiện tác dụng mới. Không coi response tiến trình ban đầu là kết quả cuối và không ghi đè Capture/Refund đã xác minh bằng UNKNOWN.
 
@@ -405,6 +410,10 @@ Tạo Order luôn lưu phản hồi `202` ban đầu để replay; client lấy 
 | `order_id` | `varchar(128)` | NOT NULL, FK → orders | Aggregate sở hữu |
 | `aggregate_version` | `bigint` | NOT NULL | Phiên bản Order |
 | `event_type` | `varchar(64)` | NOT NULL | OrderConfirmed/OrderFailed/OrderExpired |
+| `schema_version` | `integer` | NOT NULL, default 1 | Phiên bản payload |
+| `correlation_id` | `varchar(128)` | NOT NULL | Tracing xuyên Saga |
+| `command_id` | `varchar(128)` | Nullable | Command gây chuyển trạng thái |
+| `occurred_at` | `timestamptz` | NOT NULL | Bằng mốc chuyển trạng thái trong payload |
 | `payload`, `headers` | `jsonb` | NOT NULL | Nội dung và metadata đã loại bí mật |
 | `payload_hash` | `char(64)` | NOT NULL | Kiểm tra tính nhất quán event |
 | `status` | `varchar(16)` | NOT NULL, default NEW, CHECK | NEW/PUBLISHED |
@@ -483,7 +492,7 @@ CHECK tồn kho là lớp bảo vệ cuối; lock/cập nhật có điều kiệ
 
 Release dùng khóa `inventory:release:{orderId}:{reservationId}:v1`, khóa guard trước, kiểm tra đúng cặp Order/Reservation và khóa idempotency. Nếu Reservation không thuộc Order, từ chối và không ghi dấu hủy cho Order khác. Với Reservation hợp lệ, ghi dấu hủy, khóa Inventory theo thứ tự SKU trong store, chuyển có điều kiện RESERVED → RELEASED, giảm reserved_quantity đúng số lượng đã giữ, không tăng on_hand_quantity, và lưu kết quả cùng transaction.
 
-Nếu Reservation đã RELEASED, trả kết quả hiện tại, không cộng hàng lần nữa. Nếu chưa tìm thấy Reservation, không hoàn trả tồn kho và không khẳng định release thành công; tra cứu theo Reserve key hoặc dùng Cancel theo Order.
+Nếu Reservation đã RELEASED, replay snapshot Release nếu có; nếu Cancel đã giải phóng thì tạo snapshot Release từ released_at đã xác minh, không cộng hàng lần nữa. Nếu chưa tìm thấy Reservation, không hoàn trả tồn kho và không khẳng định release thành công; tra cứu theo Reserve key hoặc dùng Cancel theo Order.
 
 Không chuyển REJECTED thành RELEASED. Release không tồn tại/sai chủ sở hữu/validation lỗi không commit dấu hủy hoặc snapshot thành công; NOT_FOUND không lưu thành kết quả cuối vì Reserve đang bay có thể xuất hiện sau đó. Cancel trả trạng thái lệnh CANCELLATION_RECORDED và reservationStatus riêng (NOT_CREATED/RELEASED/REJECTED), không tạo trạng thái Reservation mới. GET operation theo key trả snapshot lệnh; GET Reservation trả resource hiện tại. Contract HTTP thống nhất nằm trong 14-api-event-contract.md, mục 5; tài liệu 14-inventory-api-contract.md trên nhánh Inventory mô tả API cũ và trạng thái triển khai.
 
