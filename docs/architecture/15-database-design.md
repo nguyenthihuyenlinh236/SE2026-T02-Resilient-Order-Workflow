@@ -385,7 +385,7 @@ Tạo Order luôn lưu phản hồi `202` ban đầu để replay; client lấy 
 | `event_id` | `varchar(128)` | PK | Sinh một lần khi ghi event |
 | `order_id` | `varchar(128)` | NOT NULL, FK → orders | Aggregate sở hữu |
 | `aggregate_version` | `bigint` | NOT NULL | Phiên bản Order |
-| `event_type` | `varchar(64)` | NOT NULL | OrderCreated/OrderConfirmed/OrderFailed/OrderExpired |
+| `event_type` | `varchar(64)` | NOT NULL | OrderConfirmed/OrderFailed/OrderExpired |
 | `payload`, `headers` | `jsonb` | NOT NULL | Nội dung và metadata đã loại bí mật |
 | `payload_hash` | `char(64)` | NOT NULL | Kiểm tra tính nhất quán event |
 | `status` | `varchar(16)` | NOT NULL, default NEW, CHECK | NEW/PUBLISHED |
@@ -395,7 +395,7 @@ Tạo Order luôn lưu phản hồi `202` ban đầu để replay; client lấy 
 | `last_error` | `text` | NULL nếu không lỗi | Lỗi gần nhất |
 | `created_at`, `published_at` | `timestamptz` | Cột đầu NOT NULL | Mốc tạo/phát |
 
-`UNIQUE(order_id, aggregate_version, event_type)` chống ghi event trùng cho một chuyển trạng thái. Event chỉ chuyển `NEW → PUBLISHED` khi broker xác nhận. Publish lại không tạo event ID mới. Nếu Inventory/Payment phát event, áp dụng cùng mẫu trong database của service đó với aggregate nội bộ tương ứng.
+`UNIQUE(order_id, aggregate_version, event_type)` chống ghi event trùng cho một chuyển trạng thái. Event chỉ chuyển `NEW → PUBLISHED` khi broker xác nhận. Publish lại không tạo event ID mới. Phiên bản này chỉ phát ba event kết thúc từ Order; Inventory/Payment trả kết quả qua HTTP, không phát domain event riêng. Tạo Order PENDING không ghi event OrderCreated.
 
 ### 7.3. `inbox_messages` tại service nhận event
 
@@ -413,7 +413,7 @@ Insert Inbox và cập nhật dữ liệu nghiệp vụ trong cùng transaction;
 
 ### 8.1. Tạo Order
 
-Một transaction ghi khóa tạo đơn, Order, các dòng sản phẩm, Saga, các bước ban đầu và Outbox `OrderCreated`; sau commit mới trả `202`. Dùng INSERT với unique constraint để phân xử request đồng thời, không dựa vào SELECT trước INSERT. Transaction thua unique đọc lại record đã commit và so hash. Retry không gia hạn `expire_at`.
+Một transaction ghi khóa tạo đơn, Order, các dòng sản phẩm, Saga và các bước ban đầu; sau commit mới trả `202`. Dùng INSERT với unique constraint để phân xử request đồng thời, không dựa vào SELECT trước INSERT. Transaction thua unique đọc lại record đã commit và so hash. Retry không gia hạn `expire_at`.
 
 ### 8.2. Phân xử ba nhánh Order
 
