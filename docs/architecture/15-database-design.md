@@ -483,6 +483,21 @@ Unique constraint vẫn là cơ chế phân xử các request đồng thời, kh
 
 `order_items.unit_price`, `orders.total_amount` và `orders.currency` là snapshot bất biến của Order. Capture lấy amount/currency từ Order đã chốt; Refund lấy đúng amount/currency của Capture/Order tương ứng. Cả hai không tra lại Catalog. Thay đổi giá hoặc `active` sau commit chỉ tác động Order mới, không sửa Order, Reserve, Capture hoặc Refund đã tồn tại.
 
+#### 8.1.1. Ngoại lệ khi xác định giá
+
+| Tình huống | Cách xử lý |
+|---|---|
+| SKU không tồn tại trong Catalog của store yêu cầu | Từ chối toàn bộ yêu cầu; không tìm SKU cùng tên ở store khác |
+| SKU chỉ tồn tại ở store khác | Xử lý như không tồn tại trong store yêu cầu; không đổi `store_id` ngầm |
+| `active = false` | Từ chối sản phẩm đã ngừng bán, kể cả Inventory vẫn còn hàng |
+| Không lấy đủ giá cho mọi SKU sau gộp | Từ chối toàn bộ; không tạo Order một phần và không dùng giá mặc định |
+| Các dòng có currency khác nhau | Từ chối toàn bộ; không tự quy đổi currency |
+| Giá, thành tiền hoặc tổng tiền không hợp lệ/vượt miền API Payment | Từ chối trước khi tạo Order; không cắt số, làm tròn để né giới hạn hoặc chia Capture |
+| Giá/active thay đổi đồng thời | Transaction tạo Order khóa đọc các dòng đã chọn và lưu một snapshot nhất quán; cập nhật Catalog chờ transaction kết thúc. Order commit trước giữ giá cũ, Order bắt đầu tra cứu sau cập nhật dùng giá mới |
+| Retry cùng Idempotency Key và cùng payload sau khi Catalog đổi | Replay nguyên response ban đầu, gồm cả kết quả từ chối đã lưu; không tra giá lại. Cùng key khác payload vẫn xung đột |
+
+Với yêu cầu không hợp lệ, transaction chỉ được hoàn tất record Idempotency chứa response từ chối ổn định nếu request đã có Idempotency Key hợp lệ; không tạo `orders`, `order_items`, Saga hoặc bước RESERVE và không gửi Reserve/Payment. Điều này giữ semantics retry mà không biến yêu cầu lỗi thành Order. Lỗi hạ tầng chưa tạo được kết quả có thẩm quyền không được ghi giả thành một từ chối nghiệp vụ.
+
 ### 8.2. Phân xử ba nhánh Order
 
 Các cập nhật trạng thái và kết quả cục bộ của một Order khóa cùng dòng Order trước khi sửa. Worker sử dụng `version` hoặc guard trạng thái để không ghi từ dữ liệu cũ. Lưu Order, Saga và event tương ứng trong cùng transaction; kiểm tra số dòng UPDATE trước khi ghi event.
@@ -628,12 +643,17 @@ Inventory #28 đã có V001 và V002: V002 thêm SKU/store và caller Reservatio
 
 ### 11.3. Tái tạo môi trường kiểm thử
 
-Khởi tạo PostgreSQL rỗng tách biệt, chạy toàn bộ migration, nạp seed chỉ ở test/demo, rồi chạy kiểm thử. Dùng UUID cố định cho sản phẩm và tồn kho đủ/thiếu/hết; tạo Order mới mỗi lượt cạnh tranh. Reset dữ liệu trong database test riêng và reset fault injection giữa các lượt. CI kiểm tra cả migrate từ rỗng và nâng cấp từ schema phiên bản trước.
+Khởi tạo PostgreSQL rỗng tách biệt, chạy toàn bộ migration, nạp seed chỉ ở test/demo, rồi chạy kiểm thử. Product Catalog mẫu trong `order_db` có tối thiểu ba sản phẩm active với SKU, tên, giá dương và cùng currency hợp lệ; thêm ít nhất một sản phẩm `active = false`. Dữ liệu `inventory_db` dùng đúng giá trị `store_id` và `sku` tương ứng cho các sản phẩm cần kiểm thử Reserve, nhưng không sao chép giá sang Inventory. Trường hợp SKU không tồn tại được kiểm thử bằng một SKU không seed trong Catalog; có thể seed tồn kho lệch có chủ ý ở fixture riêng để chứng minh Catalog và Inventory được xác minh độc lập.
+
+Dùng UUID cố định cho sản phẩm Inventory và các mức tồn kho đủ/thiếu/hết; tạo Order mới mỗi lượt cạnh tranh. Fixture phải bao phủ nhiều SKU trong cùng store, SKU khác store, currency không đồng nhất, giá/tổng vượt giới hạn, thay đổi giá đồng thời và retry cùng key sau khi giá đổi. Seed chỉ thuộc profile test/demo; không cung cấp UI/API quản trị danh mục, nhập hàng hoặc cập nhật giá trong Issue #21. Reset dữ liệu trong database test riêng và reset fault injection giữa các lượt. CI kiểm tra cả migrate từ rỗng và nâng cấp từ schema phiên bản trước.
 
 ## 12. Ma trận truy vết và kiểm chứng
 
 | Thiết kế | Căn cứ | Kiểm chứng chính |
 |---|---|---|
+| Product Catalog và snapshot giá | Issue #21, PR #34 | Tra đủ SKU active trong đúng store; currency thống nhất; `order_items.unit_price` và `orders.total_amount` khớp phép tính decimal |
+| Giá thay đổi và retry tạo Order | D-02/07, AC-01 | Cập nhật đồng thời không trộn phiên bản giá; retry cùng key/payload replay giá và response ban đầu, không tính lại |
+| Catalog–Inventory–Payment | Issue #21 | Catalog và Inventory dùng cùng `(store_id, sku)` nhưng không FK/JOIN; Reserve không mang giá; Capture/Refund dùng amount/currency đã chốt của Order |
 | Order, idempotency tạo đơn | FR-01/02, D-02/07, AC-01 | Trùng request trả cùng Order và response 202; payload khác bị từ chối |
 | Tồn kho và Reservation | FR-03/04, BR-02/05, AC-02/10 | Đặt đồng thời không oversell; nhiều sản phẩm rollback toàn bộ |
 | Capture, Refund độc lập | FR-05/06/08, D-05, AC-03/07 | Không thu/hoàn trùng; timeout không đổi thành FAILED |
@@ -654,6 +674,8 @@ Các kiểm thử triển khai phải bao phủ ít nhất 10 lần gửi trùng
 - Reserve trước Cancel: chỉ trả tồn một lần; replay Reserve giữ snapshot gốc.
 - Release nội bộ đổi tracing body cùng key trả 409; retry nguyên body không tạo tác dụng mới.
 - Tạo PENDING không phát OrderCreated; mỗi nhánh kết thúc ghi đúng một trong ba event cùng transaction.
+- Catalog thiếu SKU, SKU sai store, inactive, khác currency hoặc tổng vượt miền: không có Order/Saga/Reserve/Payment; retry cùng key replay response từ chối đã lưu.
+- Ba SKU hợp lệ được lấy bằng một truy vấn theo store; tổng Order bằng `SUM(quantity × unit_price)` với decimal và bằng amount/currency Capture. Đổi giá sau commit không thay Order/Capture/Refund.
 
 Đây là tiêu chí nghiệm thu thiết kế, không phải tuyên bố đã chạy kiểm thử Order/Payment/Saga. Nguồn triển khai Inventory đối chiếu: commit eb856bc, migration V001–V005.
 
