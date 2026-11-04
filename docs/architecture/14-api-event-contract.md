@@ -31,7 +31,7 @@ Trong bản thiết kế hiện tại, các bước Saga giữa Order–Inventor
 | Bên gọi/phát | Bên nhận | Giao tiếp | Mục đích |
 |---|---|---|---|
 | Client | Order Service | Public API | Tạo và tra cứu Order |
-| Order Service / Saga Orchestrator | Inventory Service | Internal API / command | Reserve, query và release Reservation |
+| Order Service / Saga Orchestrator | Inventory Service | Internal API / command | Reserve, query, release và Cancel theo Order |
 | Order Service / Saga Orchestrator | Payment Service | Internal API / command | Capture, query và refund Payment |
 | Order Service / Outbox Publisher | Notification Service | Domain event | Thông báo Order đã kết thúc một nhánh nghiệp vụ |
 | Notification Service | Consumer inbox | Lưu trữ nội bộ | Chống xử lý event trùng |
@@ -137,6 +137,8 @@ Bảng này là checklist triển khai ở mức field-level cho tất cả HTTP
 | `POST /internal/v1/reservations` | Body chỉ gồm `orderId: Identifier`, `reservationId: Identifier`, `storeId: string` không trắng ≤100 ký tự và `items` theo mục 3.1.1; tất cả bắt buộc/non-null. Order sinh và lưu reservationId trước lần gửi đầu. Không gửi commandId/correlationId trong body Reserve; tracing nằm ở header. Header Idempotency-Key đúng `reserve:{orderId}:v1`. | `200 OK`: `reservationId` Identifier|null, `orderId` Identifier, `status=RESERVED|REJECTED`, `reservedAt` timestamp|null, `reasonCode` string|null. Với RESERVED: reservationId/reservedAt có giá trị, reasonCode=null. Với REJECTED: reservationId/reservedAt=null, reasonCode thuộc `INVENTORY_NOT_AVAILABLE/PRODUCT_NOT_FOUND/ORDER_ALREADY_RELEASED`. Tất cả field trên luôn có mặt. | `400 VALIDATION_ERROR`, `409 IDEMPOTENCY_KEY_CONFLICT/RESERVATION_ID_CONFLICT/RESERVE_HISTORY_UNAVAILABLE`, `401/403`, `429`, `5xx`. Out-of-stock là kết quả nghiệp vụ `200 REJECTED`, không phải 409. Timeout/5xx có thể thành UNKNOWN ở caller; query trước hoặc retry cùng key. |
 | `GET /internal/v1/reservations/by-order/{orderId}` | Path `orderId` Identifier bắt buộc; không body, không Idempotency-Key. | `200 OK`: `reservationId` Identifier|null (null khi REJECTED), `orderId` Identifier, `status=RESERVED|RELEASED|REJECTED`, `idempotencyKey` string bắt buộc/non-null, `reasonCode` string|null bắt buộc có mặt. RESERVED/RELEASED cần reservationId; REJECTED cần mã lý do hợp lệ; trạng thái khác reasonCode=null. | `400 INVALID_IDENTIFIER`, `404 RESERVATION_NOT_FOUND` khi chưa có bản ghi, `401/403`, `429`, `5xx`. Query timeout retry query; 404 sau timeout không chứng minh một command đang bay sẽ không chạy. |
 | `POST /internal/v1/reservations/{reservationId}/release` | Path `reservationId` Identifier bắt buộc. Header Idempotency-Key bắt buộc theo công thức `inventory:release:{orderId}:{reservationId}:v1`. Body `commandId`, `orderId`, `correlationId` string bắt buộc/non-null, đều theo validation Identifier/tracing chung. | `200 OK`: `reservationId`, `orderId` Identifier; `status=RELEASED`; `releasedAt` ISO-8601 UTC; tất cả bắt buộc/non-null. Gọi lặp trả cùng releasedAt lần đầu, không tăng tồn kho lần nữa. | `400 VALIDATION_ERROR/INVALID_IDENTIFIER`, `404 RESERVATION_NOT_FOUND`, `409 IDEMPOTENCY_KEY_CONFLICT/RESERVATION_ORDER_MISMATCH/RESERVATION_NOT_RESERVED/RELEASE_HISTORY_UNAVAILABLE`, `401/403`, `429`, `5xx`. Timeout không xác nhận đã release; query/retry cùng key. |
+
+| `POST /internal/v1/orders/{orderId}/cancel` | Path orderId Identifier; header key inventory:cancel:{orderId}:v1; body orderId, reason bắt buộc/non-null theo mục 5.4. | 200; schema Cancel đầy đủ mục 5.4, reservationId nullable chỉ khi NOT_CREATED. | 400 VALIDATION_ERROR/INVALID_IDENTIFIER; 409 IDEMPOTENCY_KEY_CONFLICT; 5xx. |
 
 ### 3.4.3. Internal API – Payment Service
 
@@ -382,6 +384,45 @@ Quy tắc:
 - Hash Release nội bộ gồm RELEASE_INTERNAL_V1, orderId, reservationId trên path, commandId và correlationId trong body; retry giữ nguyên toàn bộ body. Header tracing không tham gia hash. Không diễn giải lại hash Release API cũ có reason thành schema mới.
 - Sai Order trả 409 RESERVATION_ORDER_MISMATCH; REJECTED trả 409 RESERVATION_NOT_RESERVED; thiếu lịch sử releasedAt trả 409 RELEASE_HISTORY_UNAVAILABLE. 404/lỗi không commit guard hoặc snapshot thành công. Release đã thành công ghi guard hủy nhưng không tạo snapshot Cancel giả.
 
+### 5.4. Cancel Inventory theo Order
+
+`POST /internal/v1/orders/{orderId}/cancel`; key `inventory:cancel:{orderId}:v1`. Đây là command nội bộ của Orchestrator sau khi đã claim nhánh hủy/hết hạn hợp lệ, không phải API khách hàng hủy Order. Không gọi chỉ vì timeout hoặc Payment UNKNOWN; áp dụng guard State Machine trước khi gửi.
+
+Request chỉ gồm orderId Identifier khớp path và reason string không trắng, tối đa 255 ký tự; đều bắt buộc/non-null. Reason được lưu cố định khi chọn nhánh (ví dụ ORDER_FAILED hoặc ORDER_EXPIRED), không đổi qua retry. Tracing ở header, không thêm vào body.
+
+```json
+{
+  "orderId": "ORD-003",
+  "reason": "ORDER_EXPIRED"
+}
+```
+
+Tất cả field response sau bắt buộc có mặt:
+
+| Field | Kiểu / quy tắc |
+|---|---|
+| orderId | Identifier non-null, đúng request |
+| idempotencyKey | string non-null, đúng cancel key |
+| status | hằng CANCELLATION_RECORDED |
+| reservationId | Identifier hoặc null; null khi NOT_CREATED; có ID khi RELEASED/REJECTED |
+| reservationStatus | NOT_CREATED, RELEASED hoặc REJECTED |
+| cancelledAt | timestamp UTC non-null, thời điểm guard được ghi nhận |
+
+```json
+{
+  "orderId": "ORD-003",
+  "idempotencyKey": "inventory:cancel:ORD-003:v1",
+  "status": "CANCELLATION_RECORDED",
+  "reservationId": null,
+  "reservationStatus": "NOT_CREATED",
+  "cancelledAt": "2026-10-29T10:15:10Z"
+}
+```
+
+Cancel và Reserve/Release khóa cùng guard theo Order. Reserve thắng trước thì Cancel giải phóng trong cùng transaction; Cancel thắng trước thì Reserve mới bị từ chối mà không giữ tồn. Đã RELEASED/REJECTED không trả tồn thêm. Hash gồm CANCEL, orderId, reason. Cùng key/hash replay snapshot ban đầu, khác hash trả 409 IDEMPOTENCY_KEY_CONFLICT. Validation trả 400; lỗi hạ tầng theo mục 3.3, không báo thành công giả.
+
+Cancel chưa có Reservation chỉ tạo guard; GET Reservation vẫn 404. CANCELLATION_RECORDED là kết quả command, không phải trạng thái Reservation/Order. Cancel response là bằng chứng chặn Reserve muộn sau khi đã commit; 404 của GET hoặc Release không thay thế bằng chứng này. Replay Cancel có thể vẫn NOT_CREATED dù Reserve muộn đã tạo bản ghi REJECTED. Orchestrator phải đối chiếu orderId/key, hoàn tất cả nghĩa vụ Payment/Refund trước khi kết thúc Saga.
+
 ## 6. API Contract – Payment Service
 
 Các API này là internal API. Payment Service sở hữu trạng thái capture/refund; Order Service chỉ lưu bản kết quả đã xác minh.
@@ -626,6 +667,7 @@ Các command dưới đây là hành động nghiệp vụ được gọi qua AP
 | `ReserveInventory` | Inventory | `POST /internal/v1/reservations` | `reserve:{orderId}:v1` |
 | `GetReservation` | Inventory | `GET /internal/v1/reservations/by-order/{orderId}` | Không áp dụng (query) |
 | `ReleaseInventory` | Inventory | `POST /internal/v1/reservations/{reservationId}/release` | `inventory:release:{orderId}:{reservationId}:v1` |
+| `CancelInventoryOrder` | Inventory | `POST /internal/v1/orders/{orderId}/cancel` | `inventory:cancel:{orderId}:v1` |
 | `CapturePayment` | Payment | `POST /internal/v1/payments/captures` | `payment:capture:{orderId}:v1` |
 | `GetPayment` | Payment | `GET /internal/v1/payments/{paymentId}` hoặc tra cứu theo key | Không áp dụng (query) |
 | `RefundPayment` | Payment | `POST /internal/v1/payments/{paymentId}/refunds` | `payment:refund:{orderId}:{paymentId}:v1` |
@@ -793,6 +835,7 @@ Các giá trị ID và timestamp trong ví dụ chỉ minh họa cấu trúc, kh
 | Capture | Timeout/mất phản hồi | Capture `UNKNOWN`; Saga `RECONCILING` | Query theo paymentId/capture key; không coi là FAILED |
 | Capture | `FAILED` đã xác minh | Capture `FAILED` | Claim nhánh thất bại bằng conditional update; release reservation đã xác minh |
 | Release | Timeout/mất phản hồi | Release `UNKNOWN`; Saga `RECONCILING` | Query/retry cùng release key; không tuyên bố đã release |
+| Cancel | Timeout/mất phản hồi | Bước CANCEL UNKNOWN; giữ nhánh Order đã claim | GET operation theo cancel key hoặc retry nguyên body/key; chưa xác minh thì không chốt đã chặn Reserve muộn |
 | Refund | Timeout/mất phản hồi | Refund `UNKNOWN`; Saga `RECONCILING` | Query theo refundId/refund key; không tạo refund key mới |
 | Refund | `FAILED` đã xác minh | Refund `FAILED`; Saga cần xử lý ngoại lệ/đối soát | Không đánh dấu Saga hoàn tất; xử lý theo Q-08 |
 | Bất kỳ POST nào | Cùng key, khác payload | Không thay đổi trạng thái nghiệp vụ | Trả `409 IDEMPOTENCY_KEY_CONFLICT` |
@@ -805,6 +848,7 @@ Các giá trị ID và timestamp trong ví dụ chỉ minh họa cấu trúc, kh
 |---|---|
 | Create Order | Client sinh UUID; lưu cùng payload hash và Order ID |
 | Reserve | `reserve:{orderId}:v1` |
+| Cancel | `inventory:cancel:{orderId}:v1` |
 | Capture | `payment:capture:{orderId}:v1` |
 | Release | `inventory:release:{orderId}:{reservationId}:v1` |
 | Refund | `payment:refund:{orderId}:{paymentId}:v1` |
