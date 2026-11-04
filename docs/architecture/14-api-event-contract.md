@@ -135,8 +135,8 @@ Bảng này là checklist triển khai ở mức field-level cho tất cả HTTP
 | Endpoint / method | Input (nguồn; kiểu; bắt buộc/null; validation) | Output 2xx | HTTP error và mã lỗi |
 |---|---|---|---|
 | `POST /internal/v1/reservations` | Body chỉ gồm `orderId: Identifier`, `reservationId: Identifier`, `storeId: string` không trắng ≤100 ký tự và `items` theo mục 3.1.1; tất cả bắt buộc/non-null. Order sinh và lưu reservationId trước lần gửi đầu. Không gửi commandId/correlationId trong body Reserve; tracing nằm ở header. Header Idempotency-Key đúng `reserve:{orderId}:v1`. | `200 OK`: `reservationId` Identifier|null, `orderId` Identifier, `status=RESERVED|REJECTED`, `reservedAt` timestamp|null, `reasonCode` string|null. Với RESERVED: reservationId/reservedAt có giá trị, reasonCode=null. Với REJECTED: reservationId/reservedAt=null, reasonCode thuộc `INVENTORY_NOT_AVAILABLE/PRODUCT_NOT_FOUND/ORDER_ALREADY_RELEASED`. Tất cả field trên luôn có mặt. | `400 VALIDATION_ERROR`, `409 IDEMPOTENCY_KEY_CONFLICT/RESERVATION_ID_CONFLICT/RESERVE_HISTORY_UNAVAILABLE`, `401/403`, `429`, `5xx`. Out-of-stock là kết quả nghiệp vụ `200 REJECTED`, không phải 409. Timeout/5xx có thể thành UNKNOWN ở caller; query trước hoặc retry cùng key. |
-| `GET /internal/v1/reservations/by-order/{orderId}` | Path `orderId` Identifier bắt buộc; không body, không Idempotency-Key. | `200 OK`: `reservationId` Identifier|null (null chỉ khi UNKNOWN chưa có ID; REJECTED không có ID), `orderId` Identifier, `status=RESERVED|RELEASED|REJECTED|UNKNOWN`, `idempotencyKey` string bắt buộc/non-null, `reasonCode` string|null bắt buộc có mặt. RESERVED/RELEASED cần reservationId; REJECTED cần mã lý do hợp lệ; trạng thái khác reasonCode=null. | `400 INVALID_IDENTIFIER`, `404 RESERVATION_NOT_FOUND` khi chưa có bản ghi, `401/403`, `429`, `5xx`. Query timeout retry query; 404 sau timeout không chứng minh một command đang bay sẽ không chạy. |
-| `POST /internal/v1/reservations/{reservationId}/release` | Path `reservationId` Identifier bắt buộc. Header Idempotency-Key bắt buộc theo công thức `inventory:release:{orderId}:{reservationId}:v1`. Body `commandId`, `orderId`, `correlationId` string bắt buộc/non-null, đều theo validation Identifier/tracing chung. | `200 OK`: `reservationId`, `orderId` Identifier; `status=RELEASED`; `releasedAt` ISO-8601 UTC; tất cả bắt buộc/non-null. Gọi lặp trả cùng releasedAt lần đầu, không tăng tồn kho lần nữa. | `400 VALIDATION_ERROR/INVALID_IDENTIFIER`, `404 RESERVATION_NOT_FOUND`, `409 IDEMPOTENCY_KEY_CONFLICT`, `401/403`, `429`, `5xx`. Timeout không xác nhận đã release; query/retry cùng key. |
+| `GET /internal/v1/reservations/by-order/{orderId}` | Path `orderId` Identifier bắt buộc; không body, không Idempotency-Key. | `200 OK`: `reservationId` Identifier|null (null khi REJECTED), `orderId` Identifier, `status=RESERVED|RELEASED|REJECTED`, `idempotencyKey` string bắt buộc/non-null, `reasonCode` string|null bắt buộc có mặt. RESERVED/RELEASED cần reservationId; REJECTED cần mã lý do hợp lệ; trạng thái khác reasonCode=null. | `400 INVALID_IDENTIFIER`, `404 RESERVATION_NOT_FOUND` khi chưa có bản ghi, `401/403`, `429`, `5xx`. Query timeout retry query; 404 sau timeout không chứng minh một command đang bay sẽ không chạy. |
+| `POST /internal/v1/reservations/{reservationId}/release` | Path `reservationId` Identifier bắt buộc. Header Idempotency-Key bắt buộc theo công thức `inventory:release:{orderId}:{reservationId}:v1`. Body `commandId`, `orderId`, `correlationId` string bắt buộc/non-null, đều theo validation Identifier/tracing chung. | `200 OK`: `reservationId`, `orderId` Identifier; `status=RELEASED`; `releasedAt` ISO-8601 UTC; tất cả bắt buộc/non-null. Gọi lặp trả cùng releasedAt lần đầu, không tăng tồn kho lần nữa. | `400 VALIDATION_ERROR/INVALID_IDENTIFIER`, `404 RESERVATION_NOT_FOUND`, `409 IDEMPOTENCY_KEY_CONFLICT/RESERVATION_ORDER_MISMATCH/RESERVATION_NOT_RESERVED/RELEASE_HISTORY_UNAVAILABLE`, `401/403`, `429`, `5xx`. Timeout không xác nhận đã release; query/retry cùng key. |
 
 ### 3.4.3. Internal API – Payment Service
 
@@ -314,9 +314,9 @@ Hash Reserve gồm operation, orderId, reservationId, storeId và items đã g�
 
 ### 5.2. Tra cứu Reservation
 
-Trong contract này, “tra cứu theo reserve key” được thực hiện bằng `GET /internal/v1/reservations/by-order/{orderId}`. Inventory tìm bản ghi kết quả Reserve của Order tương ứng với key `reserve:{orderId}:v1` và trả key đó trong `idempotencyKey`; Order Service đối chiếu với key đã lưu trước khi sử dụng kết quả. Không có endpoint tra cứu Reserve theo key riêng trong phiên bản này.
+Trong contract này, “tra cứu theo reserve key” được thực hiện bằng `GET /internal/v1/reservations/by-order/{orderId}`. Inventory tìm bản ghi kết quả Reserve của Order tương ứng với key `reserve:{orderId}:v1` và trả key đó trong `idempotencyKey`; Order Service đối chiếu với key đã lưu trước khi sử dụng kết quả. GET này trả trạng thái resource hiện tại; GET operation tại mục 5.5 trả snapshot lệnh theo key.
 
-**Schema response:** `reservationId: Identifier|null`, `orderId: Identifier`, `status: RESERVED|RELEASED|REJECTED|UNKNOWN`, `idempotencyKey: string`, `reasonCode: string|null` đều bắt buộc có mặt. `orderId`, `status`, `idempotencyKey` không null. `reservationId` không null khi `RESERVED/RELEASED`, null khi `REJECTED`; khi `UNKNOWN`, trả ID nếu đã biết, nếu chưa thì null. `reasonCode` dùng enum mục 5.1 khi `REJECTED`, null ở các trạng thái khác. Chỉ trả `UNKNOWN` nếu Inventory có bản ghi đang cần xác minh; không có bản ghi thì trả `404`. Path `orderId` theo Identifier.
+**Schema response:** `reservationId: Identifier|null`, `orderId: Identifier`, `status: RESERVED|RELEASED|REJECTED`, `idempotencyKey: string`, `reasonCode: string|null` đều bắt buộc có mặt. `orderId`, `status`, `idempotencyKey` không null. `reservationId` không null khi `RESERVED/RELEASED`, null khi `REJECTED`; `reasonCode` dùng enum mục 5.1 khi `REJECTED`, null ở các trạng thái khác. Inventory không lưu/không trả UNKNOWN trong schema này; UNKNOWN thuộc phía gọi khi chưa xác minh. Không có bản ghi trả 404. Path `orderId` theo Identifier.
 
 | Thuộc tính | Đặc tả |
 |---|---|
@@ -338,7 +338,7 @@ Response mẫu:
 }
 ```
 
-Nếu không tìm thấy bản ghi theo `orderId`, trả `404 RESERVATION_NOT_FOUND`, không trả `200` với `NOT_CREATED`. `NOT_CREATED` chỉ là trạng thái cục bộ của Order trước khi gửi Reserve. Sau timeout, `404` chỉ phản ánh thời điểm tra cứu, không chứng minh command đang trên đường truyền sẽ không được thực hiện; giữ `UNKNOWN` và đối soát hoặc retry cùng key theo chính sách.
+Nếu không tìm thấy bản ghi theo `orderId`, trả `404 RESERVATION_NOT_FOUND`, không trả `200` với `NOT_CREATED`. `NOT_CREATED` không phải trạng thái của GET Reservation; nó được dùng cục bộ ở Order hoặc trong snapshot Cancel chưa có Reservation. Sau timeout, `404` chỉ phản ánh thời điểm tra cứu, không chứng minh command đang trên đường truyền sẽ không được thực hiện; giữ `UNKNOWN` và đối soát hoặc retry cùng key theo chính sách.
 
 ### 5.3. Release Inventory
 
@@ -379,6 +379,8 @@ Quy tắc:
 - Gửi lại cùng key/cùng payload trả lại kết quả release đã lưu.
 - Timeout hoặc lỗi chưa rõ không được coi là đã release; query Reservation hoặc retry cùng key theo D-03.
 - Không release khi payment còn `UNKNOWN` hoặc khi reserve chưa được xác minh, theo D-01/D-04.
+- Hash Release nội bộ gồm RELEASE_INTERNAL_V1, orderId, reservationId trên path, commandId và correlationId trong body; retry giữ nguyên toàn bộ body. Header tracing không tham gia hash. Không diễn giải lại hash Release API cũ có reason thành schema mới.
+- Sai Order trả 409 RESERVATION_ORDER_MISMATCH; REJECTED trả 409 RESERVATION_NOT_RESERVED; thiếu lịch sử releasedAt trả 409 RELEASE_HISTORY_UNAVAILABLE. 404/lỗi không commit guard hoặc snapshot thành công. Release đã thành công ghi guard hủy nhưng không tạo snapshot Cancel giả.
 
 ## 6. API Contract – Payment Service
 
