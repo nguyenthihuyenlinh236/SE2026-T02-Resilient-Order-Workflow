@@ -21,7 +21,7 @@ Tên trạng thái và sự kiện trong tài liệu là đề xuất, sẽ đư
 
 **Order:** `PENDING`, `EXPIRING`, `COMPENSATING`, `COMPENSATION_FAILED`, `CONFIRMED`, `FAILED`, `EXPIRED`.
 
-**Saga:** `đang chạy`, `COMPENSATION_FAILED`, `RECONCILING`, `RECONCILIATION_REQUIRED`, `hoàn tất`.
+**Saga:** `RUNNING` (đang chạy), `COMPENSATING`, `COMPENSATION_FAILED`, `RECONCILING`, `RECONCILIATION_REQUIRED`, `COMPLETED` (hoàn tất).
 
 **Payment:** `chưa có giao dịch`, `SUCCEEDED`, `FAILED`, `UNKNOWN`. Trạng thái refund phải được lưu riêng, không thay đổi kết quả capture đã xác minh.
 
@@ -331,23 +331,24 @@ Order đã claim nhánh thất bại `PENDING → COMPENSATING`, do Reservation 
 ### 7.4. Luồng thay thế và ngoại lệ
 
 - **UC-04-A — Không có Reservation hoặc khoản thu:** không gọi release/refund cho tác động không tồn tại; khi xác minh không còn việc bù trừ, ghi `FAILED`.
-- **UC-04-B — Release thất bại hoặc quá 5 lần gửi:** giữ Order `COMPENSATING`, ghi Order/Saga `COMPENSATION_FAILED`, retry nền mỗi 60 giây theo D-03.2; không dùng `RECONCILING` hoặc `RECONCILIATION_REQUIRED`.
-- **UC-04-C — Refund thất bại hoặc quá 5 lần gửi:** capture vẫn giữ trạng thái `SUCCEEDED`; trạng thái refund được lưu riêng. Ghi `COMPENSATION_FAILED` và retry nền mỗi 60 giây theo D-03.2.
+- **UC-04-B — Release lỗi tạm thời vượt ngưỡng gửi:** chuyển Order và Saga `COMPENSATING → COMPENSATION_FAILED` theo D-03.2. Đến lịch retry nền mỗi 60 giây, Recovery Worker chuyển cả hai về `COMPENSATING` bằng cập nhật có điều kiện rồi tiếp tục bằng khóa cũ; không chốt `FAILED` khi release chưa được xác minh.
+- **UC-04-C — Refund lỗi tạm thời vượt ngưỡng gửi:** capture vẫn giữ trạng thái `SUCCEEDED`; trạng thái refund được lưu riêng. Cả Order và Saga chuyển `COMPENSATION_FAILED`, rồi về `COMPENSATING` trước retry nền mỗi 60 giây như UC-04-B. Kết quả refund `UNKNOWN` hoặc `FAILED` đã xác minh phải được phân biệt theo State Machine, không gộp vào lỗi tạm thời vượt ngưỡng.
 - **UC-04-D — Crash giữa các bước:** khi khởi động lại, xác minh tác động tại Inventory/Payment trước khi gửi lại cùng khóa.
 - **UC-04-E — Capture cần xác minh trước refund:** nếu chưa biết chắc khoản tiền đã thu, truy vấn Payment trước khi refund. Nếu capture `UNKNOWN`, không kết luận Order thất bại đã được bù trừ hoàn tất; xử lý qua UC-07.
 
 ### 7.5. Hậu điều kiện
 
-Bù trừ thành công đưa Order về `FAILED` và Saga `hoàn tất`. Bù trừ thất bại giữ Order/Saga ở `COMPENSATION_FAILED` để retry nền.
+Bù trừ thành công đưa Order từ `COMPENSATING` về `FAILED` và Saga `COMPLETED`. Lỗi tạm thời vượt ngưỡng đưa Order/Saga về `COMPENSATION_FAILED` để chờ retry nền; trước khi retry phải chuyển cả hai về `COMPENSATING`, không chuyển thẳng Order `COMPENSATION_FAILED → FAILED`.
 
 ### 7.6. Trạng thái trước → sau
 
 | Kịch bản | Order | Saga | Payment | Reservation |
 |---|---|---|---|---|
-| Bù trừ thành công | COMPENSATING → FAILED | đang chạy → hoàn tất | FAILED hoặc SUCCEEDED → kết quả capture không đổi | RESERVED → RELEASED |
-| UC-04-A không có tác động | COMPENSATING → FAILED | đang chạy → hoàn tất | chưa có giao dịch → chưa có giao dịch | REJECTED → REJECTED |
-| UC-04-B release lỗi | COMPENSATING → COMPENSATION_FAILED | đang chạy → COMPENSATION_FAILED | — → — | RESERVED → chưa xác minh |
-| UC-04-C refund lỗi | COMPENSATING → COMPENSATION_FAILED | đang chạy → COMPENSATION_FAILED | SUCCEEDED (refund chưa rõ/FAILED) → SUCCEEDED (refund FAILED/chưa rõ) | RELEASED → RELEASED |
+| Bù trừ thành công | COMPENSATING → FAILED | COMPENSATING → COMPLETED | FAILED hoặc SUCCEEDED → kết quả capture không đổi | RESERVED → RELEASED |
+| UC-04-A không có tác động | COMPENSATING → FAILED | COMPENSATING → COMPLETED | chưa có giao dịch → chưa có giao dịch | REJECTED → REJECTED |
+| UC-04-B release lỗi tạm thời vượt ngưỡng | COMPENSATING → COMPENSATION_FAILED | COMPENSATING → COMPENSATION_FAILED | — → — | RESERVED → RESERVED |
+| UC-04-C refund lỗi tạm thời vượt ngưỡng | COMPENSATING → COMPENSATION_FAILED | COMPENSATING → COMPENSATION_FAILED | SUCCEEDED → SUCCEEDED (capture không đổi) | RELEASED → RELEASED |
+| UC-04-B/C bắt đầu retry nền | COMPENSATION_FAILED → COMPENSATING | COMPENSATION_FAILED → COMPENSATING | kết quả capture đã lưu → không đổi | trạng thái đã xác minh → không đổi |
 | UC-04-D crash | COMPENSATING/COMPENSATION_FAILED → tiếp tục xử lý | trạng thái lưu → tiếp tục xử lý | trạng thái capture lưu → xác minh lại | trạng thái lưu → xác minh lại |
 | UC-04-E capture chưa rõ | COMPENSATING → COMPENSATING | đang chạy → RECONCILING | UNKNOWN → UNKNOWN | RESERVED → RESERVED |
 
@@ -585,7 +586,7 @@ Một service/worker khởi động lại sau crash hoặc phát hiện công vi
 - **UC-08-C — Crash sau publish, trước đánh dấu Outbox (EC-08):** publish lại cùng eventId; consumer chống trùng.
 - **UC-08-D — Crash sau claim, trước release:** sau lease hết hạn, worker khác kiểm tra Reservation rồi tiếp tục release nếu cần.
 - **UC-08-E — Không xác minh được tác động:** giữ công việc dở dang. Payment còn trong lịch thì `RECONCILING`; hết lịch thì `RECONCILIATION_REQUIRED`; release/refund vượt ngưỡng thì `COMPENSATION_FAILED`.
-- **UC-08-F — Retry nền thất bại:** compensation vượt ngưỡng chuyển `COMPENSATION_FAILED` và retry mỗi 60 giây; Payment cạn lịch chuyển `RECONCILIATION_REQUIRED` và tiếp tục truy vấn nền mỗi 5 phút.
+- **UC-08-F — Retry nền thất bại:** release/refund lỗi tạm thời vượt ngưỡng chuyển Saga `COMPENSATION_FAILED`; nhánh thất bại chuyển Order `COMPENSATING → COMPENSATION_FAILED`, nhánh hết hạn giữ Order `EXPIRING`. Trước retry nền mỗi 60 giây, nhánh thất bại chuyển cả Order/Saga về `COMPENSATING`; nhánh hết hạn chỉ chuyển Saga về `COMPENSATING` và vẫn giữ Order `EXPIRING`, với quyền claim/lease hợp lệ. Payment cạn lịch chuyển `RECONCILIATION_REQUIRED` và tiếp tục truy vấn nền mỗi 5 phút.
 
 ### 11.5. Hậu điều kiện
 
@@ -600,7 +601,10 @@ Công việc được khôi phục từ dữ liệu bền vững trong giới h�
 | UC-08-C | trạng thái kết thúc → không đổi | hoàn tất → hoàn tất | — → — | — → — |
 | UC-08-D | EXPIRING → tiếp tục xử lý | đang chạy → tiếp tục xử lý | — → — | RESERVED → xác minh, RELEASED nếu cần |
 | UC-08-E, còn lịch | — → không đổi | đang chạy → RECONCILING | UNKNOWN → UNKNOWN | chưa xác minh → chưa xác minh |
-| UC-08-F, compensation vượt ngưỡng | COMPENSATING/EXPIRING → COMPENSATION_FAILED | đang chạy → COMPENSATION_FAILED | trạng thái capture → không đổi | trạng thái đã xác minh → không đổi |
+| UC-08-F, nhánh thất bại lỗi tạm thời vượt ngưỡng | COMPENSATING → COMPENSATION_FAILED | COMPENSATING → COMPENSATION_FAILED | trạng thái capture → không đổi | trạng thái đã xác minh → không đổi |
+| UC-08-F, nhánh hết hạn lỗi tạm thời vượt ngưỡng | EXPIRING → EXPIRING | COMPENSATING → COMPENSATION_FAILED | trạng thái capture → không đổi | trạng thái đã xác minh → không đổi |
+| UC-08-F, bắt đầu retry nền nhánh thất bại | COMPENSATION_FAILED → COMPENSATING | COMPENSATION_FAILED → COMPENSATING | trạng thái capture → không đổi | trạng thái đã xác minh → không đổi |
+| UC-08-F, bắt đầu retry nền nhánh hết hạn | EXPIRING → EXPIRING | COMPENSATION_FAILED → COMPENSATING | trạng thái capture → không đổi | trạng thái đã xác minh → không đổi |
 | UC-08-F, Payment cạn lịch | Order hiện tại → không đổi | RECONCILING → RECONCILIATION_REQUIRED | UNKNOWN → UNKNOWN | trạng thái đã xác minh → không đổi |
 
 ### 11.7. Sự kiện
@@ -767,13 +771,13 @@ Capture được xác minh `SUCCEEDED` sau khi Order đã vào `EXPIRING` hoặc
 - **UC-11-A — Capture thành công khi Order EXPIRING:** giữ Order `EXPIRING`; không xác nhận lại. Xác minh release/refund và tiếp tục xử lý.
 - **UC-11-B — Capture thành công sau EXPIRED:** giữ Order `EXPIRED`; refund khoản tiền đã thu và xác minh kết quả.
 - **UC-11-C — Refund timeout:** capture vẫn `SUCCEEDED`, trạng thái refund chưa rõ. Retry cùng khóa; nếu vượt ngưỡng 5 lần gửi, chuyển `COMPENSATION_FAILED`, retry nền mỗi 60 giây.
-- **UC-11-D — Refund thất bại:** giữ Order `EXPIRED`, ghi Saga/Order `COMPENSATION_FAILED` để tiếp tục xử lý.
+- **UC-11-D — Refund thất bại:** giữ Order `EXPIRED`; lỗi được ghi ở tiến trình Saga/refund, không ghi Order `COMPENSATION_FAILED` và không mở lại Order. Cách xử lý refund thất bại đã xác minh và mô hình Saga refund muộn vẫn cần xác nhận Q-07, Q-08 trong tài liệu State Machine.
 - **UC-11-E — Reservation chưa release:** truy vấn Reservation; nếu còn `RESERVED`, release bằng khóa có `reservationId`, rồi xác minh.
 - **UC-11-F — Capture chưa thể xác minh:** chuyển UC-07; không kết luận đã thu hoặc đã refund.
 
 ### 14.5. Hậu điều kiện
 
-Order `EXPIRED` không quay lại `CONFIRMED`. Capture thành công được giữ là `SUCCEEDED`; kết quả refund được quản lý riêng. Nếu refund chưa hoàn tất, hệ thống ghi rõ `COMPENSATION_FAILED`.
+Order `EXPIRED` không quay lại `CONFIRMED`. Capture thành công được giữ là `SUCCEEDED`; kết quả refund được quản lý riêng. Nếu refund chưa hoàn tất, hệ thống lưu tiến trình Saga và kết quả refund riêng; Order giữ nguyên `EXPIRED`.
 
 ### 14.6. Trạng thái trước → sau
 
