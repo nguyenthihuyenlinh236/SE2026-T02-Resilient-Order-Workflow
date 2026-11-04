@@ -46,3 +46,26 @@ Dùng một exchange topic và một queue cho một consumer logic. Các replic
 | row.events.v1 | order.expired.v1 | row.notification.order-events.v1 |
 
 Không bind dấu # hoặc order.*.* trong bản này: event chưa hỗ trợ phải bị phát hiện thay vì được tiêu thụ ngầm. Không dùng alternate exchange che khuất lỗi routing. Tên viết thường, phân đoạn bằng dấu chấm, prefix row, version ở cuối. Queue mang tên consumer, routing key mang nghĩa sự kiện.
+
+## 4. Sơ đồ trách nhiệm và điểm chuyển giao
+
+```mermaid
+flowchart TD
+    O["Order transaction"] --> D["Order DB và Outbox"]
+    D --> P["Outbox Publisher"]
+    P --> X["row.events.v1"]
+    X -->|"Ba binding chính xác"| Q["row.notification.order-events.v1"]
+    Q --> C["Notification consumer"]
+    C --> V{"Schema và eventId hợp lệ?"}
+    V -->|"Có"| I["Transaction Inbox và tác vụ"]
+    V -->|"Không"| H["Kho cách ly bền vững"]
+    I --> A["ACK sau commit"]
+    H --> A
+    I --> W["Worker gửi thông báo"]
+    W --> R{"Kết quả gửi"}
+    R -->|"Thành công"| S["Lưu hoàn tất"]
+    R -->|"Lỗi tạm thời"| T["Lưu lịch retry"]
+    T --> W
+```
+
+Đường từ Inbox tới worker là công việc trong DB, không phải queue bổ sung. Publisher confirm xác nhận chuyển giao tới broker; ACK consumer xác nhận chuyển giao sang dữ liệu bền vững của Notification. Hai xác nhận độc lập, không chứng minh bên ngoài đã nhận thông báo [R1]. Sơ đồ Saga hiện có rút gọn Publisher → Notification; tài liệu này làm rõ broker ở giữa, không thay đổi trạng thái Order.
