@@ -31,8 +31,8 @@ Quy tắc chung:
 
 1. Ba nhánh cạnh tranh duy nhất từ `PENDING` là `PENDING → CONFIRMED`, `PENDING → COMPENSATING` và `PENDING → EXPIRING`. Các nhánh đều phải dùng conditional update; chỉ nhánh claim thành công được tiếp tục.
 2. Nhánh thất bại phải claim `PENDING → COMPENSATING` trước khi kết thúc `FAILED`, kể cả trường hợp không cần release hoặc refund.
-3. `RECONCILING` nghĩa là đang tự động đối soát theo lịch D-04. `RECONCILIATION_REQUIRED` chỉ dùng khi lịch đối soát đã cạn; tiến trình tiếp tục truy vấn nền mỗi 5 phút và cần theo dõi thủ công.
-4. Release/refund thất bại hoặc vượt ngưỡng retry dùng `COMPENSATION_FAILED`, không dùng trạng thái đối soát Payment.
+3. `RECONCILING` nghĩa là đang tự động đối soát kết quả `UNKNOWN` theo lịch D-04. `RECONCILIATION_REQUIRED` dùng khi lịch đối soát đã cạn mà kết quả vẫn `UNKNOWN`, hoặc khi refund đã được Payment Service xác minh `FAILED` theo S-13; tiến trình cần được theo dõi và xử lý theo Q-02/Q-08.
+4. Release/refund gặp lỗi kỹ thuật tạm thời có thể retry và đã dùng hết 5 lần gửi chính theo D-03 thì dùng `COMPENSATION_FAILED`. Timeout hoặc kết quả `UNKNOWN` đi qua `RECONCILING`; refund `FAILED` đã xác minh đi qua `RECONCILIATION_REQUIRED`, không gộp các trường hợp này vào lỗi tạm thời vượt ngưỡng.
 5. Mọi thời điểm được so sánh theo đồng hồ cơ sở dữ liệu UTC. Điều kiện `now() < expireAt` phải được kiểm tra trong cùng câu lệnh conditional update xác nhận đơn theo D-01.1.
 6. Khi Order chuyển trạng thái kết thúc và cần phát domain event, cập nhật Order và ghi Outbox trong cùng transaction.
 7. Timeout không chứng minh rằng một lệnh chưa được thực hiện. Các lệnh retry phải sử dụng cùng khóa idempotency theo D-02.
@@ -333,6 +333,7 @@ Order đã claim nhánh thất bại `PENDING → COMPENSATING`, do Reservation 
 - **UC-04-A — Không có Reservation hoặc khoản thu:** không gọi release/refund cho tác động không tồn tại; khi xác minh không còn việc bù trừ, ghi `FAILED`.
 - **UC-04-B — Release lỗi tạm thời vượt ngưỡng gửi:** chuyển Order và Saga `COMPENSATING → COMPENSATION_FAILED` theo D-03.2. Đến lịch retry nền mỗi 60 giây, Recovery Worker chuyển cả hai về `COMPENSATING` bằng cập nhật có điều kiện rồi tiếp tục bằng khóa cũ; không chốt `FAILED` khi release chưa được xác minh.
 - **UC-04-C — Refund lỗi tạm thời vượt ngưỡng gửi:** capture vẫn giữ trạng thái `SUCCEEDED`; trạng thái refund được lưu riêng. Cả Order và Saga chuyển `COMPENSATION_FAILED`, rồi về `COMPENSATING` trước retry nền mỗi 60 giây như UC-04-B. Kết quả refund `UNKNOWN` hoặc `FAILED` đã xác minh phải được phân biệt theo State Machine, không gộp vào lỗi tạm thời vượt ngưỡng.
+- **UC-04-C1 — Refund `FAILED` đã xác minh:** Payment Service xác nhận refund thực sự thất bại. Saga chuyển `COMPENSATING → RECONCILIATION_REQUIRED` theo S-13; Order giữ `COMPENSATING`. Không tự retry cùng khóa đã lưu kết quả thất bại, không tạo khóa mới để né kết quả; phát cảnh báo và chờ quyết định theo Q-02/Q-08.
 - **UC-04-D — Crash giữa các bước:** khi khởi động lại, xác minh tác động tại Inventory/Payment trước khi gửi lại cùng khóa.
 - **UC-04-E — Capture cần xác minh trước refund:** nếu chưa biết chắc khoản tiền đã thu, truy vấn Payment trước khi refund. Nếu capture `UNKNOWN`, không kết luận Order thất bại đã được bù trừ hoàn tất; xử lý qua UC-07.
 
@@ -348,6 +349,7 @@ Bù trừ thành công đưa Order từ `COMPENSATING` về `FAILED` và Saga `C
 | UC-04-A không có tác động | COMPENSATING → FAILED | COMPENSATING → COMPLETED | chưa có giao dịch → chưa có giao dịch | REJECTED → REJECTED |
 | UC-04-B release lỗi tạm thời vượt ngưỡng | COMPENSATING → COMPENSATION_FAILED | COMPENSATING → COMPENSATION_FAILED | — → — | RESERVED → RESERVED |
 | UC-04-C refund lỗi tạm thời vượt ngưỡng | COMPENSATING → COMPENSATION_FAILED | COMPENSATING → COMPENSATION_FAILED | SUCCEEDED → SUCCEEDED (capture không đổi) | RELEASED → RELEASED |
+| UC-04-C1 refund FAILED đã xác minh | COMPENSATING → COMPENSATING | COMPENSATING → RECONCILIATION_REQUIRED | SUCCEEDED (refund FAILED) → SUCCEEDED (refund FAILED) | trạng thái đã xác minh → không đổi |
 | UC-04-B/C bắt đầu retry nền | COMPENSATION_FAILED → COMPENSATING | COMPENSATION_FAILED → COMPENSATING | kết quả capture đã lưu → không đổi | trạng thái đã xác minh → không đổi |
 | UC-04-D crash | COMPENSATING/COMPENSATION_FAILED → tiếp tục xử lý | trạng thái lưu → tiếp tục xử lý | trạng thái capture lưu → xác minh lại | trạng thái lưu → xác minh lại |
 | UC-04-E capture chưa rõ | COMPENSATING → COMPENSATING | đang chạy → RECONCILING | UNKNOWN → UNKNOWN | RESERVED → RESERVED |
@@ -456,8 +458,9 @@ TTL Worker quét định kỳ theo D-06. Worker phải tìm cả:
 - **UC-06-A — Order đã CONFIRMED:** bỏ qua; không chuyển sang `EXPIRED`.
 - **UC-06-B — Nhánh thất bại đã claim:** không ghi đè `COMPENSATING`.
 - **UC-06-C — Payment UNKNOWN trước khi claim:** không claim `EXPIRING`, không release/refund; chuyển UC-07.
-- **UC-06-D — Release thất bại/quá 5 lần gửi:** Order giữ `EXPIRING`, Saga `COMPENSATION_FAILED`; retry nền mỗi 60 giây theo D-03.2.
-- **UC-06-E — Refund thất bại/quá 5 lần gửi:** Order giữ `EXPIRING`, Saga `COMPENSATION_FAILED`; capture vẫn `SUCCEEDED`, trạng thái refund riêng; retry nền mỗi 60 giây.
+- **UC-06-D — Release gặp lỗi kỹ thuật tạm thời và dùng hết 5 lần gửi chính:** Order giữ `EXPIRING`, Saga chuyển `COMPENSATION_FAILED`; retry nền mỗi 60 giây theo D-03.2 bằng cùng idempotency key. Không áp dụng nhánh này cho timeout hoặc kết quả `UNKNOWN`.
+- **UC-06-E — Refund gặp lỗi kỹ thuật tạm thời và dùng hết 5 lần gửi chính:** Order giữ `EXPIRING`, Saga chuyển `COMPENSATION_FAILED`; capture vẫn `SUCCEEDED`, trạng thái refund được lưu riêng. Retry nền mỗi 60 giây bằng cùng idempotency key; không chốt `EXPIRED` khi refund chưa được xác minh hoàn tất.
+- **UC-06-E1 — Refund `FAILED` đã xác minh:** Payment Service xác nhận refund thực sự thất bại. Order giữ `EXPIRING`; Saga chuyển `RECONCILIATION_REQUIRED` theo S-13. Không tự động tạo refund mới hoặc đổi idempotency key; phát cảnh báo và chờ chính sách Q-02/Q-08. Không chốt `EXPIRED` khi refund bắt buộc chưa hoàn tất.
 - **UC-06-F — Worker crash sau claim:** sau khi lease hết hạn, worker khác tiếp quản; đọc lại Order, Reservation và Payment trước khi tiếp tục. Điều kiện chốt `EXPIRED` ở bước 9 vẫn phải được kiểm tra đầy đủ.
 - **UC-06-G — Payment chuyển UNKNOWN sau khi Order đã EXPIRING (D-01.3):** dừng release/refund và không chốt `EXPIRED`. Giữ Order `EXPIRING`, Saga `RECONCILING`; chuyển UC-07 để xác minh.
 - **UC-06-H — Không có Reservation hoặc khoản tiền:** nếu Reservation chưa xác minh thì phải tra cứu bằng khóa reserve trước. Chỉ khi xác minh không có Reservation và không có capture cần refund mới được chốt `EXPIRED`.
@@ -474,8 +477,9 @@ Order chỉ `EXPIRED` khi đủ năm điều kiện tại bước 9. Không có 
 | UC-06-A | CONFIRMED → CONFIRMED | hoàn tất → hoàn tất | SUCCEEDED → SUCCEEDED | RESERVED → RESERVED |
 | UC-06-B | COMPENSATING → không đổi | đang chạy → không đổi | — → — | — → — |
 | UC-06-C | PENDING → PENDING | đang chạy → RECONCILING | UNKNOWN → UNKNOWN | RESERVED → RESERVED |
-| UC-06-D | EXPIRING → EXPIRING | đang chạy → COMPENSATION_FAILED | — → — | RESERVED → chưa xác minh |
-| UC-06-E | EXPIRING → EXPIRING | đang chạy → COMPENSATION_FAILED | SUCCEEDED (refund chưa rõ/FAILED) → SUCCEEDED (refund chưa rõ/FAILED) | RELEASED → RELEASED |
+| UC-06-D | EXPIRING → EXPIRING | COMPENSATING → COMPENSATION_FAILED | — → — | RESERVED → RESERVED |
+| UC-06-E | EXPIRING → EXPIRING | COMPENSATING → COMPENSATION_FAILED | SUCCEEDED (refund gặp lỗi tạm thời) → SUCCEEDED (capture không đổi) | RELEASED → RELEASED |
+| UC-06-E1 | EXPIRING → EXPIRING | COMPENSATING → RECONCILIATION_REQUIRED | SUCCEEDED (refund FAILED) → SUCCEEDED (refund FAILED) | trạng thái đã xác minh → không đổi |
 | UC-06-F | EXPIRING → EXPIRING hoặc EXPIRED sau khi đủ điều kiện | trạng thái đã lưu → tiếp tục xử lý | trạng thái đã lưu → xác minh lại | trạng thái đã lưu → xác minh lại |
 | UC-06-G | EXPIRING → EXPIRING | đang chạy → RECONCILING | UNKNOWN → UNKNOWN | RESERVED → RESERVED |
 | UC-06-H | PENDING → EXPIRING → EXPIRED | đang chạy → hoàn tất | chưa có giao dịch → chưa có giao dịch | chưa xác minh → xác minh không tồn tại |
@@ -501,7 +505,7 @@ FR-12, FR-13, FR-15; BR-01, BR-07, BR-10, BR-13; EC-04, EC-06, EC-11; D-01, D-04
 
 ### 10.2. Tiền điều kiện và trigger
 
-Payment `UNKNOWN`, hoặc có chênh lệch cần xác minh giữa Order, Reservation và Payment.
+Payment/refund `UNKNOWN`, refund đã được xác minh `FAILED`, hoặc có chênh lệch cần xác minh giữa Order, Reservation và Payment.
 
 ### 10.3. Luồng chính
 
@@ -514,7 +518,8 @@ Payment `UNKNOWN`, hoặc có chênh lệch cần xác minh giữa Order, Reserv
    - `COMPENSATING`: xác minh capture trước khi quyết định refund.
 5. Nếu Payment `FAILED` đã xác minh và Order còn `PENDING`, claim `PENDING → COMPENSATING`.
 6. Nếu đã dùng hết lịch 30 lần/10 phút mà vẫn UNKNOWN, đặt Saga `RECONCILIATION_REQUIRED`, cần can thiệp thủ công theo Q-02 và tiếp tục truy vấn nền mỗi 5 phút.
-7. Khi chưa xác minh được Payment, không chuyển Payment thành `FAILED`, không release, không refund, không chốt `EXPIRED` và không gia hạn `expireAt`.
+7. Nếu Payment Service xác minh refund `FAILED`, đặt Saga `RECONCILIATION_REQUIRED` theo S-13, giữ Order ở trạng thái của nhánh đã claim và chờ xử lý theo Q-02/Q-08; không chạy lại cùng khóa hoặc tạo khóa mới nếu chưa có quyết định được phê duyệt.
+8. Khi chưa xác minh được Payment, không chuyển Payment thành `FAILED`, không release, không refund, không chốt `EXPIRED` và không gia hạn `expireAt`.
 
 ### 10.4. Luồng thay thế và ngoại lệ
 
@@ -524,10 +529,11 @@ Payment `UNKNOWN`, hoặc có chênh lệch cần xác minh giữa Order, Reserv
 - **UC-07-D — Payment Service không truy cập được:** ghi lỗi truy vấn, tiếp tục lịch retry; không suy diễn kết quả.
 - **UC-07-E — Reservation chưa rõ:** truy vấn bằng khóa reserve; không tạo reservation mới hoặc release trước khi biết kết quả.
 - **UC-07-F — Không thống nhất được tác động:** giữ dữ liệu và cảnh báo Người vận hành. Đánh đổi giữ Reservation trong lúc Payment UNKNOWN xử lý theo D-04/Q-03.
+- **UC-07-G — Refund `FAILED` đã xác minh:** Saga `RECONCILIATION_REQUIRED`; Order giữ trạng thái nhánh hiện tại (`COMPENSATING`, `EXPIRING` hoặc `EXPIRED`). Không coi đây là lỗi tạm thời vượt ngưỡng, không tự động retry cùng khóa đã có kết quả `FAILED`, và không tạo khóa mới khi Q-08 chưa được chốt.
 
 ### 10.5. Hậu điều kiện
 
-Kết quả Payment được xác minh hoặc Saga chuyển `RECONCILIATION_REQUIRED`. Trạng thái này chỉ có sau khi lịch tự động cạn; việc truy vấn nền vẫn tiếp tục mỗi 5 phút.
+Kết quả Payment được xác minh hoặc Saga chuyển `RECONCILIATION_REQUIRED`. Trạng thái này xuất hiện khi lịch đối soát kết quả `UNKNOWN` đã cạn, hoặc khi refund được xác minh `FAILED` theo S-13. Trường hợp `UNKNOWN` tiếp tục truy vấn nền mỗi 5 phút; trường hợp refund `FAILED` chờ xử lý theo Q-02/Q-08.
 
 ### 10.6. Trạng thái trước → sau
 
@@ -539,6 +545,7 @@ Kết quả Payment được xác minh hoặc Saga chuyển `RECONCILIATION_REQU
 | UC-07-D Payment Service lỗi | — → không đổi | RECONCILING → RECONCILING | UNKNOWN → UNKNOWN | — → — |
 | UC-07-E Reservation chưa rõ | — → không đổi | RECONCILING → RECONCILING | UNKNOWN → UNKNOWN | chưa xác minh → chưa xác minh |
 | UC-07-F cần can thiệp | — → không đổi | RECONCILIATION_REQUIRED → RECONCILIATION_REQUIRED | UNKNOWN → UNKNOWN | trạng thái đã xác minh → không đổi |
+| UC-07-G refund FAILED đã xác minh | trạng thái nhánh hiện tại → không đổi | COMPENSATING → RECONCILIATION_REQUIRED | SUCCEEDED (refund FAILED) → SUCCEEDED (refund FAILED) | trạng thái đã xác minh → không đổi |
 
 ### 10.7. Sự kiện
 
@@ -585,7 +592,7 @@ Một service/worker khởi động lại sau crash hoặc phát hiện công vi
 - **UC-08-B — Crash sau commit, trước response:** trả lại kết quả đã lưu; không tạo Order hoặc giao dịch mới.
 - **UC-08-C — Crash sau publish, trước đánh dấu Outbox (EC-08):** publish lại cùng eventId; consumer chống trùng.
 - **UC-08-D — Crash sau claim, trước release:** sau lease hết hạn, worker khác kiểm tra Reservation rồi tiếp tục release nếu cần.
-- **UC-08-E — Không xác minh được tác động:** giữ công việc dở dang. Payment còn trong lịch thì `RECONCILING`; hết lịch thì `RECONCILIATION_REQUIRED`; release/refund vượt ngưỡng thì `COMPENSATION_FAILED`.
+- **UC-08-E — Không xác minh được tác động:** giữ công việc dở dang. Kết quả `UNKNOWN` còn trong lịch thì `RECONCILING`; hết lịch thì `RECONCILIATION_REQUIRED`. Refund `FAILED` đã xác minh cũng chuyển `RECONCILIATION_REQUIRED` theo S-13. Chỉ release/refund gặp lỗi kỹ thuật tạm thời và dùng hết ngưỡng gửi chính mới chuyển `COMPENSATION_FAILED`.
 - **UC-08-F — Retry nền thất bại:** release/refund lỗi tạm thời vượt ngưỡng chuyển Saga `COMPENSATION_FAILED`; nhánh thất bại chuyển Order `COMPENSATING → COMPENSATION_FAILED`, nhánh hết hạn giữ Order `EXPIRING`. Trước retry nền mỗi 60 giây, nhánh thất bại chuyển cả Order/Saga về `COMPENSATING`; nhánh hết hạn chỉ chuyển Saga về `COMPENSATING` và vẫn giữ Order `EXPIRING`, với quyền claim/lease hợp lệ. Payment cạn lịch chuyển `RECONCILIATION_REQUIRED` và tiếp tục truy vấn nền mỗi 5 phút.
 
 ### 11.5. Hậu điều kiện
@@ -770,8 +777,8 @@ Capture được xác minh `SUCCEEDED` sau khi Order đã vào `EXPIRING` hoặc
 
 - **UC-11-A — Capture thành công khi Order EXPIRING:** giữ Order `EXPIRING`; không xác nhận lại. Xác minh release/refund và tiếp tục xử lý.
 - **UC-11-B — Capture thành công sau EXPIRED:** giữ Order `EXPIRED`; refund khoản tiền đã thu và xác minh kết quả.
-- **UC-11-C — Refund timeout:** capture vẫn `SUCCEEDED`, trạng thái refund chưa rõ. Retry cùng khóa; nếu vượt ngưỡng 5 lần gửi, chuyển `COMPENSATION_FAILED`, retry nền mỗi 60 giây.
-- **UC-11-D — Refund thất bại:** giữ Order `EXPIRED`; lỗi được ghi ở tiến trình Saga/refund, không ghi Order `COMPENSATION_FAILED` và không mở lại Order. Cách xử lý refund thất bại đã xác minh và mô hình Saga refund muộn vẫn cần xác nhận Q-07, Q-08 trong tài liệu State Machine.
+- **UC-11-C — Refund timeout/UNKNOWN:** capture vẫn `SUCCEEDED`, trạng thái refund là `UNKNOWN`. Saga `RECONCILING` trong lịch D-04; nếu hết lịch mà vẫn chưa rõ thì `RECONCILIATION_REQUIRED` và tiếp tục truy vấn nền. Không chuyển `COMPENSATION_FAILED` chỉ vì timeout, không tạo refund bằng khóa khác.
+- **UC-11-D — Refund `FAILED` đã xác minh:** giữ Order `EXPIRED`; Saga chuyển `RECONCILIATION_REQUIRED` theo S-13, không ghi Order `COMPENSATION_FAILED` và không mở lại Order. Không tự động retry cùng khóa đã có kết quả thất bại hoặc tạo khóa mới; cách xử lý tiếp theo chờ Q-02/Q-08. Mô hình Saga refund muộn vẫn cần xác nhận Q-07.
 - **UC-11-E — Reservation chưa release:** truy vấn Reservation; nếu còn `RESERVED`, release bằng khóa có `reservationId`, rồi xác minh.
 - **UC-11-F — Capture chưa thể xác minh:** chuyển UC-07; không kết luận đã thu hoặc đã refund.
 
@@ -785,8 +792,9 @@ Order `EXPIRED` không quay lại `CONFIRMED`. Capture thành công được gi�
 |---|---|---|---|---|
 | UC-11-A | EXPIRING → EXPIRING | đang chạy → tiếp tục xử lý | UNKNOWN → SUCCEEDED | RESERVED → RELEASED nếu cần |
 | UC-11-B refund thành công | EXPIRED → EXPIRED | hoàn tất → hoàn tất sau xử lý refund | SUCCEEDED (refund chưa thực hiện) → SUCCEEDED (refund thành công) | RELEASED → RELEASED |
-| UC-11-C refund chưa rõ | EXPIRED → EXPIRED | hoàn tất → COMPENSATION_FAILED nếu vượt ngưỡng | SUCCEEDED (refund chưa rõ) → SUCCEEDED (refund chưa rõ) | RELEASED → RELEASED |
-| UC-11-D refund thất bại | EXPIRED → EXPIRED | hoàn tất → COMPENSATION_FAILED | SUCCEEDED (refund FAILED) → SUCCEEDED (refund FAILED) | RELEASED → RELEASED |
+| UC-11-C refund UNKNOWN, còn lịch | EXPIRED → EXPIRED | COMPENSATING → RECONCILING | SUCCEEDED (refund UNKNOWN) → SUCCEEDED (refund UNKNOWN) | RELEASED → RELEASED |
+| UC-11-C refund UNKNOWN, hết lịch | EXPIRED → EXPIRED | RECONCILING → RECONCILIATION_REQUIRED | SUCCEEDED (refund UNKNOWN) → SUCCEEDED (refund UNKNOWN) | RELEASED → RELEASED |
+| UC-11-D refund FAILED đã xác minh | EXPIRED → EXPIRED | COMPENSATING → RECONCILIATION_REQUIRED | SUCCEEDED (refund FAILED) → SUCCEEDED (refund FAILED) | RELEASED → RELEASED |
 | UC-11-E Reservation còn giữ | EXPIRED → EXPIRED | hoàn tất → đang chạy/COMPENSATION_FAILED | SUCCEEDED → SUCCEEDED | RESERVED → RELEASED |
 | UC-11-F capture chưa rõ | EXPIRING/EXPIRED → không đổi | đang chạy/hoàn tất → RECONCILING | UNKNOWN → UNKNOWN | trạng thái đã ghi → không đổi |
 

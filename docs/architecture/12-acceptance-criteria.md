@@ -395,11 +395,11 @@ Các tiêu chí này bổ sung cho Use Case, Business Rules, State Machine và S
 **Then**
 - Capture status vẫn là `SUCCEEDED`.
 - Refund status được giữ là `UNKNOWN`.
-- Hệ thống đối soát refund hoặc thử lại theo chính sách tương ứng.
+- Trong lịch D-04, Saga ở `RECONCILING` và hệ thống truy vấn refund bằng khóa ổn định. Nếu hết lịch mà vẫn `UNKNOWN`, Saga chuyển `RECONCILIATION_REQUIRED` và tiếp tục truy vấn nền; không coi đây là lỗi tạm thời đã xác định.
 - Tổng số lần gửi refund tự động tối đa là 5, tính cả lần đầu; retry dùng cùng khóa `payment:refund:{orderId}:{paymentId}:v1` và backoff cấu hình `1s, 2s, 4s, 8s`.
 - Nếu refund timeout hoặc vẫn `UNKNOWN`, hệ thống truy vấn/đối soát theo chính sách; không tạo refund mới bằng khóa khác.
-- Nếu lỗi tạm thời vượt ngưỡng gửi, Saga ghi `COMPENSATION_FAILED`, phát cảnh báo và tiếp tục retry nền mỗi 60 giây. Với Order thuộc nhánh thất bại chưa kết thúc, áp dụng T-06/T-07 và AC-04.3 cho cả Order/Saga; với nhánh hết hạn, giữ Order `EXPIRING` theo AC-06.5. Ngoại lệ refund muộn sau `EXPIRED` theo AC-07.3 không mở lại Order.
-- Nếu Payment Service xác minh refund `FAILED` (không phải timeout/UNKNOWN), Saga chuyển `RECONCILIATION_REQUIRED` để theo dõi/can thiệp theo chính sách; không đánh đồng lỗi nghiệp vụ đã xác minh với kết quả chưa rõ.
+- Nếu một lần gửi refund trả lỗi kỹ thuật tạm thời đã xác định (không phải timeout/`UNKNOWN`) và đã dùng hết 5 lần gửi chính, Saga ghi `COMPENSATION_FAILED`, phát cảnh báo và tiếp tục retry nền mỗi 60 giây. Với Order thuộc nhánh thất bại chưa kết thúc, áp dụng T-06/T-07 và AC-04.3 cho cả Order/Saga; với nhánh hết hạn, giữ Order `EXPIRING` theo AC-06.5. Ngoại lệ refund muộn sau `EXPIRED` theo AC-07.3 không mở lại Order.
+- Nếu Payment Service xác minh refund `FAILED` (không phải lỗi kỹ thuật tạm thời hoặc timeout/`UNKNOWN`), Saga chuyển `RECONCILIATION_REQUIRED` theo S-13 để theo dõi/can thiệp theo Q-02/Q-08. Không tự động gửi lại cùng khóa đã có kết quả thất bại hoặc tạo khóa mới để né kết quả.
 - Không kết luận refund thành công khi chưa được xác minh.
 
 ### AC-07.3 – Capture thành công muộn sau khi Order đã EXPIRED
