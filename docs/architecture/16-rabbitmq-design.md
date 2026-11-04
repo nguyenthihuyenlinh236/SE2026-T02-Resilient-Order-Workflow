@@ -123,3 +123,23 @@ Queue không có message TTL, queue expiry, auto-delete hoặc chính sách drop
 Bộ xử lý return/confirm phải bảo toàn thứ tự trên channel và tương quan theo messageId, không xử lý confirm độc lập làm mất cờ returned. Mandatory chỉ phát hiện không có queue nào nhận; kiểm tra đúng queue/binding và quyền thay đổi topology để tránh route nhầm queue khác.
 
 Dữ liệu Publisher cần có: eventId, envelope bất biến, payload_hash, exchange/routing key hoặc mapping version bất biến, status, attempt_count, next_attempt_at, claim_token, lease_until, last_error, created_at, published_at. Các trường bổ sung thuộc issue triển khai; không khẳng định migration hiện tại đã có đủ.
+
+## 7. Consumer, ACK và chống trùng
+
+Dùng manual ACK, prefetch demo=10 mỗi consumer (cấu hình được), transaction tiếp nhận ngắn. ACK từng delivery trên đúng channel; không ACK hàng loạt khi các transaction chưa cùng hoàn tất [R1].
+
+| Tình huống | Xử lý dữ liệu | Hành động broker |
+|---|---|---|
+| Event mới hợp lệ | Một transaction insert Inbox và tạo tác vụ notification bền vững | ACK sau commit |
+| Cùng consumerName/eventId, cùng hash | Xác minh Inbox đã commit cùng tác vụ; không tạo lại công việc | ACK |
+| Cùng eventId, khác nội dung | Lưu bản xung đột và lý do vào kho cách ly; giữ nguyên bản đúng | ACK chỉ sau commit cách ly |
+| JSON/schema sai, version chưa hỗ trợ, metadata lệch body | Cách ly raw bytes và thuộc tính cùng lỗi, không gọi bên ngoài | ACK sau commit cách ly |
+| DB không khả dụng/commit chưa xác định | Không giả định đã lưu; pause listener, để redelivery | Không ACK; đóng channel hoặc nack requeue=true có backoff |
+| Crash trước commit | DB rollback | Broker giao lại |
+| Crash sau commit trước ACK | Inbox/tác vụ đã tồn tại | Giao lại và dedupe |
+
+Inbox unique (consumer_name, event_id); lưu canonical hash của toàn envelope, không tính header giao nhận như redelivered. Canonicalization phải xác định thứ tự key JSON, bảo toàn giá trị/mảng và thống nhất implementation; không so hash raw JSON chỉ vì khác whitespace. Cạnh tranh hai replica phân xử bằng unique constraint; bên thua đọc lại record đã commit rồi so hash.
+
+Notification task unique (event_id, notification_type, channel), key notification:{eventId}:{notificationType}:{channel}. Inbox tiếp nhận và mọi task dự kiến phải cùng commit. Inbox processed_at biểu thị hoàn tất tiếp nhận/tạo task, không biểu thị đã gửi ra ngoài. Replica không dùng consumerName riêng để né dedupe.
+
+Kho cách ly do Notification sở hữu, không phải DLQ RabbitMQ hay trạng thái DEAD_LETTER của notification. Lưu raw body (giới hạn theo chính sách kích thước), thuộc tính cần thiết, fingerprint, eventId nếu parse được, lỗi và timestamp; không chỉ ghi log rồi ACK. Raw body vượt giới hạn phải được lưu đủ vào kho bền vững có tham chiếu trước ACK hoặc dừng nhận, không cắt mất bản gốc rồi báo đã lưu. Khi kho này cũng lỗi, giữ delivery chưa ACK và pause. Sửa consumer rồi replay dữ liệu hợp lệ qua cùng đường validate/dedupe với eventId cũ; event xung đột không tự ghi đè hoặc phát lại mù.
