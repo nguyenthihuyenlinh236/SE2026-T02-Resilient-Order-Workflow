@@ -69,3 +69,43 @@ flowchart TD
 ```
 
 Đường từ Inbox tới worker là công việc trong DB, không phải queue bổ sung. Publisher confirm xác nhận chuyển giao tới broker; ACK consumer xác nhận chuyển giao sang dữ liệu bền vững của Notification. Hai xác nhận độc lập, không chứng minh bên ngoài đã nhận thông báo [R1]. Sơ đồ Saga hiện có rút gọn Publisher → Notification; tài liệu này làm rõ broker ở giữa, không thay đổi trạng thái Order.
+
+## 5. Độ bền và envelope
+
+Exchange/queue phải được provision và kiểm tra binding trước khi cho Publisher chạy. Queue quorum dùng volume bền vững. Compose hiện có rabbitmq:4-management và một node: demo chịu restart nếu volume còn, không chịu mất vĩnh viễn node/volume; muốn HA phải triển khai tối thiểu ba node và quorum ba thành viên rồi kiểm thử failover [R2]. Issue này không sửa Compose.
+
+| Thuộc tính AMQP | Giá trị/quy tắc |
+|---|---|
+| content_type | application/json |
+| content_encoding | UTF-8 |
+| delivery_mode | 2 (persistent) |
+| message_id | Bằng eventId trong JSON |
+| correlation_id | Bằng correlationId trong JSON |
+| type | Bằng eventType trong JSON |
+| expiration | Không đặt; TTL Order không phải TTL event |
+| mandatory | true cho publish |
+| Publisher confirms | Bật trên channel; theo dõi từng lần publish |
+| Header schemaVersion | Nếu gửi phải bằng schemaVersion trong JSON; body là nguồn schema chính |
+
+Envelope giữ nguyên API Contract: eventId, commandId (có thể null), correlationId, schemaVersion=1, eventType, occurredAt UTC, producer=order-service và payload. Chỉ commandId nullable; validate event/status/timestamp và reasonCode của OrderFailed theo contract.
+
+```json
+{
+  "eventId": "evt-confirmed-001",
+  "commandId": "cmd-capture-001",
+  "correlationId": "corr-ord-001",
+  "schemaVersion": 1,
+  "eventType": "OrderConfirmed",
+  "occurredAt": "2026-11-04T10:00:06Z",
+  "producer": "order-service",
+  "payload": {
+    "orderId": "ORD-001",
+    "status": "CONFIRMED",
+    "confirmedAt": "2026-11-04T10:00:06Z"
+  }
+}
+```
+
+Queue không có message TTL, queue expiry, auto-delete hoặc chính sách drop-head. Nếu giới hạn dung lượng bằng max-length-bytes, dùng overflow=reject-publish và kiểm thử confirm/nack để Outbox giữ event bị từ chối. Ngưỡng dung lượng theo môi trường; cảnh báo disk/memory trước khi cạn.
+
+Đối với queue quorum demo không có DLX, khai báo x-delivery-limit=-1 ngay khi tạo để tránh giới hạn redelivery mặc định loại bỏ message. Đây là đánh đổi có chủ đích, không dùng cho vòng lặp requeue liên tục: consumer phải pause/backoff khi DB hỏng, cách ly lỗi xác định, giám sát redelivery [R2]. Không dựa vào số redelivery của broker làm bộ đếm retry nghiệp vụ. Tag 4-management chưa pin phiên bản; issue triển khai phải pin minor/digest và kiểm tra các argument thực tế, không phụ thuộc tính năng delayed-retry mới.
