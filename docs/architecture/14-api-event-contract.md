@@ -113,7 +113,7 @@ Lỗi ở tầng giao thức/validation dùng cấu trúc thống nhất:
 | `409` | Idempotency key dùng với payload khác hoặc xung đột tài nguyên | Không tạo key mới để né xung đột |
 | `422` | Không dùng cho kết quả nghiệp vụ thường lệ của reserve/capture/refund; kết quả đã xác minh trả `200` với trạng thái trong body |
 | `429` | Bị giới hạn tốc độ | Retry theo hướng dẫn/backoff nếu được phép |
-| `5xx` | Lỗi tạm thời phía service | Có thể retry theo D-03, giữ nguyên key |
+| `5xx` | Lỗi hạ tầng/trạng thái; chưa xác định tác dụng | Query trước; 503 SERVICE_UNAVAILABLE/retryable=true được retry theo D-03; 500 INTERNAL_SERVER_ERROR/retryable=false cần điều tra, không retry mù |
 | Timeout / mất kết nối | Không nhận được phản hồi xác định | Kết quả tác dụng phụ có thể là `UNKNOWN`; query hoặc retry cùng key |
 
 Không dùng HTTP status đơn lẻ để suy ra trạng thái nghiệp vụ. Ví dụ timeout khi capture không được chuyển thành `FAILED`.
@@ -926,6 +926,28 @@ Quy tắc:
 - Producer có thể phát nhiều version trong giai đoạn migration chỉ khi consumer hỗ trợ rõ từng version theo kế hoạch.
 - Event đã ghi Outbox phải giữ nguyên payload và version khi publish lại.
 - Registry và lựa chọn JSON Schema/Avro/Protobuf là quyết định triển khai, không làm thay đổi quy tắc trên.
+
+### 11.1. Đồng bộ với Inventory và giới hạn triển khai
+
+Đối chiếu nhánh Inventory tại commit eb856bc, migration V001–V005. V004 hỗ trợ key 512; V005 hỗ trợ Order/Reservation Identifier 128 ký tự. ProductId vẫn UUID nội bộ. DB Order/Payment phải theo cùng giới hạn trước khi nghiệm thu tích hợp; tài liệu thiết kế không chứng minh các service đó đã triển khai.
+
+Reserve/Cancel dùng tracing header; Release còn có commandId/correlationId bắt buộc trong body và hash. Bên gọi giữ chúng ổn định; nếu gửi cả header/body thì dùng cùng giá trị để truy vết, nhưng Inventory hiện chưa kiểm tra hai nguồn khớp nhau. Header X-Correlation-Id bắt buộc không trắng ≤128 ASCII hiển thị, X-Command-Id tùy chọn cùng validation. Body tracing Release theo implementation hiện tại: string không trắng ≤128 ký tự. Không đổi hash của dữ liệu cũ khi chuẩn hóa tracing trong tương lai.
+
+Request Create Order chuyển productId sang storeId/SKU và Reserve thêm caller reservationId là thay đổi phá vỡ tương thích với bản draft trước. Chốt bản này trước rollout Order; không replay payload cũ bằng key mới để né xung đột, không sửa migration/checksum hoặc snapshot lịch sử. API cũ /api/v1/inventory giữ riêng để tương thích; mọi ví dụ mới dùng /internal/v1.
+
+Inventory đã có handler cho validation và một số lỗi DB/transaction; auth và chuẩn hóa mọi exception/routing chưa hoàn tất. 401/403/429 trong ma trận là yêu cầu kiến trúc khi triển khai cơ chế tương ứng, không khẳng định đã có trong code. Chưa nghiệm thu tương thích toàn hệ thống chỉ dựa vào tài liệu hay số test Inventory.
+
+### 11.2. Tiêu chí kiểm chứng đồng bộ
+
+- Create Order lưu customerId, storeId/SKU, reservationId và payload trước gửi mạng; restart không đổi yêu cầu.
+- Reserve hai SKU cùng cửa hàng, SKU trùng/gộp/tràn integer, ID/key tại biên và vượt giới hạn.
+- Cùng key đổi storeId/reservationId/quantity trả 409; không oversell hoặc giữ một phần.
+- Reserve/Cancel và Release/Cancel cạnh tranh không trả tồn hai lần; Cancel trước Reserve chặn tác dụng muộn.
+- GET operation giữ snapshot gốc, GET Reservation phản ánh trạng thái hiện tại; 404 không được suy thành thất bại xác định.
+- Release retry nguyên tracing body thành công; đổi body cùng key trả 409.
+- Migrate giữ dữ liệu/hash/snapshot cũ; xác minh ba event kết thúc và không phát OrderCreated.
+
+Các mục này là tiêu chí cho contract/integration tests; lần đồng bộ tài liệu không chạy hoặc tuyên bố các test runtime đã pass.
 
 ## 12. Bảo mật và quan sát
 
