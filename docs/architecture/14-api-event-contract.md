@@ -134,7 +134,7 @@ Bảng này là checklist triển khai ở mức field-level cho tất cả HTTP
 
 | Endpoint / method | Input (nguồn; kiểu; bắt buộc/null; validation) | Output 2xx | HTTP error và mã lỗi |
 |---|---|---|---|
-| `POST /internal/v1/reservations` | Header Idempotency-Key bắt buộc và phải đúng công thức `reserve:{orderId}:v1`; body `commandId`, `orderId`, `correlationId` string bắt buộc/non-null (command/correlation UUID hoặc tracing ID tối đa 128); `items` array 1–100 bắt buộc/non-empty; item object, `productId` Identifier duy nhất và `quantity` integer >0 bắt buộc. Không cho item trùng/null, quantity float/0/âm, field bắt buộc null. | `200 OK`: `reservationId` Identifier|null, `orderId` Identifier, `status=RESERVED|REJECTED`, `reservedAt` timestamp|null, `reasonCode` string|null. Với RESERVED: reservationId/reservedAt có giá trị, reasonCode=null. Với REJECTED: reservationId/reservedAt=null, reasonCode thuộc `INVENTORY_NOT_AVAILABLE/PRODUCT_NOT_FOUND/ORDER_ALREADY_RELEASED`. Tất cả field trên luôn có mặt. | `400 VALIDATION_ERROR`, `404 ORDER_NOT_FOUND` nếu Order không tồn tại/không được nhận diện theo contract nội bộ, `409 IDEMPOTENCY_KEY_CONFLICT`, `401/403`, `429`, `5xx`. Out-of-stock là kết quả nghiệp vụ `200 REJECTED`, không phải 409. Timeout/5xx có thể thành UNKNOWN ở caller; query trước hoặc retry cùng key. |
+| `POST /internal/v1/reservations` | Body chỉ gồm `orderId: Identifier`, `reservationId: Identifier`, `storeId: string` không trắng ≤100 ký tự và `items` theo mục 3.1.1; tất cả bắt buộc/non-null. Order sinh và lưu reservationId trước lần gửi đầu. Không gửi commandId/correlationId trong body Reserve; tracing nằm ở header. Header Idempotency-Key đúng `reserve:{orderId}:v1`. | `200 OK`: `reservationId` Identifier|null, `orderId` Identifier, `status=RESERVED|REJECTED`, `reservedAt` timestamp|null, `reasonCode` string|null. Với RESERVED: reservationId/reservedAt có giá trị, reasonCode=null. Với REJECTED: reservationId/reservedAt=null, reasonCode thuộc `INVENTORY_NOT_AVAILABLE/PRODUCT_NOT_FOUND/ORDER_ALREADY_RELEASED`. Tất cả field trên luôn có mặt. | `400 VALIDATION_ERROR`, `409 IDEMPOTENCY_KEY_CONFLICT/RESERVATION_ID_CONFLICT/RESERVE_HISTORY_UNAVAILABLE`, `401/403`, `429`, `5xx`. Out-of-stock là kết quả nghiệp vụ `200 REJECTED`, không phải 409. Timeout/5xx có thể thành UNKNOWN ở caller; query trước hoặc retry cùng key. |
 | `GET /internal/v1/reservations/by-order/{orderId}` | Path `orderId` Identifier bắt buộc; không body, không Idempotency-Key. | `200 OK`: `reservationId` Identifier|null (null chỉ khi UNKNOWN chưa có ID; REJECTED không có ID), `orderId` Identifier, `status=RESERVED|RELEASED|REJECTED|UNKNOWN`, `idempotencyKey` string bắt buộc/non-null, `reasonCode` string|null bắt buộc có mặt. RESERVED/RELEASED cần reservationId; REJECTED cần mã lý do hợp lệ; trạng thái khác reasonCode=null. | `400 INVALID_IDENTIFIER`, `404 RESERVATION_NOT_FOUND` khi chưa có bản ghi, `401/403`, `429`, `5xx`. Query timeout retry query; 404 sau timeout không chứng minh một command đang bay sẽ không chạy. |
 | `POST /internal/v1/reservations/{reservationId}/release` | Path `reservationId` Identifier bắt buộc. Header Idempotency-Key bắt buộc theo công thức `inventory:release:{orderId}:{reservationId}:v1`. Body `commandId`, `orderId`, `correlationId` string bắt buộc/non-null, đều theo validation Identifier/tracing chung. | `200 OK`: `reservationId`, `orderId` Identifier; `status=RELEASED`; `releasedAt` ISO-8601 UTC; tất cả bắt buộc/non-null. Gọi lặp trả cùng releasedAt lần đầu, không tăng tồn kho lần nữa. | `400 VALIDATION_ERROR/INVALID_IDENTIFIER`, `404 RESERVATION_NOT_FOUND`, `409 IDEMPOTENCY_KEY_CONFLICT`, `401/403`, `429`, `5xx`. Timeout không xác nhận đã release; query/retry cùng key. |
 
@@ -240,7 +240,7 @@ Các API này là internal API, chỉ Order Service/Saga Orchestrator được g
 
 ### 5.1. Reserve Inventory
 
-**Schema request:** `commandId: string` UUID/tracing ID ≤128 ký tự, `orderId: Identifier`, `correlationId: string` UUID/tracing ID ≤128 ký tự đều bắt buộc/non-null; `items: array<object>` bắt buộc/non-null, 1–100 phần tử, không rỗng; từng item object non-null có `productId: Identifier` bắt buộc/duy nhất và `quantity: integer` bắt buộc >0, không vượt giới hạn cấu hình. Không chấp nhận duplicate productId, item null, quantity float/chuỗi số/0/âm. Header `Idempotency-Key` bắt buộc đúng `reserve:{orderId}:v1`.
+**Schema request:** Body chỉ gồm `orderId: Identifier`, `reservationId: Identifier`, `storeId: string` không trắng ≤100 ký tự và `items` theo mục 3.1.1; tất cả bắt buộc/non-null. Order sinh và lưu reservationId trước lần gửi đầu. Không gửi commandId/correlationId trong body Reserve; tracing nằm ở header. Header Idempotency-Key đúng `reserve:{orderId}:v1`.
 
 **Schema response Reserve:** Tất cả trường dưới đây bắt buộc có mặt.
 
@@ -252,7 +252,7 @@ Các API này là internal API, chỉ Order Service/Saga Orchestrator được g
 | `reservedAt` | ISO-8601 UTC hoặc null | Thời điểm giữ hàng khi `RESERVED`; null khi `REJECTED` |
 | `reasonCode` | string hoặc null | Null khi `RESERVED`; khi `REJECTED` bắt buộc là một mã bên dưới |
 
-Mã từ chối: `INVENTORY_NOT_AVAILABLE` (thiếu tồn kho), `PRODUCT_NOT_FOUND` (sản phẩm hợp lệ về định dạng nhưng không tồn tại), `ORDER_ALREADY_RELEASED` (Order đã được Inventory ghi nhận release, không giữ hàng lại). JSON/field sai định dạng trả `400 VALIDATION_ERROR`, không dùng `REJECTED`. Kết quả từ chối phải được lưu theo reserve key để retry/query trả được kết quả đã xác minh.
+Mã từ chối: `INVENTORY_NOT_AVAILABLE` (thiếu tồn kho), `PRODUCT_NOT_FOUND` (sản phẩm hợp lệ về định dạng nhưng không tồn tại), `ORDER_ALREADY_RELEASED` (Order đã có guard do Release hoặc Cancel, kể cả chưa từng có Reservation). JSON/field sai định dạng trả `400 VALIDATION_ERROR`, không dùng `REJECTED`. Kết quả từ chối phải được lưu theo reserve key để retry/query trả được kết quả đã xác minh.
 
 | Thuộc tính | Đặc tả |
 |---|---|
@@ -267,15 +267,15 @@ Request mẫu:
 
 ```json
 {
-  "commandId": "cmd-reserve-001",
   "orderId": "ORD-001",
+  "reservationId": "RSV-001",
+  "storeId": "DEMO-STORE",
   "items": [
     {
       "sku": "SKU-001",
       "quantity": 2
     }
-  ],
-  "correlationId": "corr-ord-001"
+  ]
 }
 ```
 
@@ -296,7 +296,7 @@ Quy tắc:
 - Một Order không được tạo nhiều reservation có hiệu lực do retry.
 - Cùng key/cùng payload trả lại kết quả đã lưu; cùng key/khác payload bị từ chối.
 - Nếu reserve timeout, không gửi release khi chưa xác minh kết quả reserve; query theo `orderId` qua API mục 5.2 để đối chiếu reserve key ổn định trước.
-- Inventory phải xử lý quy tắc reserve đến muộn sau release của cùng Order theo D-01.5/A-13; chi tiết triển khai cần Dev xác nhận.
+- Inventory phải xử lý quy tắc reserve đến muộn sau release của cùng Order theo D-01.5/A-13; Reserve/Release/Cancel khóa cùng guard theo Order. Replay kết quả cũ trước khi xét guard; lệnh Reserve mới sau guard hủy trả REJECTED/ORDER_ALREADY_RELEASED.
 
 Response khi không đủ tồn kho (`200 OK`):
 
@@ -309,6 +309,8 @@ Response khi không đủ tồn kho (`200 OK`):
   "reasonCode": "INVENTORY_NOT_AVAILABLE"
 }
 ```
+
+Hash Reserve gồm operation, orderId, reservationId, storeId và items đã gộp/sắp. Header tracing không tham gia hash. Cùng key đổi một trường nghiệp vụ trả 409; ID đã thuộc Order khác trả 409 RESERVATION_ID_CONFLICT. Inventory không gọi vòng sang Order hoặc đọc Order DB để kiểm tra tồn tại; không yêu cầu 404 ORDER_NOT_FOUND ở Reserve.
 
 ### 5.2. Tra cứu Reservation
 
