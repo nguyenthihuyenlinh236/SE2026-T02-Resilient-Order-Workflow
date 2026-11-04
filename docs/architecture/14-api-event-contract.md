@@ -53,16 +53,16 @@ Order Service không phát `OrderCreated` trong contract domain event tối thi�
 
 | Kiểu logic | Kiểu JSON | Quy tắc |
 |---|---|---|
-| Identifier | string | Không rỗng, tối đa 128 ký tự; dạng `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`; ID do service sở hữu tài nguyên sinh. |
+| Identifier | string | Không rỗng, tối đa 128 ký tự; dạng `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`; Order sinh orderId và reservationId một lần trước Reserve; Payment sinh paymentId/refundId. Inventory lưu caller reservationId, không sinh lại. |
 | Idempotency key | header string | Bắt buộc với POST có tác dụng phụ; 1–512 ký tự ASCII hiển thị được, không có khoảng trắng hoặc ký tự điều khiển; giữ nguyên khi retry cùng hành động. |
-| commandId / correlationId | string | Không rỗng, tối đa 128 ký tự; UUID hoặc mã tracing hợp lệ. |
-| quantity | integer | Số nguyên dương; không chấp nhận float, chuỗi số, 0 hoặc âm; giới hạn tối đa cấu hình. |
+| commandId / correlationId | string | Không rỗng, tối đa 128 ký tự; Không trắng, tối đa 128 ký tự; header nội bộ chỉ nhận ASCII hiển thị. Body Release giữ nguyên qua retry. |
+| quantity | integer | Số nguyên dương; không chấp nhận float, chuỗi số, 0 hoặc âm; tối đa 2147483647, tổng sau gộp mỗi SKU cũng không vượt giới hạn này. |
 | amount | decimal string | Khớp toàn bộ chuỗi theo regex `^(0\|[1-9][0-9]{0,11})(\.[0-9]{1,2})?$`; giá trị lớn hơn 0; không dùng float/double. |
 | currency | string | ISO 4217 viết hoa gồm 3 chữ cái; hiện chỉ hỗ trợ `VND`. |
 | timestamp | string | ISO-8601 UTC có hậu tố `Z`; phải parse được. |
 | enum/status | string | Chỉ nhận tập giá trị được endpoint/state machine công bố. |
 
-Quy tắc `items`: mảng bắt buộc, không rỗng, 1–100 phần tử; mỗi phần tử có `productId` hợp lệ và `quantity` integer dương; `productId` không trùng trong request (client phải gộp các dòng trùng); tổng quantity theo sản phẩm không vượt giới hạn cấu hình.
+Quy tắc `items` của Create Order/Reserve: mảng 1–100 object non-null; mỗi item có sku string không trắng, tối đa 128 ký tự và quantity integer dương ≤2147483647. Gộp SKU trùng rồi sắp theo SKU trước khi hash/khóa; tổng không được tràn integer. SKU phân biệt hoa/thường, không tự trim. storeId string bắt buộc không trắng, tối đa 100 ký tự; không chọn kho ngầm. Không ép number/boolean thành string; field ngoài schema trả 400.
 
 Key nội bộ giữ nguyên công thức tại mục 10.1, không cắt ngắn. Với ID tối đa 128 ký tự, key Release dài tối đa 278 ký tự và Refund 275 ký tự, đều nằm trong giới hạn 512. Validation HTTP và cột lưu key phải hỗ trợ cùng giới hạn này. Khi đưa key vào path tra cứu, client percent-encode toàn bộ key như một path segment; server giải mã trước khi so khớp key gốc.
 
@@ -127,7 +127,7 @@ Bảng này là checklist triển khai ở mức field-level cho tất cả HTTP
 
 | Endpoint / method | Input (nguồn; kiểu; bắt buộc/null; validation) | Output 2xx | HTTP error và mã lỗi |
 |---|---|---|---|
-| `POST /api/v1/orders` | Header `Idempotency-Key` bắt buộc, 1–512 ASCII ký tự hiển thị, không whitespace/control. Header `X-Correlation-Id` optional; nếu có phải là UUID hoặc mã tracing hợp lệ, tối đa 128 ký tự. Body: `customerId` string Identifier, bắt buộc; `items` array, bắt buộc, 1–100 phần tử, không null/không rỗng; từng `items[i]` object bắt buộc; `productId` string Identifier bắt buộc, không trùng trong mảng; `quantity` integer bắt buộc, >0 và không vượt giới hạn cấu hình. Không nhận field bắt buộc bị null, số thập phân hoặc chuỗi số cho quantity; không nhận item null hoặc field ngoài schema nếu validator được cấu hình strict. | `202 Accepted`: `orderId` Identifier, `status=PENDING`, `createdAt` và `expireAt` ISO-8601 UTC, `correlationId` string đều bắt buộc/non-null; `expireAt > createdAt`. | `400 VALIDATION_ERROR` (JSON, header hoặc field sai/thiếu), `409 IDEMPOTENCY_KEY_CONFLICT` (cùng key khác payload), `401/403`, `429`, `5xx`. Timeout không xác định kết quả; client GET/retry cùng key, không tạo key mới. |
+| `POST /api/v1/orders` | Header `Idempotency-Key` bắt buộc, 1–512 ASCII ký tự hiển thị, không whitespace/control. Header `X-Correlation-Id` optional; nếu có phải là UUID hoặc mã tracing hợp lệ, tối đa 128 ký tự. Body: `customerId: Identifier`, `storeId: string` không trắng ≤100 ký tự, `items: array` 1–100 object có `sku: string` không trắng ≤128 ký tự và `quantity: integer` 1..2147483647; tất cả bắt buộc/non-null. Gộp SKU trùng, kiểm tra tổng mỗi SKU không tràn integer, phân biệt hoa/thường và không tự trim. Không nhận field lạ, item null, quantity float/chuỗi số/boolean. | `202 Accepted`: `orderId` Identifier, `status=PENDING`, `createdAt` và `expireAt` ISO-8601 UTC, `correlationId` string đều bắt buộc/non-null; `expireAt > createdAt`. | `400 VALIDATION_ERROR` (JSON, header hoặc field sai/thiếu), `409 IDEMPOTENCY_KEY_CONFLICT` (cùng key khác payload), `401/403`, `429`, `5xx`. Timeout không xác định kết quả; client GET/retry cùng key, không tạo key mới. |
 | `GET /api/v1/orders/{orderId}` | Path `orderId` Identifier bắt buộc; body và Idempotency-Key không áp dụng; `X-Correlation-Id` optional, nếu có theo quy tắc chung. | `200 OK`: `orderId` Identifier, `status` enum Order theo State Machine, `createdAt`, `expireAt` timestamp, `correlationId` string bắt buộc/non-null; `reservationStatus` optional và nếu có là `NOT_CREATED/RESERVED/RELEASED/REJECTED/UNKNOWN`; `captureStatus` optional và nếu có là `NOT_STARTED/IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN`. Field optional khi vắng mặt thì omit, không gửi null trừ khi schema cụ thể cho phép. | `400 INVALID_IDENTIFIER`, `404 ORDER_NOT_FOUND`, `401/403`, `429`, `5xx`. GET không tạo tác dụng phụ; timeout chỉ retry query. |
 
 ### 3.4.2. Internal API – Inventory Service
@@ -151,11 +151,13 @@ Bảng này là checklist triển khai ở mức field-level cho tất cả HTTP
 
 **Quy tắc chung của ma trận:** lỗi giao thức/validation/auth/rate-limit/hạ tầng dùng HTTP error và schema `error` tại mục 3.3; kết quả nghiệp vụ đã xác định dùng `200 OK` với status trong body (riêng Create Order trả 202). `IN_PROGRESS`, `SUCCEEDED`, `FAILED`, `REJECTED` là kết quả nghiệp vụ, không phải HTTP error. `UNKNOWN` là trạng thái đối soát, không phải HTTP status. GET không có Idempotency-Key và không thay đổi trạng thái. Với endpoint có Idempotency-Key, cùng key/cùng payload trả kết quả đã lưu; cùng key/khác payload trả 409.
 
+Order tạo/lưu reservationId, cửa hàng, SKU đã chuẩn hóa và payload Reserve trong cùng transaction tạo Order/Saga. Worker phục hồi dùng snapshot, không dựng lại từ catalog hoặc chọn kho mới. productId chỉ là UUID nội bộ Inventory, không phải trường request Create Order/Reserve.
+
 ## 4. API Contract – Order Service
 
 ### 4.1. Tạo Order
 
-**Schema request:** `customerId: string Identifier` bắt buộc/non-null; `items: array<object>` bắt buộc/non-null, 1–100 phần tử, không rỗng; mỗi item là object non-null, `productId: string Identifier` bắt buộc/non-null và duy nhất, `quantity: integer` bắt buộc/non-null, số nguyên dương, không vượt giới hạn cấu hình. Không chấp nhận quantity dạng float/chuỗi số, item null, mảng rỗng hoặc productId trùng. Header `Idempotency-Key` bắt buộc theo mục 3.1.1; `X-Correlation-Id` optional, nếu có phải theo quy ước tracing. **Response:** `orderId: Identifier`, `status: enum Order` (`PENDING` khi tạo), `createdAt/expireAt: ISO-8601 UTC` và `correlationId: string` đều bắt buộc/non-null; `expireAt > createdAt`.
+**Schema request:** `customerId: Identifier`, `storeId: string` không trắng ≤100 ký tự, `items: array` 1–100 object có `sku: string` không trắng ≤128 ký tự và `quantity: integer` 1..2147483647; tất cả bắt buộc/non-null. Gộp SKU trùng, kiểm tra tổng mỗi SKU không tràn integer, phân biệt hoa/thường và không tự trim. Không nhận field lạ, item null, quantity float/chuỗi số/boolean. Header `Idempotency-Key` bắt buộc theo mục 3.1.1; `X-Correlation-Id` optional, nếu có phải theo quy ước tracing. **Response:** `orderId: Identifier`, `status: enum Order` (`PENDING` khi tạo), `createdAt/expireAt: ISO-8601 UTC` và `correlationId: string` đều bắt buộc/non-null; `expireAt > createdAt`.
 
 | Thuộc tính | Đặc tả |
 |---|---|
@@ -172,9 +174,10 @@ Request mẫu:
 ```json
 {
   "customerId": "CUS-001",
+  "storeId": "DEMO-STORE",
   "items": [
     {
-      "productId": "SKU-001",
+      "sku": "SKU-001",
       "quantity": 2
     }
   ]
@@ -268,7 +271,7 @@ Request mẫu:
   "orderId": "ORD-001",
   "items": [
     {
-      "productId": "SKU-001",
+      "sku": "SKU-001",
       "quantity": 2
     }
   ],
