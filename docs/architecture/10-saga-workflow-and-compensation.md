@@ -51,23 +51,26 @@ Saga phải lưu đủ thông tin để khôi phục sau sự cố, gồm trạn
 
 ### 2.5. Phân biệt trạng thái Order và Saga
 
-Order và Saga là hai đối tượng có vòng đời riêng. Không sử dụng trạng thái của Saga để thay thế trực tiếp trạng thái Order.
+Order và Saga là hai đối tượng có vòng đời riêng. Không sử dụng trạng thái của Saga để thay thế trực tiếp trạng thái Order. [09-state-machine.md](09-state-machine.md) là nguồn chuẩn cho trạng thái và chuyển trạng thái hợp lệ của Order, đặc biệt T-05, T-06, T-07, T-08 và bảng ánh xạ ở mục 8.
 
 | Tình huống | Order.status | Saga.status |
 |---|---|---|
 | Đang xử lý đặt hàng | `PENDING` | `RUNNING` |
 | Đang bù trừ nhánh thất bại thông thường | `COMPENSATING` | `COMPENSATING` |
-| Bù trừ nhánh thất bại thông thường vượt ngưỡng retry | `COMPENSATING` | `COMPENSATION_FAILED` |
+| Bù trừ nhánh thất bại thông thường gặp lỗi tạm thời vượt ngưỡng retry | `COMPENSATION_FAILED` | `COMPENSATION_FAILED` |
+| Recovery Worker bắt đầu retry nền nhánh thất bại thông thường | `COMPENSATING` | `COMPENSATING` |
 | Đang xử lý hết hạn | `EXPIRING` | `COMPENSATING` hoặc trạng thái xử lý tương ứng đã lưu |
-| Bù trừ nhánh hết hạn vượt ngưỡng retry | `EXPIRING` | `COMPENSATION_FAILED` |
+| Bù trừ nhánh hết hạn gặp lỗi tạm thời vượt ngưỡng retry | `EXPIRING` | `COMPENSATION_FAILED` |
+| Recovery Worker bắt đầu retry nền nhánh hết hạn | `EXPIRING` | `COMPENSATING` |
 | Đang đối soát kết quả thanh toán chưa rõ | Giữ trạng thái Order hiện tại phù hợp với nhánh đã nhận quyền xử lý | `RECONCILING` hoặc `RECONCILIATION_REQUIRED` |
 | Các hành động bắt buộc đã hoàn tất và Order thất bại | `FAILED` | `COMPLETED` |
 | Các điều kiện hết hạn đã được xác minh và hoàn tất | `EXPIRED` | `COMPLETED` |
 
 Quy tắc:
 
-- `COMPENSATION_FAILED` là trạng thái xử lý của Saga khi hành động bù trừ vượt ngưỡng retry. Với nhánh hết hạn, Order tiếp tục giữ `EXPIRING` cho đến khi đủ điều kiện chuyển trạng thái cuối.
-- Với nhánh thất bại thông thường, Order giữ `COMPENSATING` trong thời gian còn hành động bù trừ bắt buộc chưa hoàn tất.
+- `COMPENSATION_FAILED` tồn tại ở cả Order và Saga, nhưng chỉ Order thuộc nhánh thất bại thông thường mới chuyển `COMPENSATING → COMPENSATION_FAILED` khi release/refund lỗi tạm thời vượt ngưỡng (T-06, S-07).
+- Khi Recovery Worker bắt đầu retry nền nhánh thất bại, Order và Saga chuyển `COMPENSATION_FAILED → COMPENSATING` (T-07, S-08) trước khi tiếp tục hành động bằng khóa cũ. Nếu lại vượt ngưỡng, cả hai trở về `COMPENSATION_FAILED`.
+- Với nhánh hết hạn, Order giữ `EXPIRING` khi Saga chuyển `COMPENSATING → COMPENSATION_FAILED → COMPENSATING`. Không có chuyển Order `EXPIRING → COMPENSATION_FAILED` hoặc `COMPENSATION_FAILED → EXPIRING`.
 - Sau khi retry thành công, Saga tiếp tục từ tiến trình đã lưu; không khởi tạo lại Saga hoặc lặp lại các tác động nghiệp vụ đã thành công.
 - Chỉ chuyển Saga sang `COMPLETED` khi mọi hành động bắt buộc của nhánh đã được xác minh.
 - Chỉ chuyển Order sang `FAILED` hoặc `EXPIRED` khi đáp ứng đầy đủ điều kiện của State Machine.
@@ -109,11 +112,13 @@ flowchart TD
     X --> K[Conditional update PENDING sang COMPENSATING]
     K --> L[Thực hiện các compensation cần thiết]
     L --> M{Đã xác minh hoàn tất?}
-    M -->|Có| N[Order FAILED và Saga hoàn tất]
-    M -->|Chưa, còn trong ngưỡng| L
-    M -->|Vượt ngưỡng| O[COMPENSATION_FAILED]
-    O --> P[Thử lại nền mỗi 60 giây]
-    P --> L
+    M -->|Có| N[Order FAILED và Saga COMPLETED]
+    M -->|Lỗi tạm thời còn trong ngưỡng| L
+    M -->|UNKNOWN hoặc timeout| U
+    M -->|Lỗi tạm thời vượt ngưỡng| O[Order và Saga COMPENSATION_FAILED]
+    O --> P[Đến lịch retry nền mỗi 60 giây]
+    P --> P1[Conditional Order và Saga sang COMPENSATING]
+    P1 -->|Cập nhật thành công| L
 
     U --> Q[Tra cứu kết quả theo lịch đối soát]
     Q --> R{Đã xác định kết quả?}
@@ -125,7 +130,7 @@ flowchart TD
     V --> W[Tiếp tục thành công, thất bại hoặc hết hạn]
 ```
 
-Sơ đồ mô tả các nhánh chính. Quyền chuyển trạng thái thực tế vẫn phải được kiểm soát bằng cập nhật có điều kiện và trạng thái đã lưu.
+Sơ đồ mô tả các nhánh chính; vòng retry compensation tại đây thuộc nhánh thất bại thông thường. Nhánh hết hạn giữ Order `EXPIRING` theo mục 6.4. Quyền chuyển trạng thái thực tế vẫn phải được kiểm soát bằng cập nhật có điều kiện và trạng thái đã lưu; cập nhật 0 dòng phải đọc lại trạng thái, không gửi lệnh dựa trên dữ liệu cũ.
 
 ## 5. Luồng thành công
 
@@ -174,7 +179,7 @@ Dù không cần compensation, nhánh thất bại vẫn phải đi qua `COMPENS
 4. Saga yêu cầu Inventory Service release Reservation.
 5. Nếu release thành công và được xác minh, Order chuyển sang `FAILED`.
 6. Nếu release chưa thành công, Saga thử lại theo chính sách retry.
-7. Nếu vượt ngưỡng gửi, đánh dấu `COMPENSATION_FAILED` và tiếp tục thử lại nền mỗi 60 giây.
+7. Nếu release gặp lỗi tạm thời vượt ngưỡng gửi, chuyển cả Order và Saga sang `COMPENSATION_FAILED`. Khi đến lịch retry nền mỗi 60 giây, chuyển cả hai về `COMPENSATING` trước khi tiếp tục release với cùng khóa. Chỉ khi mọi bù trừ bắt buộc đã được xác minh mới chuyển Order `COMPENSATING → FAILED`, Saga `COMPLETED` và ghi `OrderFailed` trong cùng transaction.
 
 Không thực hiện refund nếu capture chưa từng thành công.
 
@@ -201,6 +206,8 @@ Trong thời gian kết quả thanh toán chưa rõ, không được release Res
 6. Nếu Reservation đang `RESERVED`, Worker yêu cầu release và xác minh kết quả.
 7. Nếu capture đã thành công, Worker phải xác minh refund hoàn tất trước khi kết thúc Order.
 8. Chỉ khi đáp ứng đầy đủ các điều kiện trong tài liệu State Machine, hệ thống mới chuyển Order sang `EXPIRED`, hoàn tất Saga và ghi `OrderExpired` vào Outbox trong cùng transaction.
+
+Nếu release/refund gặp lỗi tạm thời vượt ngưỡng gửi, Order giữ `EXPIRING`, Saga chuyển sang `COMPENSATION_FAILED`. Đến lịch retry nền mỗi 60 giây, Saga chuyển lại `COMPENSATING`; Order vẫn `EXPIRING`. Recovery Worker phải có quyền claim/lease hợp lệ và kiểm tra đầy đủ điều kiện T-08 trước khi chốt Order `EXPIRED`, Saga `COMPLETED` và Outbox. Không chuyển Order sang `COMPENSATION_FAILED` ở nhánh này.
 
 Nếu Payment chuyển sang `UNKNOWN` trong khi Order đang `EXPIRING`, phải dừng các hành động có thể gây mất nhất quán và đưa kết quả về quy trình đối soát. Không hoàn tất `EXPIRED` cho đến khi các điều kiện bắt buộc được xác minh.
 
@@ -259,11 +266,11 @@ Quy tắc:
 
 - Release và refund sử dụng chính sách retry đã thống nhất trong D-03.
 - Mỗi hành động retry sử dụng lại idempotency key của chính hành động đó.
-- Khi vượt 5 lần gửi, Saga chuyển sang `COMPENSATION_FAILED` và ghi nhận nguyên nhân, số lần gửi, thời điểm thử gần nhất cùng hành động đang chờ.
+- Khi release/refund gặp lỗi tạm thời vượt ngưỡng gửi theo D-03, Saga chuyển sang `COMPENSATION_FAILED` và ghi nhận nguyên nhân, số lần gửi, thời điểm thử gần nhất cùng hành động đang chờ. Trạng thái Order được cập nhật theo nhánh đã claim, không suy ra chỉ từ tên trạng thái Saga.
 - Saga tiếp tục thử lại nền mỗi 60 giây, trừ khi có quy tắc vận hành khác được thống nhất trong D-03.
 - `COMPENSATION_FAILED` không có nghĩa là hành động bù trừ đã hoàn tất.
-- Với nhánh thất bại thông thường, Order tiếp tục ở `COMPENSATING` cho đến khi các compensation bắt buộc hoàn tất.
-- Với nhánh hết hạn, Order tiếp tục ở `EXPIRING` cho đến khi các điều kiện chuyển sang `EXPIRED` được xác minh.
+- Với nhánh thất bại thông thường, khi vượt ngưỡng lỗi tạm thời, Order chuyển `COMPENSATING → COMPENSATION_FAILED` cùng Saga. Trước lần retry nền, Recovery Worker chuyển cả Order và Saga `COMPENSATION_FAILED → COMPENSATING` bằng cập nhật có điều kiện. Nếu cập nhật 0 dòng, đọc lại trạng thái trước khi tiếp tục; không ghi đè nhánh khác hoặc trạng thái kết thúc.
+- Với nhánh hết hạn, Order tiếp tục ở `EXPIRING` cả khi Saga chờ retry ở `COMPENSATION_FAILED` lẫn khi Saga retry ở `COMPENSATING`; chỉ chuyển `EXPIRING → EXPIRED` khi các điều kiện T-08 đã được xác minh và quyền claim/lease còn hợp lệ.
 - Nếu kết quả release hoặc refund là `UNKNOWN`, hệ thống phải tra cứu hoặc đối soát trước khi kết luận thành công hay thất bại.
 - Nếu release/refund thất bại đã xác minh, hệ thống không được coi hành động đó là thành công chỉ vì đã gửi đủ số lần retry.
 - Sau khi compensation hoàn tất, Orchestrator đọc trạng thái Order hiện tại và tiếp tục đúng nhánh đã nhận quyền xử lý. Không được ghi đè `CONFIRMED`, `FAILED` hoặc `EXPIRED` đã commit.
@@ -294,10 +301,10 @@ Quy tắc:
 |---|---|
 | Kết quả capture chưa xác định, lịch đối soát chính vẫn còn | `RECONCILING` |
 | Kết quả capture chưa xác định, lịch đối soát chính đã hết | `RECONCILIATION_REQUIRED` |
-| Release/refund vượt ngưỡng gửi | `COMPENSATION_FAILED` |
+| Release/refund gặp lỗi tạm thời vượt ngưỡng gửi | `COMPENSATION_FAILED` |
 | Các hành động nghiệp vụ và bù trừ bắt buộc đã hoàn tất | `COMPLETED` |
 
-Các trạng thái trên thuộc tiến trình Saga; chúng không tự động thay thế trạng thái Order hoặc capture/refund.
+Các trạng thái trong cột trên thuộc tiến trình Saga. Order phải được cập nhật theo bảng ở mục 2.5: nhánh thất bại ghi `COMPENSATION_FAILED` khi lỗi tạm thời vượt ngưỡng, nhánh hết hạn giữ `EXPIRING`. Không thay đổi capture/refund chỉ vì Saga đổi trạng thái.
 
 ## 10. Outbox và thông báo
 
@@ -328,7 +335,7 @@ Sau khi service, Publisher hoặc TTL Worker khởi động lại:
 - Xử lý các Order hết hạn chưa được nhận xử lý.
 - Tiếp quản các Order `EXPIRING` có lease hết hạn.
 - Tiếp tục lịch đối soát Payment và polling nền.
-- Thử lại các compensation đang chờ hoặc đã đánh dấu `COMPENSATION_FAILED`.
+- Thử lại các compensation đang chờ hoặc đã đánh dấu `COMPENSATION_FAILED`. Recovery Worker đọc cả Order và Saga: nhánh thất bại chuyển cặp `COMPENSATION_FAILED / COMPENSATION_FAILED` về `COMPENSATING / COMPENSATING` trước khi retry; nhánh hết hạn giữ Order `EXPIRING` và chuyển Saga `COMPENSATION_FAILED → COMPENSATING`. Dùng conditional update và quyền claim/lease hợp lệ; đọc lại trạng thái nếu không nhận được quyền xử lý. Không bỏ qua bước trở về `COMPENSATING` để chuyển thẳng Order `COMPENSATION_FAILED → FAILED`.
 
 Mục tiêu phục hồi:
 - Service, Publisher và TTL Worker tiếp tục xử lý trong vòng không quá 30 giây sau khi khởi động lại.
@@ -465,7 +472,7 @@ sequenceDiagram
 | SW-02 | Inventory từ chối reserve | Order đi qua `COMPENSATING` rồi `FAILED` |
 | SW-03 | Capture thất bại đã xác minh sau khi reserve thành công | Reservation được release và xác minh trước khi kết thúc nhánh thất bại |
 | SW-04 | Capture timeout và kết quả chưa rõ | Không tự kết luận thất bại hoặc release hàng |
-| SW-05 | Release vượt 5 lần gửi | Saga `COMPENSATION_FAILED`, retry nền mỗi 60 giây |
+| SW-05 | Release/refund lỗi tạm thời vượt ngưỡng gửi theo D-03 | Nhánh thất bại: Order/Saga `COMPENSATION_FAILED`; trước retry nền mỗi 60 giây cả hai về `COMPENSATING`; đủ điều kiện mới chốt Order `FAILED`, Saga `COMPLETED`. Nhánh hết hạn: Order giữ `EXPIRING` khi Saga lỗi/retry; đủ T-08 mới chốt Order `EXPIRED`, Saga `COMPLETED`. |
 | SW-06 | Lịch đối soát chính hết nhưng Payment vẫn UNKNOWN | Saga `RECONCILIATION_REQUIRED`, polling nền mỗi 5 phút |
 | SW-07 | Order hết hạn có Reservation đã xác minh | Release và xác minh trước khi kết thúc `EXPIRED` |
 | SW-08 | Order hết hạn nhưng capture chưa rõ | Không hoàn tất `EXPIRED` khi điều kiện an toàn chưa đạt |
