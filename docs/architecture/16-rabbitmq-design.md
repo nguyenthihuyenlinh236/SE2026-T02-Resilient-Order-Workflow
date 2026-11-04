@@ -25,3 +25,24 @@ Timeout HTTP vẫn là UNKNOWN ở caller; broker không quyết định Capture
 | order-service / Outbox Publisher | OrderExpired | order.expired.v1 | notification.order-events.v1 | Nhánh hết hạn đủ điều kiện, Order → EXPIRED và Outbox commit |
 
 Không phát OrderCreated, InventoryReserved, PaymentSucceeded, PaymentUnknown hoặc event mới cho mỗi retry. Routing key được chọn từ bảng cố định theo eventType/schemaVersion, không ghép từ dữ liệu tùy ý của client. Thay đổi breaking schema phải có version mới và kế hoạch consumer tương ứng.
+
+## 3. Topology và quy ước tên
+
+Dùng một exchange topic và một queue cho một consumer logic. Các replica Notification cùng đọc một queue theo competing consumers; không tạo queue theo instance, Order hoặc eventId. Consumer độc lập trong tương lai phải có queue riêng và thay đổi bảng thiết kế trước khi triển khai.
+
+| Thành phần | Tên | Cấu hình thiết kế |
+|---|---|---|
+| Vhost demo | / | Giữ tương thích Compose hiện tại; môi trường khác tách vhost và credentials |
+| Exchange | row.events.v1 | topic, durable=true, autoDelete=false, internal=false |
+| Queue | row.notification.order-events.v1 | durable=true, exclusive=false, autoDelete=false; quorum |
+| Consumer name trong Inbox | notification.order-events.v1 | Ổn định giữa replica/restart; không dùng tên pod |
+| Retry queue / delay exchange | Không khai báo | Delay lưu ở next_attempt_at trong DB do Notification sở hữu |
+| DLX / DLQ | Không khai báo trong demo | D-03 không dừng notification bằng DEAD_LETTER; dữ liệu độc hại được cách ly bền vững ở consumer |
+
+| Exchange nguồn | Routing key binding chính xác | Queue đích |
+|---|---|---|
+| row.events.v1 | order.confirmed.v1 | row.notification.order-events.v1 |
+| row.events.v1 | order.failed.v1 | row.notification.order-events.v1 |
+| row.events.v1 | order.expired.v1 | row.notification.order-events.v1 |
+
+Không bind dấu # hoặc order.*.* trong bản này: event chưa hỗ trợ phải bị phát hiện thay vì được tiêu thụ ngầm. Không dùng alternate exchange che khuất lỗi routing. Tên viết thường, phân đoạn bằng dấu chấm, prefix row, version ở cuối. Queue mang tên consumer, routing key mang nghĩa sự kiện.
