@@ -164,8 +164,8 @@ Giá trị áp dụng cho cấu hình demo, **cấu hình được** (xem D-08.4
 
 **D-03.2. Trạng thái Order khi compensation lỗi.**
 
-- Nhánh thất bại (payment `FAILED`): Order `COMPENSATING`; vượt ngưỡng release thì Order chuyển `COMPENSATION_FAILED` (vẫn retry nền, chưa phải trạng thái cuối).
-- Nhánh hết hạn: Order **giữ `EXPIRING`** (để không mất thông tin đang xử lý hết hạn); trạng thái lỗi nằm ở Saga (`COMPENSATION_FAILED`). Order chỉ sang `EXPIRED` khi đủ điều kiện D-06.2.
+- Theo nguồn chuẩn `docs/architecture/09-state-machine.md` (T-06, T-07), nhánh thất bại đã claim `PENDING → COMPENSATING`: release/refund lỗi tạm thời vượt ngưỡng thì cả Order và Saga chuyển `COMPENSATION_FAILED` (chưa phải trạng thái cuối). Khi Recovery Worker bắt đầu retry nền, cả hai chuyển lại `COMPENSATING` bằng cập nhật có điều kiện; chỉ sau khi xác minh mọi bù trừ bắt buộc mới chốt Order `FAILED`, Saga `COMPLETED`.
+- Nhánh hết hạn: Order **giữ `EXPIRING`** (để không mất thông tin đang xử lý hết hạn); trạng thái lỗi nằm ở Saga (`COMPENSATION_FAILED`). Khi retry nền, Saga chuyển lại `COMPENSATING`, Order vẫn `EXPIRING`. Không có chuyển Order `EXPIRING → COMPENSATION_FAILED` hoặc `COMPENSATION_FAILED → EXPIRING`. Chỉ chốt Order `EXPIRED`, Saga `COMPLETED` khi đủ điều kiện D-06.2 và quyền claim/lease hợp lệ.
 
 **D-03.3. Độ bền.** Bộ đếm retry, thời điểm thử kế tiếp và trạng thái vượt ngưỡng phải lưu bền vững để tiếp tục sau khi service restart.
 
