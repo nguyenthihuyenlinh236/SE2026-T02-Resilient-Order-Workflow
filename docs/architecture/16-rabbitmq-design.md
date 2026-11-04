@@ -162,3 +162,25 @@ Task lưu tối thiểu: eventId, type/channel/key, payload snapshot, status, at
 Worker claim bằng conditional update/lease; tăng attempt trước gọi mạng, ghi kết quả sau gọi bằng token hợp lệ. Crash khi đang gửi không được coi là chưa gửi: đối soát hoặc retry cùng key. Lưu next_attempt_at theo DB UTC, restart tiếp tục từ lịch đã lưu, không reset bộ đếm hoặc phát dồn toàn bộ lượt bị lỡ. Worker mất lease không được ghi đè kết quả worker mới.
 
 Inbox unique chỉ bảo đảm một tác vụ logic nội bộ. Nếu bên nhận không hỗ trợ idempotency/tra cứu, crash sau gửi trước ghi SENT vẫn có thể tạo thông báo trùng; không tuyên bố exactly-once. Retry notification không rollback Order đã CONFIRMED/FAILED/EXPIRED.
+
+## 9. Phục hồi và vận hành
+
+| Điểm lỗi | Bản ghi còn bền vững | Cách phục hồi |
+|---|---|---|
+| Order crash trước commit | Không có thay đổi/event | Retry yêu cầu theo idempotency API |
+| Order commit, Publisher chưa chạy | Outbox NEW | Quét lại và publish |
+| Broker đã nhận, confirm mất | Queue có thể đã có event; Outbox NEW | Publish lại cùng eventId, Inbox dedupe |
+| Consumer ngừng | Queue giữ message | Consumer phục hồi rồi nhận |
+| Consumer commit, ACK mất | Inbox và task | Redelivery, ACK duplicate |
+| Worker gửi crash | Task có trạng thái/lần thử đã lưu | Claim hết lease, đối soát/retry cùng key |
+| Broker restart, volume còn | Queue durable/persistent | Kết nối lại, kiểm tra topology, xử lý unacked |
+| Broker mất vĩnh viễn volume duy nhất | Có thể mất event PUBLISHED chưa tới Inbox | Sự cố vượt bảo đảm single-node; phục hồi backup hoặc replay Outbox còn giữ và dedupe |
+| Dữ liệu malformed | Kho cách ly | Sửa nguyên nhân, audit rồi replay phù hợp |
+
+Không tự purge/delete queue, reset volume hoặc đổi queue type tại chỗ. Sai topology phải fail readiness và cảnh báo; tạo phiên bản mới/migrate có kiểm soát, không xóa hàng đợi đang chứa dữ liệu.
+
+Outbox chưa publish, Inbox còn bảo vệ replay, task chưa hoàn tất và bản cách ly chưa xử lý không được cleanup. Retention cấu hình theo môi trường và cửa sổ replay; chưa chốt giới hạn replay thì tiếp tục giữ dedupe records. Replay thủ công chỉ cho event đã commit, giữ ID/envelope/routing gốc, ghi người thực hiện/phạm vi/lý do; không sửa payload cùng eventId. Backup/restore của các kho phải bảo toàn khoảng dedupe tương ứng, không chỉ khôi phục broker riêng rồi replay ngoài retention.
+
+Metrics: số/tuổi Outbox NEW, confirm timeout/nack/return, queue ready/unacked, redelivery, consumer count, task pending/retry/unknown, tuổi task, số bản cách ly, disk/memory alarms. Cảnh báo khi không có consumer mà queue tăng, background retry phát sinh hoặc lỗi schema/identity. Giá trị ngưỡng theo môi trường, không tự gán tham số bài cá nhân.
+
+Provision topology bằng identity riêng. Runtime Order chỉ publish exchange đã cho phép, Notification consume queue đã cho phép; không cấp quyền đọc DB xuyên service. TLS và secret ngoài repo khi triển khai ngoài local. Readiness kiểm tra đúng queue type, arguments và ba binding; ping broker khỏe không chứng minh routing đúng.
