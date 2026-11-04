@@ -558,7 +558,7 @@ Cleanup chạy batch, kiểm tra lại trạng thái dưới lock trước khi x
 
 Sử dụng Flyway với migration SQL có phiên bản, mỗi service quản lý lịch sử schema riêng trong database của mình. Đường dẫn khi khởi tạo service: `src/main/resources/db/migration` trong từng module service.
 
-- Tên migration: `V001__create_inventory.sql`, `V002__create_reservations.sql` theo số tăng dần trong mỗi service.
+- Tên migration theo VNNN__description.sql tăng dần trong mỗi service; giữ nguyên tên/checksum V001–V005 đã có của Inventory.
 - Migration đã áp dụng không được sửa; thay đổi schema bằng migration mới.
 - Không để ORM tự sửa schema; ORM chỉ validate schema đã migration.
 - Index/constraint có tên rõ ràng để truy vết lỗi; migration PostgreSQL thông thường chạy trong transaction. Thao tác không hỗ trợ transaction như CREATE INDEX CONCURRENTLY cần migration riêng theo cấu hình Flyway.
@@ -569,12 +569,12 @@ Sử dụng Flyway với migration SQL có phiên bản, mỗi service quản l�
 | Database | Thứ tự |
 |---|---|
 | order_db | orders → order_items/sagas → saga_steps → saga_attempts → idempotency/outbox/inbox → index |
-| inventory_db | inventory → inventory_order_guards → reservations → reservation_items → idempotency → index |
+| inventory_db | inventory → inventory_order_guards → reservations → reservation_items → inventory_operations → index |
 | payment_db | captures → refunds → idempotency → index |
 
 Database/role được provision trước migration; cấp quyền theo service, không dùng tài khoản truy cập toàn bộ dữ liệu các service cho runtime.
 
-Inventory #28 đã có V001 và V002: V002 thêm SKU/store và caller Reservation ID contract, đổi PK items sang `(reservation_id, sku)`, giữ tồn kho và Reservation cũ. Không sửa V001 đã áp dụng. Migration #29 tiếp tục thêm released_at, guard hủy và snapshot kết quả; backfill Reserve từ dữ liệu có thể xác minh trước khi Release sửa trạng thái. Hash legacy giữ nguyên; không replay legacy như payload mới hoặc dựng kết quả RESERVED giả từ resource đã RELEASED.
+Inventory #28 đã có V001 và V002: V002 thêm SKU/store và caller Reservation ID contract, đổi PK items sang `(reservation_id, sku)`, giữ tồn kho và Reservation cũ. Không sửa V001 đã áp dụng. Migration #29 đã có V003 thêm released_at, guard hủy và inventory_operations; V004 mở rộng reserve_key/idempotency_key lên 512; V005 chuyển Order/Reservation ID cùng FK sang varchar(128), giữ UUID dưới dạng chuỗi. Order/Payment phải triển khai migration tương ứng trước khi công bố tương thích API. Khi nâng cấp, backfill Reserve từ dữ liệu có thể xác minh trước khi Release sửa trạng thái. Hash legacy giữ nguyên; không replay legacy như payload mới hoặc dựng kết quả RESERVED giả từ resource đã RELEASED.
 
 ### 11.3. Tái tạo môi trường kiểm thử
 
@@ -595,6 +595,17 @@ Khởi tạo PostgreSQL rỗng tách biệt, chạy toàn bộ migration, nạp 
 | Migration | Issue #21 | Tạo database từ rỗng, ràng buộc/index có đủ và nâng cấp được |
 
 Các kiểm thử triển khai phải bao phủ ít nhất 10 lần gửi trùng từng lệnh, cùng khóa khác payload, crash trước/sau commit, publish trước mark, worker chết sau claim, Refund UNKNOWN/FAILED, Reserve muộn và rollback khi ghi dữ liệu lỗi. Kiểm thử cạnh tranh trạng thái sử dụng ít nhất 1.000 Order độc lập theo NFR-02. Mỗi kịch bản tải công bố số người dùng/yêu cầu đồng thời, thời lượng, dữ liệu tồn kho ban đầu, môi trường và căn cứ chọn tải. Không áp đặt một quy mô tải cố định cho mọi môi trường hoặc suy ra request/giây chỉ từ số người dùng. Kiểm thử retention sử dụng thời lượng cấu hình của chính kịch bản, kiểm tra trước/sau retain_until và các trường hợp Saga, compensation hoặc replay còn tồn đọng.
+
+### 12.1. Kiểm tra đồng bộ contract
+
+- ID dài 128 và key dài 512 được API/DB tiếp nhận; vượt giới hạn bị từ chối trước ghi DB.
+- Reserve dùng caller reservationId, storeId/SKU; SKU trùng được gộp, tổng không vượt 2147483647; restart giữ nguyên snapshot.
+- Cancel trước Reserve: guard tồn tại, GET Reservation vẫn 404; Reserve muộn bị từ chối và không giữ tồn.
+- Reserve trước Cancel: chỉ trả tồn một lần; replay Reserve giữ snapshot gốc.
+- Release nội bộ đổi tracing body cùng key trả 409; retry nguyên body không tạo tác dụng mới.
+- Tạo PENDING không phát OrderCreated; mỗi nhánh kết thúc ghi đúng một trong ba event cùng transaction.
+
+Đây là tiêu chí nghiệm thu thiết kế, không phải tuyên bố đã chạy kiểm thử Order/Payment/Saga. Nguồn triển khai Inventory đối chiếu: commit eb856bc, migration V001–V005.
 
 ## 13. Tài liệu tham chiếu
 
