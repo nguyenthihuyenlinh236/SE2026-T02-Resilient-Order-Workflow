@@ -156,7 +156,7 @@ CHECK bảo đảm `terminal_at` và timestamp tương ứng tồn tại khi Ord
 | `quantity` | `integer` | NOT NULL, CHECK > 0 | Số lượng |
 | `unit_price` | `numeric(19,2)` | NOT NULL, CHECK > 0 | Giá tại thời điểm đặt |
 
-PK `(order_id, sku)` loại bỏ dòng SKU trùng trong một Order; mỗi Order thuộc một `orders.store_id`. Request được gộp các dòng trùng SKU và chuẩn hóa trước khi hash. Trong transaction tạo Order, xác minh có ít nhất một dòng và `total_amount = SUM(quantity * unit_price)`. Đây là kiểm tra nhiều dòng trong nghiệp vụ, không dùng CHECK truy vấn bảng khác. Dữ liệu giá được cố định khi tiếp nhận, không cập nhật theo giá sản phẩm về sau.
+PK `(order_id, sku)` loại bỏ dòng SKU trùng trong một Order; mỗi Order thuộc một `orders.store_id`. Request được gộp các dòng trùng SKU và chuẩn hóa trước khi hash. `unit_price` được lấy từ `product_catalog`, không nhận từ client. Trong transaction tạo Order, xác minh có ít nhất một dòng và `total_amount = SUM(quantity * unit_price)` bằng số thập phân chính xác. Đây là kiểm tra nhiều dòng trong nghiệp vụ, không dùng CHECK truy vấn bảng khác. SKU, quantity và unit price là snapshot được cố định khi tiếp nhận, không cập nhật theo danh mục về sau.
 
 #### 4.4.1. Ánh xạ Order–Inventory và phục hồi Reserve
 
@@ -468,7 +468,20 @@ Insert Inbox và cập nhật dữ liệu nghiệp vụ trong cùng transaction;
 
 ### 8.1. Tạo Order
 
-Một transaction ghi khóa tạo đơn, Order, các dòng sản phẩm, Saga và các bước ban đầu; sau commit mới trả `202`. Dùng INSERT với unique constraint để phân xử request đồng thời, không dựa vào SELECT trước INSERT. Transaction thua unique đọc lại record đã commit và so hash. Retry không gia hạn `expire_at`.
+Order Service xác định giá và tạo Order theo trình tự sau:
+
+1. Tiếp nhận `storeId` và `items[{sku, quantity}]`; không nhận hoặc tin `unitPrice`, currency hay `totalAmount` do client cung cấp.
+2. Xác thực store/SKU/quantity, gộp SKU trùng bằng phép cộng có kiểm tra tràn, rồi sắp SKU theo quy ước chuẩn hóa payload hiện tại. SKU hợp lệ giữ nguyên ký tự và phân biệt hoa/thường.
+3. Tính payload hash và xử lý Idempotency Key theo phạm vi hiện tại. Nếu đã có record hoàn tất với cùng hash, trả nguyên Order/response đã lưu trước đó mà không đọc lại Catalog, tính lại giá hoặc gia hạn `expire_at`; khác hash thì trả xung đột.
+4. Trong transaction cục bộ của `order_db`, lấy toàn bộ dòng `product_catalog` bằng một truy vấn tập hợp theo đúng `store_id` và danh sách SKU, có khóa đọc phù hợp (`FOR SHARE`) đến khi lưu xong snapshot. Cách này tạo một ảnh nhất quán cho yêu cầu và ngăn cập nhật các dòng đã chọn xen giữa bước đọc giá và ghi Order; không truy vấn từng SKU ở các thời điểm khác nhau.
+5. Đối chiếu số SKU duy nhất sau gộp với số dòng trả về; mọi dòng phải thuộc đúng store, có `active = true`, giá dương và cùng một currency hợp lệ. Thiếu bất kỳ dòng nào thì toàn bộ yêu cầu thất bại.
+6. Tính từng thành tiền `quantity × unit_price` và tổng bằng kiểu decimal tương ứng `numeric`, không dùng `float`/`double`. Kiểm tra từng phép nhân, phép cộng và tổng cuối không vượt `numeric(19,2)` cũng như giới hạn amount của API/Payment; không làm tròn âm thầm ngoài scale tiền đã quy định.
+7. Cũng trong transaction đó, phân xử record Idempotency bằng unique constraint, rồi ghi `orders`, các `order_items` với unit price đã chốt, Saga, reservationId và bước RESERVE/payload ban đầu. `orders.currency` là currency chung đã xác minh; `orders.total_amount` phải bằng tổng snapshot các dòng.
+8. Commit toàn bộ dữ liệu tạo Order. Chỉ sau commit worker mới được gửi Reserve; lỗi ở bất kỳ bước nào trước commit rollback toàn bộ và không gửi Reserve/Payment.
+
+Unique constraint vẫn là cơ chế phân xử các request đồng thời, không dựa vào một lần SELECT trước INSERT. Transaction thua unique đọc record đã commit và so hash: cùng payload trả kết quả ban đầu, kể cả khi Catalog đã đổi; khác payload bị từ chối. Nếu record Idempotency đang được transaction khác tạo, request chờ kết quả phân xử thay vì tự tạo Order thứ hai.
+
+`order_items.unit_price`, `orders.total_amount` và `orders.currency` là snapshot bất biến của Order. Capture lấy amount/currency từ Order đã chốt; Refund lấy đúng amount/currency của Capture/Order tương ứng. Cả hai không tra lại Catalog. Thay đổi giá hoặc `active` sau commit chỉ tác động Order mới, không sửa Order, Reserve, Capture hoặc Refund đã tồn tại.
 
 ### 8.2. Phân xử ba nhánh Order
 
