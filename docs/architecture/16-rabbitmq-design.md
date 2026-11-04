@@ -109,3 +109,17 @@ Envelope giữ nguyên API Contract: eventId, commandId (có thể null), correl
 Queue không có message TTL, queue expiry, auto-delete hoặc chính sách drop-head. Nếu giới hạn dung lượng bằng max-length-bytes, dùng overflow=reject-publish và kiểm thử confirm/nack để Outbox giữ event bị từ chối. Ngưỡng dung lượng theo môi trường; cảnh báo disk/memory trước khi cạn.
 
 Đối với queue quorum demo không có DLX, khai báo x-delivery-limit=-1 ngay khi tạo để tránh giới hạn redelivery mặc định loại bỏ message. Đây là đánh đổi có chủ đích, không dùng cho vòng lặp requeue liên tục: consumer phải pause/backoff khi DB hỏng, cách ly lỗi xác định, giám sát redelivery [R2]. Không dựa vào số redelivery của broker làm bộ đếm retry nghiệp vụ. Tag 4-management chưa pin phiên bản; issue triển khai phải pin minor/digest và kiểm tra các argument thực tế, không phụ thuộc tính năng delayed-retry mới.
+
+## 6. Outbox Publisher
+
+1. Transaction Order ghi trạng thái cuối cùng eventId/envelope/routing key bền vững. Rollback thì không có event để publish.
+2. Publisher claim batch nhỏ các event NEW đến lịch bằng token/lease trong transaction ngắn; lưu attempt_count và thời điểm thử trước khi gửi. Không giữ DB transaction trong lúc chờ broker.
+3. Publish đúng exchange/key, persistent, mandatory và confirms. Lưu tương quan giữa channel epoch + publish sequence với eventId/claim token; khi reconnect không nhầm callback cũ sang lần mới.
+4. Chỉ đánh dấu PUBLISHED khi đã nhận confirm ACK và message không bị basic.return. Message không route vẫn có thể được broker confirm ACK nên chỉ ACK của publisher là chưa đủ [R1].
+5. Timeout confirm, nack, basic.return, mất connection hoặc exchange không tồn tại: giữ NEW, ghi lỗi và next_attempt_at. Không sinh eventId/payload mới.
+6. Cập nhật PUBLISHED có điều kiện token/lease còn hợp lệ. Worker mất lease bỏ quyền cập nhật; worker mới có thể phát lại cùng eventId. Consumer chịu duplicate.
+7. Crash sau confirm trước mark: phát lại. Mark PUBLISHED trước confirm bị cấm. PUBLISHED nghĩa broker đã nhận, không có nghĩa notification SENT.
+
+Bộ xử lý return/confirm phải bảo toàn thứ tự trên channel và tương quan theo messageId, không xử lý confirm độc lập làm mất cờ returned. Mandatory chỉ phát hiện không có queue nào nhận; kiểm tra đúng queue/binding và quyền thay đổi topology để tránh route nhầm queue khác.
+
+Dữ liệu Publisher cần có: eventId, envelope bất biến, payload_hash, exchange/routing key hoặc mapping version bất biến, status, attempt_count, next_attempt_at, claim_token, lease_until, last_error, created_at, published_at. Các trường bổ sung thuộc issue triển khai; không khẳng định migration hiện tại đã có đủ.
