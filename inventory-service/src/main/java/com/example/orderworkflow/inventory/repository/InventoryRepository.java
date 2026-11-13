@@ -5,6 +5,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Instant;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -20,10 +21,10 @@ public class InventoryRepository {
 
     public InventoryRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
 
-    public void lockOrder(UUID orderId) {
+    public void lockOrder(String orderId) {
         jdbc.update("INSERT INTO inventory_order_guards(order_id) VALUES (?) ON CONFLICT DO NOTHING", orderId);
         jdbc.queryForObject("SELECT order_id FROM inventory_order_guards WHERE order_id = ? FOR UPDATE",
-                UUID.class, orderId);
+                String.class, orderId);
     }
 
     public Optional<Stock> stock(UUID productId, boolean lock) {
@@ -52,13 +53,49 @@ public class InventoryRepository {
         if (changed != 1) { throw new IllegalStateException("Stock allocation lost its locked precondition"); }
     }
 
-    public Optional<String> payloadHash(UUID orderId) {
+    public Optional<String> payloadHash(String orderId) {
         return jdbc.query("SELECT payload_hash FROM reservations WHERE order_id = ?",
                 (rs, row) -> rs.getString(1), orderId).stream().findFirst();
     }
 
+    public boolean cancelled(String orderId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT cancellation_recorded FROM inventory_order_guards WHERE order_id = ?", Boolean.class, orderId));
+    }
+
+    public Instant cancelOrder(String orderId) {
+        // Preserve the original cancellation instant regardless of which command won.
+        return jdbc.queryForObject("UPDATE inventory_order_guards SET cancellation_recorded = TRUE, "
+                        + "cancelled_at = COALESCE(cancelled_at, clock_timestamp()) WHERE order_id = ? RETURNING cancelled_at",
+                (rs, row) -> rs.getTimestamp(1).toInstant(), orderId);
+    }
+
+    public Instant releasedAt(String reservationId) {
+        return jdbc.queryForObject("SELECT released_at FROM reservations WHERE reservation_id = ?",
+                (rs, row) -> rs.getTimestamp(1) == null ? null : rs.getTimestamp(1).toInstant(), reservationId);
+    }
+
+    public Instant release(Reservation reservation) {
+        var items = reservation.items().stream().sorted(java.util.Comparator.comparing(Item::sku)).toList();
+        for (Item item : items) {
+            stock(reservation.storeId(), item.sku(), true).orElseThrow(() ->
+                    new IllegalStateException("Reserved inventory row is missing"));
+        }
+        int changed = jdbc.update("UPDATE reservations SET status = 'RELEASED', released_at = clock_timestamp(), "
+                        + "updated_at = clock_timestamp() WHERE reservation_id = ? AND status = 'RESERVED'",
+                reservation.reservationId());
+        if (changed != 1) { throw new IllegalStateException("Reservation state changed under Order lock"); }
+        for (Item item : items) {
+            int returned = jdbc.update("UPDATE inventory SET reserved_quantity = reserved_quantity - ?, "
+                            + "updated_at = clock_timestamp() WHERE store_id = ? AND sku = ? AND reserved_quantity >= ?",
+                    item.quantity(), reservation.storeId(), item.sku(), item.quantity());
+            if (returned != 1) { throw new IllegalStateException("Reserved quantity is inconsistent"); }
+        }
+        return releasedAt(reservation.reservationId());
+    }
+
     public Reservation insert(ReserveRequest request, String key, String hash, List<Item> items, String reason) {
-        UUID id = request.reservationId();
+        String id = request.reservationId();
         jdbc.update("INSERT INTO reservations(reservation_id, order_id, reserve_key, payload_hash, status, "
                         + "rejection_reason, store_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 id, request.orderId(), key, hash, reason == null ? "RESERVED" : "REJECTED", reason, request.storeId());
@@ -70,15 +107,15 @@ public class InventoryRepository {
         return byId(id).orElseThrow();
     }
 
-    public Optional<Reservation> byId(UUID id) { return find("reservation_id", id); }
-    public Optional<Reservation> byOrder(UUID id) { return find("order_id", id); }
+    public Optional<Reservation> byId(String id) { return find("reservation_id", id); }
+    public Optional<Reservation> byOrder(String id) { return find("order_id", id); }
     public Optional<Reservation> byKey(String key) { return find("reserve_key", key); }
 
     private Optional<Reservation> find(String column, Object value) {
         // column comes only from the three fixed methods above, never from HTTP input.
         var rows = jdbc.query("SELECT * FROM reservations WHERE " + column + " = ?",
-                (rs, row) -> new Reservation(rs.getObject("reservation_id", UUID.class),
-                        rs.getObject("order_id", UUID.class), rs.getString("store_id"), rs.getString("reserve_key"),
+                (rs, row) -> new Reservation(rs.getString("reservation_id"),
+                        rs.getString("order_id"), rs.getString("store_id"), rs.getString("reserve_key"),
                         rs.getString("status"), rs.getString("rejection_reason"), List.of(),
                         rs.getTimestamp("created_at").toInstant()), value);
         return rows.stream().findFirst().map(r -> new Reservation(r.reservationId(), r.orderId(), r.storeId(), r.reserveKey(),
