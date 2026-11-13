@@ -56,7 +56,7 @@ CREATE TABLE order_idempotency (
     order_id VARCHAR(128),
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     completed_at TIMESTAMPTZ,
-    CONSTRAINT order_idempotency_key_printable CHECK (idempotency_key ~ '^[!-~]{1,512}$'),
+    CONSTRAINT order_idempotency_key_printable CHECK (idempotency_key ~ '^[!-~]+$'),
     CONSTRAINT order_idempotency_completion CHECK (
         (order_id IS NULL AND completed_at IS NULL)
         OR (order_id IS NOT NULL AND completed_at IS NOT NULL)
