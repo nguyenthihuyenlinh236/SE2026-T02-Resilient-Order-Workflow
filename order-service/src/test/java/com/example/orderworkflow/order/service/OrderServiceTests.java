@@ -27,6 +27,8 @@ import com.example.orderworkflow.order.api.OrderDtos.ItemRequest;
 import com.example.orderworkflow.order.repository.OrderRecords.CatalogProduct;
 import com.example.orderworkflow.order.repository.OrderRecords.IdempotencyRecord;
 import com.example.orderworkflow.order.repository.OrderRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 @ExtendWith(MockitoExtension.class)
 class OrderServiceTests {
@@ -35,14 +37,15 @@ class OrderServiceTests {
 
     @BeforeEach
     void setUp() {
-        service = new OrderService(repository, Duration.ofMinutes(15));
+        service = new OrderService(repository, new ObjectMapper().registerModule(new JavaTimeModule()),
+                Duration.ofMinutes(15));
     }
 
     @Test
     void combinesDuplicateSkusBeforePricingAndPersistence() {
         var request = new CreateOrderRequest("CUSTOMER-001", "STORE-001",
                 List.of(new ItemRequest("SKU-001", 1), new ItemRequest("SKU-001", 2)));
-        when(repository.claimIdempotencyKey(eq("key-1"), anyString())).thenReturn(true);
+        when(repository.claimIdempotencyKey(eq("key-1"), anyString(), anyString())).thenReturn(true);
         when(repository.lockCatalog("STORE-001", List.of("SKU-001")))
                 .thenReturn(List.of(new CatalogProduct("SKU-001", new BigDecimal("10.00"), "VND", true)));
         when(repository.databaseTime()).thenReturn(Instant.parse("2026-11-13T10:00:00Z"));
@@ -62,9 +65,9 @@ class OrderServiceTests {
     void conflictingStoredHashReturnsContractConflict() {
         var request = new CreateOrderRequest("CUSTOMER-001", "STORE-001",
                 List.of(new ItemRequest("SKU-001", 1)));
-        when(repository.claimIdempotencyKey(eq("key-2"), anyString())).thenReturn(false);
+        when(repository.claimIdempotencyKey(eq("key-2"), anyString(), anyString())).thenReturn(false);
         when(repository.findIdempotency("key-2"))
-                .thenReturn(Optional.of(new IdempotencyRecord("different-hash", "ORD-existing")));
+                .thenReturn(Optional.of(new IdempotencyRecord("different-hash", "ORD-existing", "{}")));
 
         assertThatThrownBy(() -> service.create(request, "key-2", null))
                 .isInstanceOfSatisfying(OrderException.class, error -> {

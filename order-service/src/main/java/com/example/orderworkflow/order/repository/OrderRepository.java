@@ -17,22 +17,26 @@ import com.example.orderworkflow.order.repository.OrderRecords.OrderRecord;
 
 @Repository
 public class OrderRepository {
+    private static final String CREATE_SCOPE = "PUBLIC_ORDER_API";
     private final JdbcTemplate jdbc;
 
     public OrderRepository(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 
-    public boolean claimIdempotencyKey(String key, String payloadHash) {
+    public boolean claimIdempotencyKey(String key, String payloadHash, String requestPayload) {
         return jdbc.update("""
-                INSERT INTO order_idempotency(idempotency_key, payload_hash)
-                VALUES (?, ?) ON CONFLICT DO NOTHING
-                """, key, payloadHash) == 1;
+                INSERT INTO idempotency_records(scope, idempotency_key, operation, payload_hash, request_payload)
+                VALUES (?, ?, 'CREATE_ORDER', ?, CAST(? AS jsonb)) ON CONFLICT DO NOTHING
+                """, CREATE_SCOPE, key, payloadHash, requestPayload) == 1;
     }
 
     public Optional<IdempotencyRecord> findIdempotency(String key) {
-        return jdbc.query("SELECT payload_hash, order_id FROM order_idempotency WHERE idempotency_key = ?",
-                (rs, row) -> new IdempotencyRecord(rs.getString(1), rs.getString(2)), key)
+        return jdbc.query("""
+                SELECT payload_hash, order_id, response_payload::text FROM idempotency_records
+                WHERE scope = ? AND idempotency_key = ?
+                """, (rs, row) -> new IdempotencyRecord(rs.getString(1), rs.getString(2), rs.getString(3)),
+                CREATE_SCOPE, key)
                 .stream().findFirst();
     }
 
@@ -69,11 +73,14 @@ public class OrderRepository {
         }
     }
 
-    public void completeIdempotency(String key, String orderId) {
+    public void completeIdempotency(String key, String orderId, String responsePayload) {
         int changed = jdbc.update("""
-                UPDATE order_idempotency SET order_id = ?, completed_at = clock_timestamp()
-                WHERE idempotency_key = ? AND order_id IS NULL
-                """, orderId, key);
+                UPDATE idempotency_records
+                SET status = 'COMPLETED', response_code = 202, response_payload = CAST(? AS jsonb),
+                    resource_id = ?, order_id = ?, updated_at = clock_timestamp(),
+                    completed_at = clock_timestamp()
+                WHERE scope = ? AND idempotency_key = ? AND status = 'IN_PROGRESS'
+                """, responsePayload, orderId, orderId, CREATE_SCOPE, key);
         if (changed != 1) {
             throw new IllegalStateException("Idempotency result could not be completed");
         }

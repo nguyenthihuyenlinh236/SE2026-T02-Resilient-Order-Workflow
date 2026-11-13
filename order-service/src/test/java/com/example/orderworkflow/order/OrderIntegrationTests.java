@@ -54,7 +54,7 @@ class OrderIntegrationTests {
     void resetDatabase() {
         jdbc.execute("DROP TRIGGER IF EXISTS fail_order_item_trigger ON order_items");
         jdbc.execute("DROP FUNCTION IF EXISTS fail_order_item_insert()");
-        jdbc.execute("TRUNCATE order_items, orders, order_idempotency, product_catalog");
+        jdbc.execute("TRUNCATE order_items, idempotency_records, orders, product_catalog");
         jdbc.update("""
                 INSERT INTO product_catalog(store_id, sku, product_name, unit_price, currency, active)
                 VALUES ('STORE-001','SKU-001','Product 1',125000.00,'VND',true),
@@ -115,10 +115,14 @@ class OrderIntegrationTests {
     void sameKeyAndNormalizedPayloadReplaysOriginalOrderWithoutExtendingTtl() {
         var first = create("key-replay", request(items(item("SKU-001", 1), item("SKU-001", 2))));
         jdbc.update("UPDATE product_catalog SET unit_price = 999999.00 WHERE store_id='STORE-001' AND sku='SKU-001'");
+        jdbc.update("UPDATE orders SET status = 'CONFIRMED' WHERE order_id = ?", first.getBody().orderId());
         var replay = create("key-replay", request(items(item("SKU-001", 3))));
 
         assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         assertThat(replay.getBody()).isEqualTo(first.getBody());
+        assertThat(replay.getBody().status()).isEqualTo("PENDING");
+        assertThat(http.getForEntity("/api/v1/orders/{id}", OrderResponse.class,
+                first.getBody().orderId()).getBody().status()).isEqualTo("CONFIRMED");
         assertThat(count("orders")).isOne();
         assertThat(count("order_items")).isOne();
     }
@@ -155,7 +159,7 @@ class OrderIntegrationTests {
             }
             assertThat(ids).hasSize(1);
             assertThat(count("orders")).isOne();
-            assertThat(count("order_idempotency")).isOne();
+            assertThat(count("idempotency_records")).isOne();
         } finally {
             executor.shutdownNow();
         }
@@ -182,7 +186,7 @@ class OrderIntegrationTests {
         assertThat(createError("inactive-product", request(items(item("INACTIVE", 1)))).getStatusCode())
                 .isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(count("orders")).isZero();
-        assertThat(count("order_idempotency")).isZero();
+        assertThat(count("idempotency_records")).isZero();
     }
 
     @Test
@@ -201,7 +205,7 @@ class OrderIntegrationTests {
         assertThat(failed.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
         assertThat(count("orders")).isZero();
         assertThat(count("order_items")).isZero();
-        assertThat(count("order_idempotency")).isZero();
+        assertThat(count("idempotency_records")).isZero();
     }
 
     private org.springframework.http.ResponseEntity<OrderResponse> create(String key, Map<String, Object> body) {

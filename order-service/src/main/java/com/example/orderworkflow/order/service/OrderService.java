@@ -20,6 +20,8 @@ import com.example.orderworkflow.order.api.OrderDtos.OrderResponse;
 import com.example.orderworkflow.order.repository.OrderRecords.CatalogProduct;
 import com.example.orderworkflow.order.repository.OrderRecords.OrderRecord;
 import com.example.orderworkflow.order.repository.OrderRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 @Service
 public class OrderService {
@@ -29,10 +31,12 @@ public class OrderService {
 
     private final OrderRepository repository;
     private final Duration ttl;
+    private final ObjectMapper objectMapper;
 
-    public OrderService(OrderRepository repository,
+    public OrderService(OrderRepository repository, ObjectMapper objectMapper,
             @org.springframework.beans.factory.annotation.Value("${order.ttl:15m}") Duration ttl) {
         this.repository = repository;
+        this.objectMapper = objectMapper;
         this.ttl = ttl;
         if (ttl.isZero() || ttl.isNegative()) {
             throw new IllegalArgumentException("order.ttl must be positive");
@@ -43,9 +47,10 @@ public class OrderService {
     public OrderResponse create(CreateOrderRequest request, String key, String requestedCorrelationId) {
         validateKey(key);
         var quantities = normalize(request);
-        String payloadHash = hash(request.customerId(), request.storeId(), quantities);
+        String requestPayload = canonicalRequest(request.customerId(), request.storeId(), quantities);
+        String payloadHash = hash(requestPayload);
 
-        if (!repository.claimIdempotencyKey(key, payloadHash)) {
+        if (!repository.claimIdempotencyKey(key, payloadHash, requestPayload)) {
             var existing = repository.findIdempotency(key)
                     .orElseThrow(() -> new IllegalStateException("Conflicting idempotency record is unavailable"));
             if (!existing.payloadHash().equals(payloadHash)) {
@@ -55,8 +60,10 @@ public class OrderService {
             if (existing.orderId() == null) {
                 throw new IllegalStateException("Idempotency result is incomplete");
             }
-            return repository.findOrder(existing.orderId()).map(OrderService::response)
-                    .orElseThrow(() -> new IllegalStateException("Idempotent Order result is unavailable"));
+            if (existing.responsePayload() == null) {
+                throw new IllegalStateException("Idempotent Order response is unavailable");
+            }
+            return readResponse(existing.responsePayload());
         }
 
         List<String> skus = List.copyOf(quantities.keySet());
@@ -85,8 +92,9 @@ public class OrderService {
         repository.insertOrder(orderId, request.customerId(), request.storeId(), total, currency,
                 reservationId, correlationId, createdAt, expireAt);
         repository.insertItems(orderId, quantities, products);
-        repository.completeIdempotency(key, orderId);
-        return new OrderResponse(orderId, "PENDING", createdAt, expireAt, correlationId);
+        var response = new OrderResponse(orderId, "PENDING", createdAt, expireAt, correlationId);
+        repository.completeIdempotency(key, orderId, writeJson(response));
+        return response;
     }
 
     @Transactional(readOnly = true)
@@ -133,24 +141,40 @@ public class OrderService {
         }
     }
 
-    private static String hash(String customerId, String storeId, Map<String, Integer> quantities) {
-        var canonical = new StringBuilder("CREATE_ORDER");
-        append(canonical, customerId);
-        append(canonical, storeId);
-        quantities.forEach((sku, quantity) -> {
-            append(canonical, sku);
-            append(canonical, quantity.toString());
-        });
+    private String canonicalRequest(String customerId, String storeId, Map<String, Integer> quantities) {
+        var items = quantities.entrySet().stream()
+                .map(entry -> Map.<String, Object>of("sku", entry.getKey(), "quantity", entry.getValue()))
+                .toList();
+        var payload = new LinkedHashMap<String, Object>();
+        payload.put("customerId", customerId);
+        payload.put("storeId", storeId);
+        payload.put("items", items);
+        return writeJson(payload);
+    }
+
+    private static String hash(String canonical) {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(canonical.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                    .digest(canonical.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException(exception);
         }
     }
 
-    private static void append(StringBuilder value, String part) {
-        value.append('|').append(part.length()).append(':').append(part);
+    private String writeJson(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("Canonical JSON could not be written", exception);
+        }
+    }
+
+    private OrderResponse readResponse(String value) {
+        try {
+            return objectMapper.readValue(value, OrderResponse.class);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("Stored idempotency response is invalid", exception);
+        }
     }
 
     private static String correlationId(String value) {

@@ -50,16 +50,30 @@ CREATE TABLE order_items (
     CONSTRAINT order_items_price_positive CHECK (unit_price > 0)
 );
 
-CREATE TABLE order_idempotency (
-    idempotency_key VARCHAR(512) PRIMARY KEY,
+CREATE TABLE idempotency_records (
+    scope VARCHAR(128) NOT NULL,
+    idempotency_key VARCHAR(512) NOT NULL,
+    operation VARCHAR(32) NOT NULL,
     payload_hash CHAR(64) NOT NULL,
-    order_id VARCHAR(128),
+    request_payload JSONB NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'IN_PROGRESS',
+    response_code INTEGER,
+    response_payload JSONB,
+    resource_id VARCHAR(128),
+    order_id VARCHAR(128) REFERENCES orders(order_id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     completed_at TIMESTAMPTZ,
-    CONSTRAINT order_idempotency_key_printable CHECK (idempotency_key ~ '^[!-~]+$'),
-    CONSTRAINT order_idempotency_completion CHECK (
-        (order_id IS NULL AND completed_at IS NULL)
-        OR (order_id IS NOT NULL AND completed_at IS NOT NULL)
+    retain_until TIMESTAMPTZ,
+    PRIMARY KEY (scope, idempotency_key),
+    CONSTRAINT idempotency_key_printable CHECK (idempotency_key ~ '^[!-~]+$'),
+    CONSTRAINT idempotency_operation_valid CHECK (operation = 'CREATE_ORDER'),
+    CONSTRAINT idempotency_status_valid CHECK (status IN ('IN_PROGRESS','COMPLETED')),
+    CONSTRAINT idempotency_completion CHECK (
+        (status = 'IN_PROGRESS' AND response_code IS NULL AND response_payload IS NULL
+            AND resource_id IS NULL AND order_id IS NULL AND completed_at IS NULL)
+        OR (status = 'COMPLETED' AND response_code = 202 AND response_payload IS NOT NULL
+            AND resource_id IS NOT NULL AND order_id = resource_id AND completed_at IS NOT NULL)
     )
 );
 

@@ -9,5 +9,5 @@ public final class OrderRecords {
     public record CatalogProduct(String sku, BigDecimal unitPrice, String currency, boolean active) { }
     public record OrderRecord(String orderId, String status, Instant createdAt,
             Instant expireAt, String correlationId) { }
-    public record IdempotencyRecord(String payloadHash, String orderId) { }
+    public record IdempotencyRecord(String payloadHash, String orderId, String responsePayload) { }
 }
