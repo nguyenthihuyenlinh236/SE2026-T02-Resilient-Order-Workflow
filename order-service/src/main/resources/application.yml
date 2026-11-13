@@ -2,6 +2,9 @@ server:
   port: ${ORDER_SERVICE_PORT:8081}
 
 spring:
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
   application:
     name: order-service
   datasource:
@@ -22,3 +25,6 @@ management:
   endpoint:
     health:
       show-details: never
+
+order:
+  ttl: ${ORDER_TTL:15m}
