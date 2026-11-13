@@ -2,6 +2,9 @@ server:
   port: ${PAYMENT_SERVICE_PORT:8083}
 
 spring:
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
   application:
     name: payment-service
   datasource:
@@ -13,6 +16,10 @@ spring:
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USER:workflow}
     password: ${RABBITMQ_PASSWORD:workflow_local}
+
+payment:
+  mock:
+    outcome: ${PAYMENT_MOCK_OUTCOME:IN_PROGRESS}
 
 management:
   endpoints:
