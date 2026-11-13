@@ -143,7 +143,12 @@ public class OrderService {
 
     private String canonicalRequest(String customerId, String storeId, Map<String, Integer> quantities) {
         var items = quantities.entrySet().stream()
-                .map(entry -> Map.<String, Object>of("sku", entry.getKey(), "quantity", entry.getValue()))
+                .map(entry -> {
+                    var item = new LinkedHashMap<String, Object>();
+                    item.put("sku", entry.getKey());
+                    item.put("quantity", entry.getValue());
+                    return item;
+                })
                 .toList();
         var payload = new LinkedHashMap<String, Object>();
         payload.put("customerId", customerId);

@@ -84,4 +84,35 @@ class OrderServiceTests {
                     assertThat(error.code()).isEqualTo("INVALID_IDENTIFIER");
                 });
     }
+
+    @Test
+    void canonicalPayloadAndHashAreStableForEquivalentItemOrders() {
+        var first = new CreateOrderRequest("CUSTOMER-001", "STORE-001", List.of(
+                new ItemRequest("SKU-002", 1), new ItemRequest("SKU-001", 1),
+                new ItemRequest("SKU-001", 2)));
+        var equivalent = new CreateOrderRequest("CUSTOMER-001", "STORE-001", List.of(
+                new ItemRequest("SKU-001", 3), new ItemRequest("SKU-002", 1)));
+        when(repository.claimIdempotencyKey(eq("stable-1"), anyString(), anyString())).thenReturn(true);
+        when(repository.claimIdempotencyKey(eq("stable-2"), anyString(), anyString())).thenReturn(true);
+        when(repository.lockCatalog(eq("STORE-001"), any())).thenReturn(List.of(
+                new CatalogProduct("SKU-001", new BigDecimal("10.00"), "VND", true),
+                new CatalogProduct("SKU-002", new BigDecimal("20.00"), "VND", true)));
+        when(repository.databaseTime()).thenReturn(Instant.parse("2026-11-13T10:00:00Z"));
+
+        service.create(first, "stable-1", "corr-1");
+        service.create(equivalent, "stable-2", "corr-2");
+
+        var hash = ArgumentCaptor.forClass(String.class);
+        var payload = ArgumentCaptor.forClass(String.class);
+        verify(repository).claimIdempotencyKey(eq("stable-1"), hash.capture(), payload.capture());
+        String firstHash = hash.getValue();
+        String firstPayload = payload.getValue();
+        verify(repository).claimIdempotencyKey(eq("stable-2"), hash.capture(), payload.capture());
+        assertThat(payload.getValue()).isEqualTo(firstPayload).isEqualTo(
+                "{\"customerId\":\"CUSTOMER-001\",\"storeId\":\"STORE-001\","
+                + "\"items\":[{\"sku\":\"SKU-001\",\"quantity\":3},"
+                + "{\"sku\":\"SKU-002\",\"quantity\":1}]}");
+        assertThat(hash.getValue()).isEqualTo(firstHash)
+                .isEqualTo("f810cddc04c0a957e2d0fe7c5877c06d0adaec1549851459386c39980b9cd83c");
+    }
 }
