@@ -15,7 +15,7 @@ Tài liệu tập trung vào cách các thành phần phối hợp để xử l�
 
 ## Thiết kế phục hồi Saga
 
-- [16-saga-persistence-and-recovery.md](16-saga-persistence-and-recovery.md): dữ liệu lưu bền vững, transaction boundary, claim/lease, ma trận crash và các quyết định cần thống nhất của Issue #22.
+- [17-saga-persistence-and-recovery.md](17-saga-persistence-and-recovery.md): dữ liệu lưu bền vững, transaction boundary, claim/lease, ma trận crash và các quyết định cần thống nhất của Issue #22.
 
 ## Phạm vi kiến trúc
 
