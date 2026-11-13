@@ -210,6 +210,32 @@ class OrderIntegrationTests {
     }
 
     @Test
+    void customerStoreAndSkuRejectNonStringJsonScalars() {
+        List<String> invalidJson = List.of(
+                "{\"customerId\":123,\"storeId\":\"STORE-001\","
+                        + "\"items\":[{\"sku\":\"SKU-001\",\"quantity\":1}]}",
+                "{\"customerId\":true,\"storeId\":\"STORE-001\","
+                        + "\"items\":[{\"sku\":\"SKU-001\",\"quantity\":1}]}",
+                "{\"customerId\":\"CUSTOMER-001\",\"storeId\":123,"
+                        + "\"items\":[{\"sku\":\"SKU-001\",\"quantity\":1}]}",
+                "{\"customerId\":\"CUSTOMER-001\",\"storeId\":false,"
+                        + "\"items\":[{\"sku\":\"SKU-001\",\"quantity\":1}]}",
+                "{\"customerId\":\"CUSTOMER-001\",\"storeId\":\"STORE-001\","
+                        + "\"items\":[{\"sku\":123,\"quantity\":1}]}",
+                "{\"customerId\":\"CUSTOMER-001\",\"storeId\":\"STORE-001\","
+                        + "\"items\":[{\"sku\":true,\"quantity\":1}]}");
+
+        int index = 0;
+        for (String json : invalidJson) {
+            var response = rawCreate("strict-string-" + index++, json, true);
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(response.getBody().error().code()).isEqualTo("VALIDATION_ERROR");
+        }
+        assertThat(count("orders")).isZero();
+        assertThat(count("idempotency_records")).isZero();
+    }
+
+    @Test
     void itemInsertFailureRollsBackOrderAndIdempotencyClaim() {
         jdbc.execute("""
                 CREATE FUNCTION fail_order_item_insert() RETURNS trigger LANGUAGE plpgsql AS $$

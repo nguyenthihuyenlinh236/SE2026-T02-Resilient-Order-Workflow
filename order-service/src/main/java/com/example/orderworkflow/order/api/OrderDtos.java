@@ -16,12 +16,12 @@ public final class OrderDtos {
     private OrderDtos() { }
 
     public record ItemRequest(
-            @NotBlank @Size(max = 128) String sku,
+            @NotBlank @Size(max = 128) @JsonDeserialize(using = StrictStringDeserializer.class) String sku,
             @NotNull @Positive @JsonDeserialize(using = StrictQuantityDeserializer.class) Integer quantity) { }
 
     public record CreateOrderRequest(
-            @NotBlank @Size(max = 128) String customerId,
-            @NotBlank @Size(max = 100) String storeId,
+            @NotBlank @Size(max = 128) @JsonDeserialize(using = StrictStringDeserializer.class) String customerId,
+            @NotBlank @Size(max = 100) @JsonDeserialize(using = StrictStringDeserializer.class) String storeId,
             @NotEmpty @Size(max = 100) List<@NotNull @Valid ItemRequest> items) { }
 
     public record OrderResponse(String orderId, String status, Instant createdAt,
