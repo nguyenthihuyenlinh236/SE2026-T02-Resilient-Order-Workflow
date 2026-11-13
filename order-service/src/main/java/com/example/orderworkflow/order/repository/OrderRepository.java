@@ -17,26 +17,25 @@ import com.example.orderworkflow.order.repository.OrderRecords.OrderRecord;
 
 @Repository
 public class OrderRepository {
-    private static final String CREATE_SCOPE = "PUBLIC_ORDER_API";
     private final JdbcTemplate jdbc;
 
     public OrderRepository(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 
-    public boolean claimIdempotencyKey(String key, String payloadHash, String requestPayload) {
+    public boolean claimIdempotencyKey(String clientId, String key, String payloadHash, String requestPayload) {
         return jdbc.update("""
                 INSERT INTO idempotency_records(scope, idempotency_key, operation, payload_hash, request_payload)
                 VALUES (?, ?, 'CREATE_ORDER', ?, CAST(? AS jsonb)) ON CONFLICT DO NOTHING
-                """, CREATE_SCOPE, key, payloadHash, requestPayload) == 1;
+                """, clientId, key, payloadHash, requestPayload) == 1;
     }
 
-    public Optional<IdempotencyRecord> findIdempotency(String key) {
+    public Optional<IdempotencyRecord> findIdempotency(String clientId, String key) {
         return jdbc.query("""
                 SELECT payload_hash, order_id, response_payload::text FROM idempotency_records
                 WHERE scope = ? AND idempotency_key = ?
                 """, (rs, row) -> new IdempotencyRecord(rs.getString(1), rs.getString(2), rs.getString(3)),
-                CREATE_SCOPE, key)
+                clientId, key)
                 .stream().findFirst();
     }
 
@@ -55,13 +54,13 @@ public class OrderRepository {
         return jdbc.queryForObject("SELECT clock_timestamp()", Timestamp.class).toInstant();
     }
 
-    public void insertOrder(String orderId, String customerId, String storeId, BigDecimal total,
+    public void insertOrder(String orderId, String customerId, String clientId, String storeId, BigDecimal total,
             String currency, String reservationId, String correlationId, Instant createdAt, Instant expireAt) {
         jdbc.update("""
-                INSERT INTO orders(order_id, customer_id, store_id, status, total_amount, currency,
+                INSERT INTO orders(order_id, customer_id, client_id, store_id, status, total_amount, currency,
                                    reservation_id, correlation_id, created_at, updated_at, expire_at)
-                VALUES (?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?)
-                """, orderId, customerId, storeId, total, currency, reservationId, correlationId,
+                VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?)
+                """, orderId, customerId, clientId, storeId, total, currency, reservationId, correlationId,
                 Timestamp.from(createdAt), Timestamp.from(createdAt), Timestamp.from(expireAt));
     }
 
@@ -73,14 +72,14 @@ public class OrderRepository {
         }
     }
 
-    public void completeIdempotency(String key, String orderId, String responsePayload) {
+    public void completeIdempotency(String clientId, String key, String orderId, String responsePayload) {
         int changed = jdbc.update("""
                 UPDATE idempotency_records
                 SET status = 'COMPLETED', response_code = 202, response_payload = CAST(? AS jsonb),
                     resource_id = ?, order_id = ?, updated_at = clock_timestamp(),
                     completed_at = clock_timestamp()
                 WHERE scope = ? AND idempotency_key = ? AND status = 'IN_PROGRESS'
-                """, responsePayload, orderId, orderId, CREATE_SCOPE, key);
+                """, responsePayload, orderId, orderId, clientId, key);
         if (changed != 1) {
             throw new IllegalStateException("Idempotency result could not be completed");
         }

@@ -138,6 +138,26 @@ class OrderIntegrationTests {
     }
 
     @Test
+    void sameKeyIsScopedByTechnicalClientIdNotCustomerId() {
+        var body = request(items(item("SKU-001", 1)));
+        var firstHeaders = headers("shared-key");
+        var secondHeaders = headers("shared-key");
+        secondHeaders.set("X-Client-Id", "CLIENT-002");
+
+        var first = http.exchange("/api/v1/orders", HttpMethod.POST,
+                new HttpEntity<>(body, firstHeaders), OrderResponse.class);
+        var second = http.exchange("/api/v1/orders", HttpMethod.POST,
+                new HttpEntity<>(body, secondHeaders), OrderResponse.class);
+
+        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(second.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(second.getBody().orderId()).isNotEqualTo(first.getBody().orderId());
+        assertThat(count("orders")).isEqualTo(2);
+        assertThat(jdbc.queryForList("SELECT client_id FROM orders ORDER BY client_id", String.class))
+                .containsExactly("CLIENT-001", "CLIENT-002");
+    }
+
+    @Test
     void concurrentRequestsWithSameKeyCreateOneOrder() throws Exception {
         int requests = 10;
         var start = new CountDownLatch(1);
@@ -232,6 +252,7 @@ class OrderIntegrationTests {
         var headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         if (key != null) headers.set("Idempotency-Key", key);
+        headers.set("X-Client-Id", "CLIENT-001");
         headers.set("X-Correlation-Id", "corr-test");
         return headers;
     }

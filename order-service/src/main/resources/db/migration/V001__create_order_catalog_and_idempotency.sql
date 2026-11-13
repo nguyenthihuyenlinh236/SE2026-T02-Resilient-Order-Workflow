@@ -19,6 +19,7 @@ CREATE TABLE product_catalog (
 CREATE TABLE orders (
     order_id VARCHAR(128) PRIMARY KEY,
     customer_id VARCHAR(128) NOT NULL,
+    client_id VARCHAR(128) NOT NULL,
     store_id VARCHAR(100) NOT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
     total_amount NUMERIC(19,2) NOT NULL,
@@ -31,6 +32,7 @@ CREATE TABLE orders (
     version BIGINT NOT NULL DEFAULT 0,
     CONSTRAINT orders_id_format CHECK (order_id ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'),
     CONSTRAINT orders_customer_format CHECK (customer_id ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'),
+    CONSTRAINT orders_client_format CHECK (client_id ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'),
     CONSTRAINT orders_store_not_blank CHECK (length(btrim(store_id)) > 0),
     CONSTRAINT orders_status_valid CHECK (status IN ('PENDING','CONFIRMED','COMPENSATING','COMPENSATION_FAILED','EXPIRING','FAILED','EXPIRED')),
     CONSTRAINT orders_amount_positive CHECK (total_amount > 0),
@@ -66,6 +68,7 @@ CREATE TABLE idempotency_records (
     completed_at TIMESTAMPTZ,
     retain_until TIMESTAMPTZ,
     PRIMARY KEY (scope, idempotency_key),
+    CONSTRAINT idempotency_scope_format CHECK (scope ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'),
     CONSTRAINT idempotency_key_printable CHECK (idempotency_key ~ '^[!-~]+$'),
     CONSTRAINT idempotency_operation_valid CHECK (operation = 'CREATE_ORDER'),
     CONSTRAINT idempotency_status_valid CHECK (status IN ('IN_PROGRESS','COMPLETED')),

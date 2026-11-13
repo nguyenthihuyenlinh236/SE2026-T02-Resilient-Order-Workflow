@@ -44,14 +44,16 @@ public class OrderService {
     }
 
     @Transactional
-    public OrderResponse create(CreateOrderRequest request, String key, String requestedCorrelationId) {
+    public OrderResponse create(CreateOrderRequest request, String clientId, String key,
+            String requestedCorrelationId) {
+        validateIdentifier(clientId, "X-Client-Id");
         validateKey(key);
         var quantities = normalize(request);
         String requestPayload = canonicalRequest(request.customerId(), request.storeId(), quantities);
         String payloadHash = hash(requestPayload);
 
-        if (!repository.claimIdempotencyKey(key, payloadHash, requestPayload)) {
-            var existing = repository.findIdempotency(key)
+        if (!repository.claimIdempotencyKey(clientId, key, payloadHash, requestPayload)) {
+            var existing = repository.findIdempotency(clientId, key)
                     .orElseThrow(() -> new IllegalStateException("Conflicting idempotency record is unavailable"));
             if (!existing.payloadHash().equals(payloadHash)) {
                 throw new OrderException(409, "IDEMPOTENCY_KEY_CONFLICT",
@@ -89,11 +91,11 @@ public class OrderService {
         String orderId = "ORD-" + UUID.randomUUID().toString().replace("-", "");
         String reservationId = "RES-" + UUID.randomUUID().toString().replace("-", "");
         String correlationId = correlationId(requestedCorrelationId);
-        repository.insertOrder(orderId, request.customerId(), request.storeId(), total, currency,
+        repository.insertOrder(orderId, request.customerId(), clientId, request.storeId(), total, currency,
                 reservationId, correlationId, createdAt, expireAt);
         repository.insertItems(orderId, quantities, products);
         var response = new OrderResponse(orderId, "PENDING", createdAt, expireAt, correlationId);
-        repository.completeIdempotency(key, orderId, writeJson(response));
+        repository.completeIdempotency(clientId, key, orderId, writeJson(response));
         return response;
     }
 

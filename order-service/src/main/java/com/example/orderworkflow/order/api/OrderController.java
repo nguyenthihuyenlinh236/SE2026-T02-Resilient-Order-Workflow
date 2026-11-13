@@ -27,11 +27,12 @@ public class OrderController {
 
     @PostMapping
     public ResponseEntity<OrderResponse> create(
+            @RequestHeader("X-Client-Id") String clientId,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @RequestHeader(value = "X-Correlation-Id", required = false) String correlationId,
             @Valid @RequestBody CreateOrderRequest request) {
         return ResponseEntity.status(HttpStatus.ACCEPTED)
-                .body(service.create(request, idempotencyKey, correlationId));
+                .body(service.create(request, clientId, idempotencyKey, correlationId));
     }
 
     @GetMapping("/{orderId}")
