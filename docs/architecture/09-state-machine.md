@@ -97,7 +97,7 @@ Ba nhánh cạnh tranh từ `PENDING` là `CONFIRMED`, `COMPENSATING` và `EXPIR
 | T-03 | `PENDING → COMPENSATING` | Capture thất bại. | Order vẫn `PENDING`; capture `FAILED` đã được Payment Service xác minh. | Claim nhánh thất bại trước khi release reservation hoặc thực hiện bù trừ khác. | Không phát domain event; có thể phát cảnh báo vận hành. | Order Service | UC-02, UC-03, UC-04; FR-03, FR-04, FR-07; BR-02, BR-04; EC-01, EC-02; D-01; NFR-02 |
 | T-04 | `PENDING → EXPIRING` | TTL Worker phát hiện Order quá hạn. | DB UTC `now() >= expireAt`; capture khác `UNKNOWN`; Order vẫn `PENDING`. | Claim bằng conditional update; ghi `claimToken`, `claimedAt`, `leaseUntil`; lease mặc định 30 giây. | Không phát domain event; có thể phát cảnh báo vận hành. | TTL Worker | UC-06; FR-15; BR-07, BR-10, BR-13; EC-04, EC-06, EC-11; D-01.2, D-01.5, D-06; NFR-02, NFR-07 |
 | T-05 | `COMPENSATING → FAILED` | Bù trừ hoàn tất. | Reservation đã release hoặc được xác minh không tồn tại; capture/refund đã đủ rõ; mọi bù trừ bắt buộc đã được xác minh. | Ghi Order `FAILED`; hoàn tất Saga; ghi domain event trong cùng transaction. | `OrderFailed` | Order Service | UC-04; FR-07, FR-08, FR-12; BR-04, BR-08; EC-02, EC-09; D-03, D-05; NFR-01 |
-| T-06 | `COMPENSATING → COMPENSATION_FAILED` | Release/refund gặp lỗi tạm thời vượt ngưỡng gửi. | Đã gửi quá 5 lần; lỗi được xác định là tạm thời, không phải kết quả `UNKNOWN`. | Ghi trạng thái lỗi; Saga `COMPENSATION_FAILED`; phát cảnh báo và retry nền mỗi 60 giây. | Không phát domain event; có thể phát cảnh báo vận hành. | Order Service / Saga Orchestrator | UC-04, UC-08; FR-12, FR-13; BR-08, BR-10; EC-09; D-03.2; NFR-04, NFR-08 |
+| T-06 | `COMPENSATING → COMPENSATION_FAILED` | Release/refund gặp lỗi tạm thời vượt ngưỡng gửi. | Đã dùng hết 5 lần gửi chính tính cả lần đầu; lỗi được xác định là tạm thời, không phải kết quả `UNKNOWN`. | Ghi trạng thái lỗi; Saga `COMPENSATION_FAILED`; phát cảnh báo và retry nền mỗi 60 giây. | Không phát domain event; có thể phát cảnh báo vận hành. | Order Service / Saga Orchestrator | UC-04, UC-08; FR-12, FR-13; BR-08, BR-10; EC-09; D-03.2; NFR-04, NFR-08 |
 | T-07 | `COMPENSATION_FAILED → COMPENSATING` | Đến lịch retry nền. | Hành động bù trừ chưa hoàn tất; dùng cùng khóa idempotency. | Chuyển lại `COMPENSATING`; tiếp tục xử lý release/refund. | Không phát domain event; có thể phát cảnh báo vận hành. | Order Service / Saga Orchestrator | UC-04, UC-08; FR-12, FR-13; BR-08, BR-10; EC-09; D-03.2; NFR-04, NFR-08 |
 | T-08 | `EXPIRING → EXPIRED` | Các điều kiện hết hạn đã được xác minh đầy đủ. | `claimToken` khớp; lease chưa hết hạn; capture/refund không phải `UNKNOWN` hoặc `IN_PROGRESS`; reservation `RELEASED` hoặc đã xác minh không tồn tại; nếu capture `SUCCEEDED` thì refund `SUCCEEDED`. | Ghi Order `EXPIRED`, Saga `COMPLETED`, Outbox trong cùng transaction. | `OrderExpired` | TTL Worker / Order Service | UC-06, UC-11; FR-08, FR-12, FR-15; BR-07, BR-08, BR-13; EC-11; D-05, D-06.2; NFR-07 |
 
@@ -249,7 +249,7 @@ stateDiagram-v2
 | S-04 | `RECONCILING → COMPENSATING` | Đối soát xác nhận cần bù trừ. | Kết quả reserve/capture/release/refund đã đủ rõ để xác định hành động bù trừ. | Thực hiện release/refund cần thiết với khóa idempotency ổn định. | D-04; D-05 |
 | S-05 | `RECONCILING → RECONCILIATION_REQUIRED` | Đã dùng hết lịch đối soát. | Đủ 30 lần truy vấn mà kết quả vẫn chưa xác minh. | Phát cảnh báo; tiếp tục truy vấn nền mỗi 5 phút; chờ xử lý theo Q-02. | D-04; Q-02; Q-03 |
 | S-06 | `RECONCILIATION_REQUIRED → RECONCILING` | Đến chu kỳ truy vấn nền. | Kết quả hành động vẫn chưa được xác minh. | Truy vấn lại bằng khóa ổn định; không tự kết luận thành công/thất bại. | D-04; NFR-05 |
-| S-07 | `COMPENSATING → COMPENSATION_FAILED` | Release/refund thất bại tạm thời quá ngưỡng gửi. | Đã gửi quá 5 lần; kết quả là lỗi xác định, không phải timeout chưa rõ. | Lưu lỗi và lên lịch retry nền mỗi 60 giây; phát cảnh báo vận hành. | D-03.2; EC-09; NFR-04 |
+| S-07 | `COMPENSATING → COMPENSATION_FAILED` | Release/refund thất bại tạm thời quá ngưỡng gửi. | Đã dùng hết 5 lần gửi chính tính cả lần đầu; kết quả là lỗi xác định, không phải timeout chưa rõ. | Lưu lỗi và lên lịch retry nền mỗi 60 giây; phát cảnh báo vận hành. | D-03.2; EC-09; NFR-04 |
 | S-08 | `COMPENSATION_FAILED → COMPENSATING` | Đến lịch retry nền. | Hành động bù trừ chưa hoàn tất; dùng lại khóa idempotency ban đầu. | Retry release/refund; xác minh kết quả trước khi hoàn tất Saga. | D-02; D-03.2; NFR-04 |
 | S-09 | `COMPENSATING → RECONCILING` | Lệnh release/refund timeout hoặc kết quả chưa rõ. | Trạng thái hành động chuyển thành `UNKNOWN`. | Dừng gửi lệnh bù trừ mới cho đến khi đối soát; truy vấn theo khóa ổn định. | D-04; D-05 |
 | S-10 | `COMPENSATING → COMPLETED` | Tất cả hành động bù trừ bắt buộc đã được xác minh. | Reservation đã release hoặc được xác minh không tồn tại; nếu capture thành công thì refund bắt buộc đã thành công. | Hoàn tất nhánh thất bại/hết hạn; ghi trạng thái Order và domain event theo transaction tương ứng. | D-05; D-06 |
@@ -261,7 +261,7 @@ stateDiagram-v2
 
 | Tình huống | Trạng thái hành động | Trạng thái Saga | Cách xử lý |
 |---|---|---|---|
-| Release/refund trả lỗi tạm thời xác định và đã gửi quá 5 lần. | Lỗi đã xác định, không phải `UNKNOWN`. | `COMPENSATION_FAILED` | Với lỗi kết nối, HTTP 5xx hoặc xung đột lock có thể thử lại (D-03.1), retry nền mỗi 60 giây và dùng cùng khóa idempotency. |
+| Release/refund trả lỗi tạm thời xác định và đã dùng hết 5 lần gửi chính tính cả lần đầu. | Lỗi đã xác định, không phải `UNKNOWN`. | `COMPENSATION_FAILED` | Với lỗi kết nối, HTTP 5xx hoặc xung đột lock có thể thử lại (D-03.1), retry nền mỗi 60 giây và dùng cùng khóa idempotency. |
 | Reserve/capture/release/refund timeout, không biết dịch vụ đích đã thực hiện hay chưa. | `UNKNOWN` | `RECONCILING` | Truy vấn kết quả theo khóa ổn định; không gửi hành động mới với khóa khác. |
 | Đã thực hiện đủ lịch đối soát nhưng kết quả vẫn chưa rõ. | Giữ `UNKNOWN` | `RECONCILIATION_REQUIRED` | Cảnh báo, truy vấn nền mỗi 5 phút và xử lý theo Q-02. |
 | Refund đã được xác minh `FAILED`. | `FAILED` | `RECONCILIATION_REQUIRED` | Không tự retry bằng cùng khóa đã lưu kết quả thất bại; cần quyết định xử lý thủ công hoặc cho phép khóa phiên bản mới theo Q-08. |
@@ -640,3 +640,14 @@ Các tài liệu `10-saga-workflow-and-compensation.md`, `11-sequence-diagrams.m
 | — | Việc kiểm tra `paymentId` thuộc đúng Order và số tiền capture khớp tổng đơn; điều kiện số tiền chỉ áp dụng nếu mô hình dữ liệu có giá. | T-01; D-01.1 | Người 2 | Chờ xác nhận |
 | — | Bản kết quả đã xác minh của Reservation và capture lưu trong DB Order Service để kiểm tra T-01, T-04, T-08 mà không truy vấn chéo DB. | T-01; D-02 | Người 2 | Chờ xác nhận |
 | — | Hàm thời gian phù hợp với DB để so sánh `expireAt` và `leaseUntil` tại thời điểm thực thi. | Mục 11.1 | Người 2 | Chờ xác nhận |
+
+## 15. Làm rõ điều kiện thực thi sau rà soát Issue #22
+
+- Bảng Order và Saga là hai máy trạng thái riêng. T-06/T-07 áp dụng cho Order của nhánh thất bại; nhánh hết hạn giữ `EXPIRING` khi Saga bị lỗi bù trừ.
+- T-05, T-08 và S-10 yêu cầu bằng chứng không còn tác dụng Reserve đang bay; `404` sau timeout không đủ. Chưa xác minh thì tiếp tục đối soát, không ghi trạng thái cuối.
+- `UNKNOWN → IN_PROGRESS` của Capture/Refund hợp lệ khi query xác nhận service đã nhận giao dịch nhưng chưa hoàn tất; giữ công việc polling, không tạo giao dịch mới. Đây là bổ sung cho sơ đồ trạng thái Payment; chưa được xem là `SUCCEEDED` hoặc `FAILED`.
+- Response cũ không được ghi đè kết quả cuối đã xác minh. Worker mất token/lease không được cập nhật tiến trình bằng quyền cũ; phản hồi muộn cần worker hợp lệ đối chiếu transaction ID, key, Order và payload.
+- Kiểm tra trạng thái và ghi ý định gửi lệnh tiến dưới cùng khóa Order; không giữ khóa DB trong khi gọi mạng. Lệnh đã ghi ý định trước khi nhánh đổi vẫn có thể đến muộn và phải bù trừ.
+- `db_now()` trong pseudo-SQL được ánh xạ sang `clock_timestamp()` trên PostgreSQL; UTC dùng xuyên suốt. Gia hạn lease không được gia hạn `expireAt`.
+
+Xem [thiết kế lưu tiến trình và phục hồi](16-saga-persistence-and-recovery.md) để biết transaction boundary, bảng tình huống crash và danh sách mâu thuẫn liên tài liệu còn chờ chủ sở hữu xử lý. Q-01/Q-02/Q-03/Q-07/Q-08 vẫn cần review của nhóm; tài liệu này không tự coi là đã được chấp thuận.
