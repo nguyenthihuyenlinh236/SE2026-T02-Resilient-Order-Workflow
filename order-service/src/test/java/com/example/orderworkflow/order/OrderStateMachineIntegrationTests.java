@@ -81,8 +81,49 @@ class OrderStateMachineIntegrationTests {
                 machine.recordRefund(refundOrder, "REF-1", "UNKNOWN", false));
 
         UUID step = compensationStep(refundOrder, "REFUND", "SUCCEEDED", 1, Instant.now());
-        assertThat(sagas.updateStep(step, "SUCCEEDED", "UNKNOWN", "{}", null,
+        assertThat(sagas.updateStep(step, "SUCCEEDED", "UNKNOWN", "UNKNOWN", "{}", null,
                 Instant.now(), Instant.now(), "late timeout")).isZero();
+    }
+
+    @Test
+    void identicalVerifiedResultsReplayButConflictingResultsDoNotOverwrite() {
+        String id = order(Instant.now().plusSeconds(300));
+        machine.recordReservation(id, "RESERVED", true, null);
+        machine.recordReservation(id, "RESERVED", true, null);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                machine.recordReservation(id, "REJECTED", true, null));
+
+        machine.recordCapture(id, id, "PAY-1", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
+        machine.recordCapture(id, id, "PAY-1", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                machine.recordCapture(id, id, "PAY-1", "FAILED", true, null, null));
+
+        machine.recordRefund(id, "REF-1", "SUCCEEDED", true);
+        machine.recordRefund(id, "REF-1", "SUCCEEDED", true);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                machine.recordRefund(id, "REF-1", "FAILED", true));
+
+        assertThat(machine.confirm(id)).isEqualTo(Transition.APPLIED);
+        machine.recordReservation(id, "RESERVED", true, null);
+        machine.recordCapture(id, id, "PAY-1", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
+    }
+
+    @Test
+    void notCreatedMustBeVerifiedBeforeFailedOrExpiredCanBeFinalized() {
+        String failed = order(Instant.now().plusSeconds(300));
+        machine.recordCapture(failed, failed, "PAY-1", "FAILED", true, null, null);
+        assertThat(machine.startCompensation(failed)).isEqualTo(Transition.APPLIED);
+        assertThat(machine.fail(failed)).isEqualTo(Transition.REJECTED);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                machine.recordReservation(failed, "NOT_CREATED", false, null));
+        machine.recordReservation(failed, "NOT_CREATED", true, null);
+        assertThat(machine.fail(failed)).isEqualTo(Transition.APPLIED);
+
+        String expired = order(Instant.now().minusSeconds(1));
+        UUID token = machine.claimExpired(expired);
+        assertThat(machine.expire(expired, token)).isEqualTo(Transition.REJECTED);
+        machine.recordReservation(expired, "NOT_CREATED", true, null);
+        assertThat(machine.expire(expired, token)).isEqualTo(Transition.APPLIED);
     }
 
     @Test
@@ -146,6 +187,27 @@ class OrderStateMachineIntegrationTests {
     }
 
     @Test
+    void confirmWinsWhenCommittedBeforeTtl() {
+        String id = order(Instant.now().plusSeconds(300));
+        machine.recordReservation(id, "RESERVED", true, null);
+        machine.recordCapture(id, id, "PAY-1", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
+        assertThat(machine.confirm(id)).isEqualTo(Transition.APPLIED);
+        jdbc.update("UPDATE orders SET expire_at=clock_timestamp()-interval '1 second' WHERE order_id=?", id);
+        assertThat(machine.claimExpired(id)).isNull();
+        assertThat(status(id)).isEqualTo("CONFIRMED");
+    }
+
+    @Test
+    void expirationWinsAfterTtl() {
+        String id = order(Instant.now().minusSeconds(1));
+        machine.recordReservation(id, "RESERVED", true, null);
+        machine.recordCapture(id, id, "PAY-1", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
+        assertThat(machine.claimExpired(id)).isNotNull();
+        assertThat(machine.confirm(id)).isEqualTo(Transition.REJECTED);
+        assertThat(status(id)).isEqualTo("EXPIRING");
+    }
+
+    @Test
     void attemptInsertAndCounterAreAtomicOnRollbackAndUnderConcurrency() throws Exception {
         String id = order(Instant.now().plusSeconds(300));
         UUID step = compensationStep(id, "RELEASE", "IN_PROGRESS", 0, Instant.now());
@@ -181,14 +243,26 @@ class OrderStateMachineIntegrationTests {
         machine.recordReservation(id, "RESERVED", true, null);
         machine.recordCapture(id, id, "PAY-1", "FAILED", true, null, null);
         assertThat(machine.startCompensation(id)).isEqualTo(Transition.APPLIED);
-        UUID step = compensationStep(id, "RELEASE", "FAILED", 4, Instant.now().minusSeconds(1));
+        UUID step = compensationStep(id, "RELEASE", "IN_PROGRESS", "TRANSIENT", 4, Instant.now().minusSeconds(1));
         assertThat(machine.compensationFailed(id)).isEqualTo(Transition.REJECTED);
-        jdbc.update("UPDATE saga_steps SET attempt_count=5 WHERE step_id=?", step);
+        jdbc.update("UPDATE saga_steps SET attempt_count=5,last_error=NULL WHERE step_id=?", step);
+        assertThat(machine.compensationFailed(id)).isEqualTo(Transition.REJECTED);
+        jdbc.update("UPDATE saga_steps SET last_error='connection timeout',next_attempt_at=NULL WHERE step_id=?", step);
+        assertThat(machine.compensationFailed(id)).isEqualTo(Transition.REJECTED);
+        jdbc.update("UPDATE saga_steps SET next_attempt_at=clock_timestamp()-interval '1 second' WHERE step_id=?", step);
         assertThat(machine.compensationFailed(id)).isEqualTo(Transition.APPLIED);
         jdbc.update("UPDATE saga_steps SET next_attempt_at=clock_timestamp()+interval '1 hour' WHERE step_id=?", step);
         assertThat(machine.retryCompensation(id)).isEqualTo(Transition.REJECTED);
         jdbc.update("UPDATE saga_steps SET next_attempt_at=clock_timestamp()-interval '1 second' WHERE step_id=?", step);
         assertThat(machine.retryCompensation(id)).isEqualTo(Transition.APPLIED);
+
+        String business = compensatingOrder();
+        compensationStep(business, "RELEASE", "FAILED", "BUSINESS", 5, Instant.now().minusSeconds(1));
+        assertThat(machine.compensationFailed(business)).isEqualTo(Transition.REJECTED);
+
+        String unknown = compensatingOrder();
+        compensationStep(unknown, "RELEASE", "UNKNOWN", "UNKNOWN", 5, Instant.now().minusSeconds(1));
+        assertThat(machine.compensationFailed(unknown)).isEqualTo(Transition.REJECTED);
     }
 
     @Test
@@ -196,13 +270,15 @@ class OrderStateMachineIntegrationTests {
         String id = order(Instant.now().minusSeconds(1));
         UUID token = machine.claimExpired(id);
         assertThat(token).isNotNull();
-        compensationStep(id, "RELEASE", "FAILED", 5, Instant.now().minusSeconds(1));
+        compensationStep(id, "RELEASE", "IN_PROGRESS", "TRANSIENT", 5, Instant.now().minusSeconds(1));
         assertThat(machine.compensationFailed(id)).isEqualTo(Transition.APPLIED);
         assertThat(status(id)).isEqualTo("EXPIRING");
         assertThat(sagaStatus(id)).isEqualTo("COMPENSATION_FAILED");
+        assertThat(sagaBranch(id)).isEqualTo("EXPIRATION");
         assertThat(machine.retryCompensation(id)).isEqualTo(Transition.APPLIED);
         assertThat(status(id)).isEqualTo("EXPIRING");
         assertThat(sagaStatus(id)).isEqualTo("COMPENSATING");
+        assertThat(sagaBranch(id)).isEqualTo("EXPIRATION");
     }
 
     @Test
@@ -279,21 +355,37 @@ class OrderStateMachineIntegrationTests {
         return id;
     }
 
+    private String compensatingOrder() {
+        String id = order(Instant.now().plusSeconds(300));
+        machine.recordCapture(id, id, "PAY-1", "FAILED", true, null, null);
+        assertThat(machine.startCompensation(id)).isEqualTo(Transition.APPLIED);
+        return id;
+    }
+
     private UUID compensationStep(String orderId, String operation, String status, int attempts, Instant nextAttempt) {
+        String failureClass = "IN_PROGRESS".equals(status) ? "NONE"
+                : "FAILED".equals(status) ? "BUSINESS" : "NONE";
+        return compensationStep(orderId, operation, status, failureClass, attempts, nextAttempt);
+    }
+
+    private UUID compensationStep(String orderId, String operation, String status, String failureClass,
+            int attempts, Instant nextAttempt) {
         UUID saga = jdbc.queryForObject("SELECT saga_id FROM sagas WHERE order_id=?", UUID.class, orderId);
         UUID step = UUID.randomUUID();
         String body = "{\"orderId\":\"" + orderId + "\"}";
         jdbc.update("INSERT INTO saga_steps(step_id,saga_id,operation,command_id,correlation_id,idempotency_key,"
-                + "saga_payload,request_payload,payload_hash,status,attempt_count,next_attempt_at,completed_at) "
+                + "saga_payload,request_payload,payload_hash,status,failure_class,attempt_count,next_attempt_at,last_error,completed_at) "
                 + "VALUES (?,?,?,?,?,?,CAST(? AS jsonb),CAST(? AS jsonb),"
-                + "encode(sha256(convert_to(CAST(? AS jsonb)::text,'UTF8')),'hex'),?,?,?,"
+                + "encode(sha256(convert_to(CAST(? AS jsonb)::text,'UTF8')),'hex'),?,?,?,?,?,"
                 + "CASE WHEN ? IN ('SUCCEEDED','FAILED') THEN clock_timestamp() END)",
                 step, saga, operation, UUID.randomUUID(), "corr", operation.toLowerCase() + ":" + orderId,
-                body, body, body, status, attempts, Timestamp.from(nextAttempt), status);
+                body, body, body, status, failureClass, attempts, Timestamp.from(nextAttempt),
+                "NONE".equals(failureClass) ? null : "simulated " + failureClass.toLowerCase(), status);
         return step;
     }
 
     private String status(String id) { return jdbc.queryForObject("SELECT status FROM orders WHERE order_id=?", String.class, id); }
     private String sagaStatus(String id) { return jdbc.queryForObject("SELECT status FROM sagas WHERE order_id=?", String.class, id); }
+    private String sagaBranch(String id) { return jdbc.queryForObject("SELECT branch FROM sagas WHERE order_id=?", String.class, id); }
     private int count(String table) { return jdbc.queryForObject("SELECT count(*) FROM " + table, Integer.class); }
 }
