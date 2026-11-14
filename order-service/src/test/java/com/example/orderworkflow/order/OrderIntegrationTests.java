@@ -31,6 +31,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import com.example.orderworkflow.order.api.OrderDtos.ErrorResponse;
 import com.example.orderworkflow.order.api.OrderDtos.OrderResponse;
+import com.example.orderworkflow.order.repository.SagaRepository;
 
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
@@ -49,12 +50,18 @@ class OrderIntegrationTests {
 
     @Autowired TestRestTemplate http;
     @Autowired JdbcTemplate jdbc;
+    @Autowired SagaRepository sagaRepository;
 
     @BeforeEach
     void resetDatabase() {
         jdbc.execute("DROP TRIGGER IF EXISTS fail_order_item_trigger ON order_items");
         jdbc.execute("DROP FUNCTION IF EXISTS fail_order_item_insert()");
-        jdbc.execute("TRUNCATE order_items, idempotency_records, orders, product_catalog");
+        jdbc.execute("DROP TRIGGER IF EXISTS fail_saga_trigger ON sagas");
+        jdbc.execute("DROP FUNCTION IF EXISTS fail_saga_insert()");
+        jdbc.execute("DROP TRIGGER IF EXISTS fail_saga_step_trigger ON saga_steps");
+        jdbc.execute("DROP FUNCTION IF EXISTS fail_saga_step_insert()");
+        jdbc.execute("TRUNCATE saga_attempts, saga_steps, sagas, outbox_events, order_items, "
+                + "idempotency_records, orders, product_catalog");
         jdbc.update("""
                 INSERT INTO product_catalog(store_id, sku, product_name, unit_price, currency, active)
                 VALUES ('STORE-001','SKU-001','Product 1',125000.00,'VND',true),
@@ -75,6 +82,12 @@ class OrderIntegrationTests {
         assertThat(Duration.between(result.getBody().createdAt(), result.getBody().expireAt()))
                 .isEqualTo(Duration.ofMinutes(15));
         assertThat(count("orders")).isOne();
+        assertThat(count("sagas")).isOne();
+        assertThat(count("saga_steps")).isOne();
+        var step = jdbc.queryForMap("SELECT operation,status,idempotency_key,request_payload::text payload FROM saga_steps");
+        assertThat(step.get("operation")).isEqualTo("RESERVE");
+        assertThat(step.get("status")).isEqualTo("NOT_STARTED");
+        assertThat(step.get("idempotency_key")).isEqualTo("reserve:" + result.getBody().orderId() + ":v1");
     }
 
     @Test
@@ -115,7 +128,8 @@ class OrderIntegrationTests {
     void sameKeyAndNormalizedPayloadReplaysOriginalOrderWithoutExtendingTtl() {
         var first = create("key-replay", request(items(item("SKU-001", 1), item("SKU-001", 2))));
         jdbc.update("UPDATE product_catalog SET unit_price = 999999.00 WHERE store_id='STORE-001' AND sku='SKU-001'");
-        jdbc.update("UPDATE orders SET status = 'CONFIRMED' WHERE order_id = ?", first.getBody().orderId());
+        jdbc.update("UPDATE orders SET status='CONFIRMED',confirmed_at=clock_timestamp(),"
+                + "terminal_at=clock_timestamp() WHERE order_id=?", first.getBody().orderId());
         var replay = create("key-replay", request(items(item("SKU-001", 3))));
 
         assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
@@ -180,6 +194,8 @@ class OrderIntegrationTests {
             assertThat(ids).hasSize(1);
             assertThat(count("orders")).isOne();
             assertThat(count("idempotency_records")).isOne();
+            assertThat(count("sagas")).isOne();
+            assertThat(count("saga_steps")).isOne();
         } finally {
             executor.shutdownNow();
         }
@@ -252,6 +268,49 @@ class OrderIntegrationTests {
         assertThat(count("orders")).isZero();
         assertThat(count("order_items")).isZero();
         assertThat(count("idempotency_records")).isZero();
+    }
+
+    @Test
+    void sagaInsertFailureRollsBackOrderItemsAndIdempotency() {
+        jdbc.execute("CREATE FUNCTION fail_saga_insert() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                + "BEGIN RAISE EXCEPTION 'injected saga failure'; END $$");
+        jdbc.execute("CREATE TRIGGER fail_saga_trigger BEFORE INSERT ON sagas "
+                + "FOR EACH ROW EXECUTE FUNCTION fail_saga_insert()");
+
+        assertThat(createError("key-saga-rollback", request(items(item("SKU-001", 1)))).getStatusCode())
+                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(count("orders")).isZero();
+        assertThat(count("order_items")).isZero();
+        assertThat(count("sagas")).isZero();
+        assertThat(count("idempotency_records")).isZero();
+    }
+
+    @Test
+    void reserveStepFailureRollsBackOrderAndSaga() {
+        jdbc.execute("CREATE FUNCTION fail_saga_step_insert() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                + "BEGIN RAISE EXCEPTION 'injected step failure'; END $$");
+        jdbc.execute("CREATE TRIGGER fail_saga_step_trigger BEFORE INSERT ON saga_steps "
+                + "FOR EACH ROW EXECUTE FUNCTION fail_saga_step_insert()");
+
+        assertThat(createError("key-step-rollback", request(items(item("SKU-001", 1)))).getStatusCode())
+                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(count("orders")).isZero();
+        assertThat(count("sagas")).isZero();
+        assertThat(count("saga_steps")).isZero();
+        assertThat(count("idempotency_records")).isZero();
+    }
+
+    @Test
+    void persistedSagaAndReserveSnapshotCanBeReadBack() {
+        var created = create("key-read-saga", request(items(item("SKU-002", 1), item("SKU-001", 2)))).getBody();
+        var saga = sagaRepository.findByOrderId(created.orderId()).orElseThrow();
+        var steps = sagaRepository.findSteps(saga.sagaId());
+
+        assertThat(saga.status()).isEqualTo("RUNNING");
+        assertThat(steps).singleElement().satisfies(step -> {
+            assertThat(step.operation()).isEqualTo("RESERVE");
+            assertThat(step.requestPayload()).contains("\"SKU-001\"").contains("\"SKU-002\"");
+        });
     }
 
     private org.springframework.http.ResponseEntity<OrderResponse> create(String key, Map<String, Object> body) {

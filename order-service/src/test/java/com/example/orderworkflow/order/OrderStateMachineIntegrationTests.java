@@ -1,0 +1,177 @@
+package com.example.orderworkflow.order;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.sql.Timestamp;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+
+import com.example.orderworkflow.order.service.OrderStateMachine;
+import com.example.orderworkflow.order.service.OrderStateMachine.Transition;
+
+@Testcontainers
+@SpringBootTest(properties = {"spring.flyway.enabled=true", "spring.sql.init.mode=never",
+        "management.health.rabbit.enabled=false"})
+class OrderStateMachineIntegrationTests {
+    @Container static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
+
+    @DynamicPropertySource
+    static void database(DynamicPropertyRegistry p) {
+        p.add("spring.datasource.url", POSTGRES::getJdbcUrl);
+        p.add("spring.datasource.username", POSTGRES::getUsername);
+        p.add("spring.datasource.password", POSTGRES::getPassword);
+    }
+
+    @Autowired JdbcTemplate jdbc;
+    @Autowired OrderStateMachine machine;
+
+    @BeforeEach
+    void reset() {
+        jdbc.execute("DROP TRIGGER IF EXISTS fail_outbox_trigger ON outbox_events");
+        jdbc.execute("DROP FUNCTION IF EXISTS fail_outbox_insert()");
+        jdbc.execute("TRUNCATE saga_attempts,saga_steps,sagas,outbox_events,order_items,idempotency_records,orders,product_catalog");
+    }
+
+    @Test
+    void confirmationRequiresVerifiedEvidenceAndWritesOneOutboxEvent() {
+        String id = order(Instant.now().plusSeconds(300));
+        assertThat(machine.confirm(id)).isEqualTo(Transition.REJECTED);
+        machine.recordReservation(id, "RESERVED", true, null);
+        assertThat(machine.confirm(id)).isEqualTo(Transition.REJECTED);
+        machine.recordCapture(id, id, "PAY-1", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
+
+        assertThat(machine.confirm(id)).isEqualTo(Transition.APPLIED);
+        assertThat(machine.confirm(id)).isEqualTo(Transition.REJECTED);
+        assertThat(status(id)).isEqualTo("CONFIRMED");
+        assertThat(count("outbox_events")).isOne();
+        assertThat(sagaStatus(id)).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    void captureForWrongOrderOrWrongMoneyCannotConfirm() {
+        String id = order(Instant.now().plusSeconds(300));
+        machine.recordReservation(id, "RESERVED", true, null);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> machine.recordCapture(
+                id, "ORD-other", "PAY-1", "SUCCEEDED", true, new BigDecimal("100.00"), "VND"));
+        machine.recordCapture(id, id, "PAY-1", "SUCCEEDED", true, new BigDecimal("99.00"), "VND");
+        assertThat(machine.confirm(id)).isEqualTo(Transition.REJECTED);
+    }
+
+    @Test
+    void unknownIsNotFailureAndBlocksExpiration() {
+        String id = order(Instant.now().minusSeconds(1));
+        machine.recordCapture(id, id, "PAY-1", "UNKNOWN", false, null, null);
+        assertThat(machine.claimExpired(id)).isNull();
+        assertThat(status(id)).isEqualTo("PENDING");
+    }
+
+    @Test
+    void competingConfirmAndExpireAllowOnlyOneBranch() throws Exception {
+        String id = order(Instant.now().minusSeconds(1));
+        machine.recordReservation(id, "RESERVED", true, null);
+        machine.recordCapture(id, id, "PAY-1", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
+        var start = new CountDownLatch(1);
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var confirm = pool.submit(() -> { start.await(); return machine.confirm(id); });
+            var expire = pool.submit(() -> { start.await(); return machine.claimExpired(id); });
+            start.countDown();
+            var confirmation = confirm.get();
+            var token = expire.get();
+            assertThat((confirmation == Transition.APPLIED ? 1 : 0) + (token != null ? 1 : 0)).isEqualTo(1);
+            assertThat(status(id)).isIn("CONFIRMED", "EXPIRING");
+        } finally { pool.shutdownNow(); }
+    }
+
+    @Test
+    void twoWorkersCannotClaimAndStaleWorkerCannotComplete() throws Exception {
+        String id = order(Instant.now().minusSeconds(1));
+        var start = new CountDownLatch(1);
+        var pool = Executors.newFixedThreadPool(2);
+        UUID first;
+        UUID second;
+        try {
+            var a = pool.submit(() -> { start.await(); return machine.claimExpired(id); });
+            var b = pool.submit(() -> { start.await(); return machine.claimExpired(id); });
+            start.countDown(); first = a.get(); second = b.get();
+        } finally { pool.shutdownNow(); }
+        assertThat((first == null ? 0 : 1) + (second == null ? 0 : 1)).isOne();
+        UUID old = first != null ? first : second;
+        jdbc.update("UPDATE orders SET claimed_at=clock_timestamp()-interval '2 seconds',"
+                + "lease_until=clock_timestamp()-interval '1 second' WHERE order_id=?", id);
+        UUID replacement = machine.takeOverExpired(id, old);
+        assertThat(replacement).isNotNull().isNotEqualTo(old);
+        assertThat(machine.expire(id, old)).isEqualTo(Transition.REJECTED);
+    }
+
+    @Test
+    void outboxFailureRollsBackTerminalOrderAndSaga() {
+        String id = order(Instant.now().plusSeconds(300));
+        machine.recordReservation(id, "RESERVED", true, null);
+        machine.recordCapture(id, id, "PAY-1", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
+        jdbc.execute("CREATE FUNCTION fail_outbox_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fail'; END $$");
+        jdbc.execute("CREATE TRIGGER fail_outbox_trigger BEFORE INSERT ON outbox_events FOR EACH ROW EXECUTE FUNCTION fail_outbox_insert()");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> machine.confirm(id));
+        assertThat(status(id)).isEqualTo("PENDING");
+        assertThat(sagaStatus(id)).isEqualTo("RUNNING");
+        assertThat(count("outbox_events")).isZero();
+    }
+
+    @Test
+    void compensationCannotFinishUntilAllRequiredEvidenceIsVerified() {
+        String id = order(Instant.now().plusSeconds(300));
+        machine.recordReservation(id, "RESERVED", true, null);
+        machine.recordCapture(id, id, "PAY-1", "FAILED", true, null, null);
+        assertThat(machine.startCompensation(id)).isEqualTo(Transition.APPLIED);
+        assertThat(machine.fail(id)).isEqualTo(Transition.REJECTED);
+
+        machine.recordReservation(id, "RELEASED", true, null);
+        assertThat(machine.fail(id)).isEqualTo(Transition.APPLIED);
+        assertThat(status(id)).isEqualTo("FAILED");
+        assertThat(count("outbox_events")).isOne();
+    }
+
+    @Test
+    void expirationRequiresCurrentLeaseAndCompletedRefundForCapturedPayment() {
+        String id = order(Instant.now().minusSeconds(1));
+        machine.recordReservation(id, "RELEASED", true, null);
+        machine.recordCapture(id, id, "PAY-1", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
+        UUID token = machine.claimExpired(id);
+        assertThat(token).isNotNull();
+        assertThat(machine.expire(id, token)).isEqualTo(Transition.REJECTED);
+        machine.recordRefund(id, "REF-1", "SUCCEEDED", true);
+        assertThat(machine.expire(id, token)).isEqualTo(Transition.APPLIED);
+        assertThat(status(id)).isEqualTo("EXPIRED");
+    }
+
+    private String order(Instant expiry) {
+        String id = "ORD-" + UUID.randomUUID().toString().replace("-", "");
+        Instant created = expiry.minusSeconds(900);
+        jdbc.update("INSERT INTO orders(order_id,customer_id,client_id,store_id,total_amount,currency,reservation_id,"
+                + "correlation_id,created_at,updated_at,expire_at) VALUES (?,?,?,?,100.00,'VND',?,?,?,?,?)",
+                id, "CUSTOMER-1", "CLIENT-1", "STORE-1", "RES-" + id.substring(4), "corr",
+                Timestamp.from(created), Timestamp.from(created), Timestamp.from(expiry));
+        jdbc.update("INSERT INTO sagas(saga_id,order_id,status,branch,current_operation) VALUES (?,?,'RUNNING','FORWARD','RESERVE')",
+                UUID.randomUUID(), id);
+        return id;
+    }
+
+    private String status(String id) { return jdbc.queryForObject("SELECT status FROM orders WHERE order_id=?", String.class, id); }
+    private String sagaStatus(String id) { return jdbc.queryForObject("SELECT status FROM sagas WHERE order_id=?", String.class, id); }
+    private int count(String table) { return jdbc.queryForObject("SELECT count(*) FROM " + table, Integer.class); }
+}
