@@ -28,6 +28,8 @@ public final class OrderDtos {
             Instant expireAt, String correlationId) { }
 
     public record ErrorDetail(String field, String reason) { }
+    public record OrderPage(List<OrderResponse> items, int page, int size,
+            long totalElements, long totalPages) { }
     public record ErrorBody(String code, String message, List<ErrorDetail> details,
             String correlationId, boolean retryable) { }
     public record ErrorResponse(ErrorBody error) { }

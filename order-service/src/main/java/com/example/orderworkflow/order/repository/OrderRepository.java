@@ -85,6 +85,37 @@ public class OrderRepository {
         }
     }
 
+    private static String searchWhere(String customerId, String status, List<Object> parameters) {
+        String where = " WHERE 1 = 1";
+        if (customerId != null) {
+            where += " AND customer_id = ?";
+            parameters.add(customerId);
+        }
+        if (status != null) {
+            where += " AND status = ?";
+            parameters.add(status);
+        }
+        return where;
+    }
+
+    public long countOrders(String customerId, String status) {
+        var parameters = new ArrayList<Object>();
+        String where = searchWhere(customerId, status, parameters);
+        return jdbc.queryForObject("SELECT count(*) FROM orders" + where, Long.class, parameters.toArray());
+    }
+
+    public List<OrderRecord> searchOrders(String customerId, String status, int limit, long offset) {
+        var parameters = new ArrayList<Object>();
+        String where = searchWhere(customerId, status, parameters);
+        parameters.add(limit);
+        parameters.add(offset);
+        return jdbc.query("SELECT order_id, status, created_at, expire_at, correlation_id FROM orders"
+                        + where + " ORDER BY created_at DESC, order_id DESC LIMIT ? OFFSET ?",
+                (rs, row) -> new OrderRecord(rs.getString("order_id"), rs.getString("status"),
+                        rs.getTimestamp("created_at").toInstant(), rs.getTimestamp("expire_at").toInstant(),
+                        rs.getString("correlation_id")), parameters.toArray());
+    }
+
     public Optional<OrderRecord> findOrder(String orderId) {
         return jdbc.query("""
                 SELECT order_id, status, created_at, expire_at, correlation_id

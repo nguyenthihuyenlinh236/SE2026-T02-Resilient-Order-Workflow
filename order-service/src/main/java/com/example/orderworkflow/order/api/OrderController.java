@@ -8,10 +8,12 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.example.orderworkflow.order.api.OrderDtos.CreateOrderRequest;
 import com.example.orderworkflow.order.api.OrderDtos.OrderResponse;
+import com.example.orderworkflow.order.api.OrderDtos.OrderPage;
 import com.example.orderworkflow.order.service.OrderService;
 
 import jakarta.validation.Valid;
@@ -33,6 +35,15 @@ public class OrderController {
             @Valid @RequestBody CreateOrderRequest request) {
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .body(service.create(request, clientId, idempotencyKey, correlationId));
+    }
+
+    @GetMapping
+    public OrderPage search(
+            @RequestParam(required = false) String customerId,
+            @RequestParam(required = false) String status,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return service.search(customerId, status, page, size);
     }
 
     @GetMapping("/{orderId}")

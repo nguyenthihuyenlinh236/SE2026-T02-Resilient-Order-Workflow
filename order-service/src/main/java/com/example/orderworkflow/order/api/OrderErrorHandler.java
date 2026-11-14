@@ -16,6 +16,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import com.example.orderworkflow.order.api.OrderDtos.ErrorBody;
 import com.example.orderworkflow.order.api.OrderDtos.ErrorDetail;
@@ -58,6 +59,13 @@ public class OrderErrorHandler {
                 retryable ? "SERVICE_UNAVAILABLE" : "INTERNAL_SERVER_ERROR",
                 "Order Service could not complete the request; retry with the same Idempotency-Key",
                 List.of(), request, retryable);
+    }
+
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    ResponseEntity<ErrorResponse> invalidQuery(MethodArgumentTypeMismatchException exception,
+            HttpServletRequest request) {
+        return response(400, "VALIDATION_ERROR", "Query parameter is invalid",
+                List.of(new ErrorDetail(exception.getName(), "Expected an integer")), request, false);
     }
 
     @ExceptionHandler(Exception.class)

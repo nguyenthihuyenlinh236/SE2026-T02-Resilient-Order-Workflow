@@ -14,9 +14,11 @@ import java.util.regex.Pattern;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Isolation;
 
 import com.example.orderworkflow.order.api.OrderDtos.CreateOrderRequest;
 import com.example.orderworkflow.order.api.OrderDtos.OrderResponse;
+import com.example.orderworkflow.order.api.OrderDtos.OrderPage;
 import com.example.orderworkflow.order.repository.OrderRecords.CatalogProduct;
 import com.example.orderworkflow.order.repository.OrderRecords.OrderRecord;
 import com.example.orderworkflow.order.repository.OrderRepository;
@@ -104,6 +106,24 @@ public class OrderService {
         validateIdentifier(orderId, "orderId");
         return repository.findOrder(orderId).map(OrderService::response)
                 .orElseThrow(() -> new OrderException(404, "ORDER_NOT_FOUND", "Order was not found"));
+    }
+
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public OrderPage search(String customerId, String status, int page, int size) {
+        if (customerId != null) {
+            validateIdentifier(customerId, "customerId");
+        }
+        if (status != null && !java.util.Set.of("PENDING", "CONFIRMED", "COMPENSATING",
+                "COMPENSATION_FAILED", "EXPIRING", "FAILED", "EXPIRED").contains(status)) {
+            throw validation("status is invalid");
+        }
+        if (page < 0 || size < 1 || size > 100) {
+            throw validation("page must be non-negative and size must be between 1 and 100");
+        }
+        long total = repository.countOrders(customerId, status);
+        var items = repository.searchOrders(customerId, status, size, (long) page * size)
+                .stream().map(OrderService::response).toList();
+        return new OrderPage(items, page, size, total, total / size + (total % size == 0 ? 0 : 1));
     }
 
     private static TreeMap<String, Integer> normalize(CreateOrderRequest request) {
