@@ -37,3 +37,27 @@ Các tên test dưới đây nằm trong
 Bằng chứng: `baseline.log`, `red.log`, `red-metadata.json`. Chưa có GREEN,
 mutation, coverage hoặc tải; chưa có PR trong bước này. Không suy ra các kết quả đó
 từ baseline 16 test hoặc hai contract test pass.
+
+## GREEN update — 2026-11-14
+
+All T01–T13 cases, including T12b and parameterized invocations, PASS. T11 now executes the database fault injection. Focused suite: 29/29; full Order suite: 45/45. See green-summary.md, green.log and green-full.log. Mutation, coverage and load remain unverified.
+
+## Final evidence update — 2026-11-14
+
+The RED table above is historical. Current verification:
+
+| Requirement | Cases / measurement | Actual result | Evidence |
+|---|---|---|---|
+| AC1 filters and AND | T01, T02 (7 statuses), T03, T08 | PASS | coverage.log, green-full.log |
+| AC2 pagination / invalid input / empty | T04, T05, T07, T08, T12, T12b | PASS | coverage.log |
+| AC3 stable order and ties | T05, T06 | PASS on fixed data | coverage.log, repeat-1/2/3.log |
+| AC4 old API and read-only | T09, T10, T13 | PASS; original 16 tests also pass | green-full.log, coverage.log |
+| AC5 DB errors not empty 200 | T11 | PASS clean; mutant fails expected 500 vs actual 200 | mutation.log, mutation.diff, coverage.log |
+| NFC2 search load | 120 tasks, 600 requests | 0 errors; p95 689.191 ms <= 3500 ms | load.log, load-results.json, load-test-results.md |
+| Coverage | Full module, 45 tests | line 89.27%, branch 74.49% | coverage.csv/xml, coverage-summary.md |
+| Repeatability | 3 runs x 28 tests | 84 pass, no observed intermittent failure | flaky-tests.md, repeat-1/2/3.log |
+
+Provider-side JSON contract tests do not replace consumer-driven contracts from
+external clients. Coverage and local burst performance limits are documented in
+their own summaries. No mutation remains. Implementation/evidence commits are
+listed in Git history; no PR created yet.
