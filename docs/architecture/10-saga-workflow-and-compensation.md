@@ -57,7 +57,7 @@ Order và Saga là hai đối tượng có vòng đời riêng. Không sử dụ
 |---|---|---|
 | Đang xử lý đặt hàng | `PENDING` | `RUNNING` |
 | Đang bù trừ nhánh thất bại thông thường | `COMPENSATING` | `COMPENSATING` |
-| Bù trừ nhánh thất bại thông thường vượt ngưỡng retry | `COMPENSATING` | `COMPENSATION_FAILED` |
+| Bù trừ nhánh thất bại thông thường vượt ngưỡng retry | `COMPENSATION_FAILED` | `COMPENSATION_FAILED` |
 | Đang xử lý hết hạn | `EXPIRING` | `COMPENSATING` hoặc trạng thái xử lý tương ứng đã lưu |
 | Bù trừ nhánh hết hạn vượt ngưỡng retry | `EXPIRING` | `COMPENSATION_FAILED` |
 | Đang đối soát kết quả thanh toán chưa rõ | Giữ trạng thái Order hiện tại phù hợp với nhánh đã nhận quyền xử lý | `RECONCILING` hoặc `RECONCILIATION_REQUIRED` |
@@ -67,7 +67,7 @@ Order và Saga là hai đối tượng có vòng đời riêng. Không sử dụ
 Quy tắc:
 
 - `COMPENSATION_FAILED` là trạng thái xử lý của Saga khi hành động bù trừ vượt ngưỡng retry. Với nhánh hết hạn, Order tiếp tục giữ `EXPIRING` cho đến khi đủ điều kiện chuyển trạng thái cuối.
-- Với nhánh thất bại thông thường, Order giữ `COMPENSATING` trong thời gian còn hành động bù trừ bắt buộc chưa hoàn tất.
+- Với nhánh thất bại, Order chuyển `COMPENSATING → COMPENSATION_FAILED` khi hết lượt gửi chính do lỗi tạm thời đã xác định; đến lịch retry nền chuyển lại `COMPENSATING` (T-06/T-07). Cả hai đều là trạng thái trung gian.
 - Sau khi retry thành công, Saga tiếp tục từ tiến trình đã lưu; không khởi tạo lại Saga hoặc lặp lại các tác động nghiệp vụ đã thành công.
 - Chỉ chuyển Saga sang `COMPLETED` khi mọi hành động bắt buộc của nhánh đã được xác minh.
 - Chỉ chuyển Order sang `FAILED` hoặc `EXPIRED` khi đáp ứng đầy đủ điều kiện của State Machine.
@@ -259,10 +259,10 @@ Quy tắc:
 
 - Release và refund sử dụng chính sách retry đã thống nhất trong D-03.
 - Mỗi hành động retry sử dụng lại idempotency key của chính hành động đó.
-- Khi vượt 5 lần gửi, Saga chuyển sang `COMPENSATION_FAILED` và ghi nhận nguyên nhân, số lần gửi, thời điểm thử gần nhất cùng hành động đang chờ.
+- Sau 5 lần gửi chính tính cả lần đầu mà vẫn lỗi tạm thời đã xác định, Saga chuyển sang `COMPENSATION_FAILED` và ghi nhận nguyên nhân, số lần gửi, thời điểm thử gần nhất cùng hành động đang chờ.
 - Saga tiếp tục thử lại nền mỗi 60 giây, trừ khi có quy tắc vận hành khác được thống nhất trong D-03.
 - `COMPENSATION_FAILED` không có nghĩa là hành động bù trừ đã hoàn tất.
-- Với nhánh thất bại thông thường, Order tiếp tục ở `COMPENSATING` cho đến khi các compensation bắt buộc hoàn tất.
+- Với nhánh thất bại, Order dùng `COMPENSATION_FAILED` khi hết lượt gửi chính do lỗi tạm thời; trở về `COMPENSATING` khi retry nền. Không chuyển `FAILED` trước khi bù trừ được xác minh.
 - Với nhánh hết hạn, Order tiếp tục ở `EXPIRING` cho đến khi các điều kiện chuyển sang `EXPIRED` được xác minh.
 - Nếu kết quả release hoặc refund là `UNKNOWN`, hệ thống phải tra cứu hoặc đối soát trước khi kết luận thành công hay thất bại.
 - Nếu release/refund thất bại đã xác minh, hệ thống không được coi hành động đó là thành công chỉ vì đã gửi đủ số lần retry.
@@ -419,7 +419,7 @@ sequenceDiagram
     P--xO: Timeout / no definitive response
     O->>DB: Save payment UNKNOWN, Saga RECONCILING
     R->>P: Query payment by stable key
-    P-->>R: UNKNOWN or pending
+    P-->>R: UNKNOWN hoặc IN_PROGRESS
     R->>DB: Save reconciliation progress
     Note over R,P: Retry according to the primary reconciliation schedule
     R->>P: Query again
@@ -495,3 +495,9 @@ Tài liệu được coi là đủ để bàn giao khi:
 - Timeout, retry, idempotency và phục hồi có quy tắc rõ ràng.
 - Người 2 có thể xác định API/event cần triển khai từ các hợp đồng đã thống nhất.
 - Người 3 có thể tạo test case từ các luồng và tiêu chí nghiệm thu mà không phải tự suy đoán hành vi nghiệp vụ.
+
+## 17. Quy định lưu tiến trình và đối chiếu Issue #22
+
+Thiết kế lưu bền vững, thứ tự phục hồi, xử lý worker mất lease và các điểm chờ thống nhất được đặc tả tại [16-saga-persistence-and-recovery.md](16-saga-persistence-and-recovery.md). Không có phản hồi hoặc HTTP 5xx không tự chứng minh chưa có tác dụng phụ; khi chưa xác định phải đối soát. `IN_PROGRESS` chưa phải kết quả cuối, không đủ để chốt Order.
+
+Một phản hồi GET không tìm thấy sau timeout chỉ phản ánh thời điểm tra cứu. Không dùng riêng `404` để đánh dấu Reservation không tồn tại an toàn hoặc hoàn tất compensation khi Reserve còn có thể đến muộn. Khi cần chặn tác dụng muộn, giữ nhánh đang xử lý đến khi có bằng chứng từ Inventory; contract cho cơ chế này đang chờ thống nhất giữa các PR liên quan.
