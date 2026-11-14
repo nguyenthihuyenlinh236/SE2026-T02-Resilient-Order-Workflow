@@ -20,6 +20,7 @@ import com.example.orderworkflow.order.api.OrderDtos.OrderResponse;
 import com.example.orderworkflow.order.repository.OrderRecords.CatalogProduct;
 import com.example.orderworkflow.order.repository.OrderRecords.OrderRecord;
 import com.example.orderworkflow.order.repository.OrderRepository;
+import com.example.orderworkflow.order.repository.SagaRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -32,10 +33,12 @@ public class OrderService {
     private final OrderRepository repository;
     private final Duration ttl;
     private final ObjectMapper objectMapper;
+    private final SagaRepository sagaRepository;
 
-    public OrderService(OrderRepository repository, ObjectMapper objectMapper,
+    public OrderService(OrderRepository repository, SagaRepository sagaRepository, ObjectMapper objectMapper,
             @org.springframework.beans.factory.annotation.Value("${order.ttl:15m}") Duration ttl) {
         this.repository = repository;
+        this.sagaRepository = sagaRepository;
         this.objectMapper = objectMapper;
         this.ttl = ttl;
         if (ttl.isZero() || ttl.isNegative()) {
@@ -94,9 +97,37 @@ public class OrderService {
         repository.insertOrder(orderId, request.customerId(), clientId, request.storeId(), total, currency,
                 reservationId, correlationId, createdAt, expireAt);
         repository.insertItems(orderId, quantities, products);
+        var sagaId = sagaRepository.insertSaga(orderId);
+        String inventoryRequest = reserveRequest(orderId, reservationId, request.storeId(), quantities);
+        sagaRepository.insertStep(sagaId, "RESERVE", correlationId, "reserve:" + orderId + ":v1",
+                reserveSnapshot(inventoryRequest), inventoryRequest);
         var response = new OrderResponse(orderId, "PENDING", createdAt, expireAt, correlationId);
         repository.completeIdempotency(clientId, key, orderId, writeJson(response));
         return response;
+    }
+
+    private String reserveRequest(String orderId, String reservationId, String storeId,
+            Map<String, Integer> quantities) {
+        var items = quantities.entrySet().stream().map(entry -> {
+            var item = new LinkedHashMap<String, Object>();
+            item.put("sku", entry.getKey());
+            item.put("quantity", entry.getValue());
+            return item;
+        }).toList();
+        var payload = new LinkedHashMap<String, Object>();
+        payload.put("orderId", orderId);
+        payload.put("reservationId", reservationId);
+        payload.put("storeId", storeId);
+        payload.put("items", items);
+        return writeJson(payload);
+    }
+
+    private String reserveSnapshot(String inventoryRequest) {
+        var payload = new LinkedHashMap<String, Object>();
+        payload.put("schemaVersion", 1);
+        try { payload.put("inventoryRequest", objectMapper.readTree(inventoryRequest)); }
+        catch (Exception exception) { throw new IllegalStateException("Reserve payload could not be parsed", exception); }
+        return writeJson(payload);
     }
 
     @Transactional(readOnly = true)
