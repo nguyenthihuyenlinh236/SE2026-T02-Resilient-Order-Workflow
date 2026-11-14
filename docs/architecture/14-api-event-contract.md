@@ -1,0 +1,961 @@
+# 14 – API Contract và Event Contract
+
+## 1. Mục tiêu và nguyên tắc thiết kế
+
+Tài liệu thống nhất cách các service trao đổi trong Resilient Order Workflow, bao gồm API đồng bộ, command nghiệp vụ, domain event, dữ liệu trao đổi, lỗi, timeout, idempotency và tương thích schema.
+
+Các nguyên tắc bắt buộc:
+
+1. Order Service là nơi điều phối Saga và là chủ sở hữu trạng thái Order.
+2. Inventory Service là nơi sở hữu trạng thái Reservation; Payment Service là nơi sở hữu kết quả capture/refund.
+3. Service không đọc trực tiếp database của service khác. Service gọi API hoặc nhận message theo contract.
+4. Các thao tác có tác dụng phụ (reserve, capture, release, refund) phải có idempotency key ổn định; retry cùng hành động dùng lại đúng key.
+5. Timeout không chứng minh thao tác thất bại. Kết quả chưa xác minh phải được biểu diễn là `UNKNOWN`, sau đó query/đối soát.
+6. Thay đổi trạng thái Order và ghi domain event tương ứng vào Outbox phải nằm trong cùng transaction.
+7. Không phát domain event cho mỗi lần retry kỹ thuật. Event chỉ phản ánh thay đổi nghiệp vụ đã commit.
+8. Tài liệu này không quy định broker/topic/queue hoặc triển khai Controller, producer, consumer.
+
+### 1.1. Phân biệt API, command và event
+
+| Khái niệm | Ý nghĩa trong dự án | Ví dụ |
+|---|---|---|
+| API | Giao diện request/response mà service cung cấp | `POST /internal/v1/reservations` |
+| Command | Yêu cầu một service thực hiện một hành động nghiệp vụ | `ReserveInventory`, `CapturePayment` |
+| Domain event | Sự thật nghiệp vụ đã xảy ra và được commit | `OrderConfirmed` |
+| Thông báo kỹ thuật | Thông tin vận hành như retry vượt ngưỡng, worker lỗi | Không phải domain event |
+
+Trong bản thiết kế hiện tại, các bước Saga giữa Order–Inventory–Payment được mô tả theo request/response đồng bộ. Vì vậy, các command dưới đây được thực hiện qua API nội bộ; **không tạo thêm command message qua broker** nếu nhóm chưa quyết định chuyển sang điều phối bất đồng bộ. Domain event được phát qua Outbox cho Notification Service.
+
+## 2. Sơ đồ trách nhiệm giao tiếp
+
+| Bên gọi/phát | Bên nhận | Giao tiếp | Mục đích |
+|---|---|---|---|
+| Client | Order Service | Public API | Tạo và tra cứu Order |
+| Order Service / Saga Orchestrator | Inventory Service | Internal API / command | Reserve, query, release và Cancel theo Order |
+| Order Service / Saga Orchestrator | Payment Service | Internal API / command | Capture, query và refund Payment |
+| Order Service / Outbox Publisher | Notification Service | Domain event | Thông báo Order đã kết thúc một nhánh nghiệp vụ |
+| Notification Service | Consumer inbox | Lưu trữ nội bộ | Chống xử lý event trùng |
+
+Order Service không phát `OrderCreated` trong contract domain event tối thiểu hiện tại: việc tạo Order ở `PENDING` chưa phải một kết quả cuối cần Notification Service xử lý theo các sequence diagram đã thống nhất. Ba domain event kết thúc được xác định tại State Machine là `OrderConfirmed`, `OrderFailed`, `OrderExpired`.
+
+## 3. Quy ước chung cho API
+
+### 3.1. Quy ước đường dẫn và định danh
+
+- Prefix public: `/api/v1`.
+- Prefix nội bộ đề xuất: `/internal/v1`.
+- Các đường dẫn dưới đây là đường dẫn logic; Dev xác nhận base URL, service discovery và cách xác thực nội bộ.
+- ID dùng kiểu chuỗi trong JSON: `orderId`, `reservationId`, `paymentId`, `refundId`.
+- Thời gian dùng ISO-8601 UTC, ví dụ `2026-10-29T10:15:30Z`.
+- Tiền (nếu mô hình đơn hàng có giá) dùng decimal dạng chuỗi và currency rõ ràng; không dùng số thực dấu phẩy động.
+
+### 3.1.1. Kiểu dữ liệu và validation dùng chung
+
+| Kiểu logic | Kiểu JSON | Quy tắc |
+|---|---|---|
+| Identifier | string | Không rỗng, tối đa 128 ký tự; dạng `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`; Order sinh orderId và reservationId một lần trước Reserve; Payment sinh paymentId/refundId. Inventory lưu caller reservationId, không sinh lại. |
+| Idempotency key | header string | Bắt buộc với POST có tác dụng phụ; 1–512 ký tự ASCII hiển thị được, không có khoảng trắng hoặc ký tự điều khiển; giữ nguyên khi retry cùng hành động. |
+| commandId / correlationId | string | Không trắng, tối đa 128 ký tự; header nội bộ chỉ nhận ASCII hiển thị. Body Release giữ nguyên qua retry. |
+| quantity | integer | Số nguyên dương; không chấp nhận float, chuỗi số, 0 hoặc âm; tối đa 2147483647, tổng sau gộp mỗi SKU cũng không vượt giới hạn này. |
+| amount | decimal string | Khớp toàn bộ chuỗi theo regex `^(0\|[1-9][0-9]{0,11})(\.[0-9]{1,2})?$`; giá trị lớn hơn 0; không dùng float/double. |
+| currency | string | ISO 4217 viết hoa gồm 3 chữ cái; hiện chỉ hỗ trợ `VND`. |
+| timestamp | string | ISO-8601 UTC có hậu tố `Z`; phải parse được. |
+| enum/status | string | Chỉ nhận tập giá trị được endpoint/state machine công bố. |
+
+Quy tắc `items` của Create Order/Reserve: mảng 1–100 object non-null; mỗi item có sku string không trắng, tối đa 128 ký tự và quantity integer dương ≤2147483647. Gộp SKU trùng rồi sắp theo SKU trước khi hash/khóa; tổng không được tràn integer. SKU phân biệt hoa/thường, không tự trim. storeId string bắt buộc không trắng, tối đa 100 ký tự; không chọn kho ngầm. Không ép number/boolean thành string; field ngoài schema trả 400.
+
+Key nội bộ giữ nguyên công thức tại mục 10.1, không cắt ngắn. Với ID tối đa 128 ký tự, key Release dài tối đa 278 ký tự và Refund 275 ký tự, đều nằm trong giới hạn 512. Validation HTTP và cột lưu key phải hỗ trợ cùng giới hạn này. Khi đưa key vào path tra cứu, client percent-encode toàn bộ key như một path segment; server giải mã trước khi so khớp key gốc.
+
+### 3.2. Header chuẩn
+
+| Header | Bắt buộc | Quy tắc |
+|---|---:|---|
+| `Content-Type: application/json` | Với request có body | Body JSON UTF-8 |
+| `Idempotency-Key` | Có với POST tạo tác dụng nghiệp vụ | Key ổn định qua retry của cùng hành động |
+| `X-Correlation-Id` | Có trong luồng nội bộ | Giữ nguyên xuyên suốt một Order/Saga để truy vết |
+| `X-Command-Id` | Khuyến nghị với lệnh thay đổi trạng thái | Định danh command; giữ nguyên khi retry cùng command |
+| `Authorization` | Theo cơ chế xác thực được triển khai | Không quy định token/identity trong tài liệu này |
+
+Quy tắc định danh:
+
+- `Idempotency-Key` định danh một tác dụng nghiệp vụ để chống lặp.
+- `commandId`/`X-Command-Id` định danh yêu cầu command phục vụ truy vết và xác định nguyên nhân.
+- `correlationId` liên kết các request, command, event thuộc cùng luồng xử lý.
+- `eventId` định danh một event cụ thể; không dùng thay cho commandId hoặc Idempotency-Key.
+- Nếu hệ thống dùng chung giá trị cho `commandId` và `Idempotency-Key` thì phải ghi rõ quy ước ở implementation; về ý nghĩa chúng vẫn là hai khái niệm khác nhau.
+
+### 3.3. Error response chuẩn
+
+Lỗi ở tầng giao thức/validation dùng cấu trúc thống nhất:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Request không hợp lệ",
+    "details": [
+      {
+        "field": "items[0].quantity",
+        "reason": "must be greater than zero"
+      }
+    ],
+    "correlationId": "corr-ord-001",
+    "retryable": false
+  }
+}
+```
+
+| HTTP status | Ý nghĩa | Hành vi phía gọi |
+|---|---|---|
+| `400` | JSON sai, thiếu trường hoặc validation không hợp lệ (`VALIDATION_ERROR`, `INVALID_IDENTIFIER`) | Không retry nếu chưa sửa request |
+| `401/403` | Chưa xác thực/không có quyền | Không retry mù; xử lý cấu hình/quyền |
+| `404` | Không tìm thấy tài nguyên/giao dịch theo ID hoặc key | Kiểm tra ID/key; khi POST timeout, không suy luận command chưa được xử lý |
+| `409` | Idempotency key dùng với payload khác hoặc xung đột tài nguyên | Không tạo key mới để né xung đột |
+| `422` | Không dùng cho kết quả nghiệp vụ thường lệ của reserve/capture/refund; kết quả đã xác minh trả `200` với trạng thái trong body | Đọc status nghiệp vụ trong body theo endpoint |
+| `429` | Bị giới hạn tốc độ | Retry theo hướng dẫn/backoff nếu được phép |
+| `5xx` | Lỗi hạ tầng/trạng thái; chưa xác định tác dụng | Query trước; 503 SERVICE_UNAVAILABLE/retryable=true được retry theo D-03; 500 INTERNAL_SERVER_ERROR/retryable=false cần điều tra, không retry mù |
+| Timeout / mất kết nối | Không nhận được phản hồi xác định | Kết quả tác dụng phụ có thể là `UNKNOWN`; query hoặc retry cùng key |
+
+Không dùng HTTP status đơn lẻ để suy ra trạng thái nghiệp vụ. Ví dụ timeout khi capture không được chuyển thành `FAILED`.
+
+
+## 3.4. Ma trận hợp đồng đầy đủ theo endpoint
+
+Bảng này là checklist triển khai ở mức field-level cho tất cả HTTP endpoint được nêu trong tài liệu. “Không áp dụng” có nghĩa endpoint không nhận body hoặc không có header idempotency; không được tự ý suy ra field optional. Mọi request/response dùng JSON UTF-8 khi có body. ID trong path/query phải decode rồi kiểm tra theo Identifier mục 3.1.1; path segment phải percent-encode khi chứa ký tự đặc biệt. Trường không ghi là optional đều bắt buộc. Không nhận giá trị `null` cho field bắt buộc.
+
+### 3.4.1. Public API – Order Service
+
+| Endpoint / method | Input (nguồn; kiểu; bắt buộc/null; validation) | Output 2xx | HTTP error và mã lỗi |
+|---|---|---|---|
+| `POST /api/v1/orders` | Header `Idempotency-Key` bắt buộc, 1–512 ASCII ký tự hiển thị, không whitespace/control. Header `X-Correlation-Id` optional; nếu có phải là UUID hoặc mã tracing hợp lệ, tối đa 128 ký tự. Body: `customerId: Identifier`, `storeId: string` không trắng ≤100 ký tự, `items: array` 1–100 object có `sku: string` không trắng ≤128 ký tự và `quantity: integer` 1..2147483647; tất cả bắt buộc/non-null. Gộp SKU trùng, kiểm tra tổng mỗi SKU không tràn integer, phân biệt hoa/thường và không tự trim. Không nhận field lạ, item null, quantity float/chuỗi số/boolean. | `202 Accepted`: `orderId` Identifier, `status=PENDING`, `createdAt` và `expireAt` ISO-8601 UTC, `correlationId` string đều bắt buộc/non-null; `expireAt > createdAt`. | `400 VALIDATION_ERROR` (JSON, header hoặc field sai/thiếu), `409 IDEMPOTENCY_KEY_CONFLICT` (cùng key khác payload), `401/403`, `429`, `5xx`. Timeout không xác định kết quả; client GET/retry cùng key, không tạo key mới. |
+| `GET /api/v1/orders/{orderId}` | Path `orderId` Identifier bắt buộc; body và Idempotency-Key không áp dụng; `X-Correlation-Id` optional, nếu có theo quy tắc chung. | `200 OK`: `orderId` Identifier, `status` enum Order theo State Machine, `createdAt`, `expireAt` timestamp, `correlationId` string bắt buộc/non-null; `reservationStatus` optional và nếu có là `NOT_CREATED/RESERVED/RELEASED/REJECTED/UNKNOWN`; `captureStatus` optional và nếu có là `NOT_STARTED/IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN`. Field optional khi vắng mặt thì omit, không gửi null trừ khi schema cụ thể cho phép. | `400 INVALID_IDENTIFIER`, `404 ORDER_NOT_FOUND`, `401/403`, `429`, `5xx`. GET không tạo tác dụng phụ; timeout chỉ retry query. |
+
+### 3.4.2. Internal API – Inventory Service
+
+| Endpoint / method | Input (nguồn; kiểu; bắt buộc/null; validation) | Output 2xx | HTTP error và mã lỗi |
+|---|---|---|---|
+| `POST /internal/v1/reservations` | Body chỉ gồm `orderId: Identifier`, `reservationId: Identifier`, `storeId: string` không trắng ≤100 ký tự và `items` theo mục 3.1.1; tất cả bắt buộc/non-null. Order sinh và lưu reservationId trước lần gửi đầu. Không gửi commandId/correlationId trong body Reserve; tracing nằm ở header. Header Idempotency-Key đúng `reserve:{orderId}:v1`. | `200 OK`: `reservationId` Identifier hoặc null, `orderId` Identifier, `status=RESERVED\|REJECTED`, `reservedAt` timestamp hoặc null, `reasonCode` string hoặc null. Với RESERVED: reservationId/reservedAt có giá trị, reasonCode=null. Với REJECTED: reservationId/reservedAt=null, reasonCode thuộc `INVENTORY_NOT_AVAILABLE/PRODUCT_NOT_FOUND/ORDER_ALREADY_RELEASED`. Tất cả field trên luôn có mặt. | `400 VALIDATION_ERROR`, `409 IDEMPOTENCY_KEY_CONFLICT/RESERVATION_ID_CONFLICT/RESERVE_HISTORY_UNAVAILABLE`, `401/403`, `429`, `5xx`. Out-of-stock là kết quả nghiệp vụ `200 REJECTED`, không phải 409. Timeout/5xx có thể thành UNKNOWN ở caller; query trước hoặc retry cùng key. |
+| `GET /internal/v1/reservations/by-order/{orderId}` | Path `orderId` Identifier bắt buộc; không body, không Idempotency-Key. | `200 OK`: `reservationId` Identifier hoặc null (null khi REJECTED), `orderId` Identifier, `status=RESERVED\|RELEASED\|REJECTED`, `idempotencyKey` string bắt buộc/non-null, `reasonCode` string hoặc null bắt buộc có mặt. RESERVED/RELEASED cần reservationId; REJECTED cần mã lý do hợp lệ; trạng thái khác reasonCode=null. | `400 INVALID_IDENTIFIER`, `404 RESERVATION_NOT_FOUND` khi chưa có bản ghi, `401/403`, `429`, `5xx`. Query timeout retry query; 404 sau timeout không chứng minh một command đang bay sẽ không chạy. |
+| `POST /internal/v1/reservations/{reservationId}/release` | Path `reservationId` Identifier bắt buộc. Header Idempotency-Key bắt buộc theo công thức `inventory:release:{orderId}:{reservationId}:v1`. Body `commandId`, `orderId`, `correlationId` string bắt buộc/non-null, đều theo validation Identifier/tracing chung. | `200 OK`: `reservationId`, `orderId` Identifier; `status=RELEASED`; `releasedAt` ISO-8601 UTC; tất cả bắt buộc/non-null. Gọi lặp trả cùng releasedAt lần đầu, không tăng tồn kho lần nữa. | `400 VALIDATION_ERROR/INVALID_IDENTIFIER`, `404 RESERVATION_NOT_FOUND`, `409 IDEMPOTENCY_KEY_CONFLICT/RESERVATION_ORDER_MISMATCH/RESERVATION_NOT_RESERVED/RELEASE_HISTORY_UNAVAILABLE`, `401/403`, `429`, `5xx`. Timeout không xác nhận đã release; query/retry cùng key. |
+
+| `POST /internal/v1/orders/{orderId}/cancel` | Path orderId Identifier; header key inventory:cancel:{orderId}:v1; body orderId, reason bắt buộc/non-null theo mục 5.4. | 200; schema Cancel đầy đủ mục 5.4, reservationId nullable chỉ khi NOT_CREATED. | 400 VALIDATION_ERROR/INVALID_IDENTIFIER; 409 IDEMPOTENCY_KEY_CONFLICT; 5xx. |
+
+| `GET /internal/v1/operations?idempotencyKey={key}` | Query key bắt buộc theo mục 5.5; không body/key header. | 200; operation, idempotencyKey, responseCode, responsePayload, completedAt theo mục 5.5. | 400 VALIDATION_ERROR; 404 OPERATION_NOT_FOUND; 5xx. |
+
+### 3.4.3. Internal API – Payment Service
+
+| Endpoint / method | Input (nguồn; kiểu; bắt buộc/null; validation) | Output 2xx | HTTP error và mã lỗi |
+|---|---|---|---|
+| `POST /internal/v1/payments/captures` | Header Idempotency-Key bắt buộc `payment:capture:{orderId}:v1`. Body `commandId`, `orderId`, `correlationId` string bắt buộc/non-null; `amount` decimal string bắt buộc, >0, tối đa 2 chữ số thập phân; `currency` string bắt buộc, ISO 4217 uppercase và hiện chỉ `VND`. Không nhận amount number/float, null hoặc amount=0. | `200 OK`: `paymentId`, `orderId` Identifier; `status=IN_PROGRESS\|SUCCEEDED\|FAILED`; `idempotencyKey` string; `amount` decimal string; `currency=VND`; `capturedAt` timestamp hoặc null. Tất cả field luôn có mặt; capturedAt chỉ có giá trị khi SUCCEEDED, còn lại null. | `400 VALIDATION_ERROR`, `404 ORDER_NOT_FOUND`, `409 IDEMPOTENCY_KEY_CONFLICT`, `401/403`, `429`, `5xx`. Timeout ở caller là UNKNOWN local, không phải FAILED. |
+| `GET /internal/v1/payments/{paymentId}` | Path `paymentId` Identifier bắt buộc; không body/key. | `200 OK`: schema Capture tại mục 6.1; status query cho phép `IN_PROGRESS/SUCCEEDED/FAILED`, và `UNKNOWN` chỉ khi Payment lưu trạng thái chưa xác minh. Mọi field schema có mặt; capturedAt có thể null theo status. | `400 INVALID_IDENTIFIER`, `404 PAYMENT_NOT_FOUND`, `401/403`, `429`, `5xx`. |
+| `GET /internal/v1/payments/by-idempotency-key/{key}` | Path key bắt buộc, percent-decode rồi so sánh key nguyên gốc; 1–512 ASCII printable, không whitespace/control; không body. | `200 OK`: cùng schema GetPayment theo paymentId; trả `idempotencyKey` đúng key đã tìm thấy và status `IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN` theo quy tắc mục 6.2. | `400 INVALID_IDEMPOTENCY_KEY`, `404 PAYMENT_NOT_FOUND`, `401/403`, `429`, `5xx`. |
+| `POST /internal/v1/payments/{paymentId}/refunds` | Path `paymentId` Identifier bắt buộc. Header Idempotency-Key bắt buộc `payment:refund:{orderId}:{paymentId}:v1`. Body `commandId`, `orderId`, `correlationId` string bắt buộc/non-null; `reason` enum bắt buộc/non-null: `ORDER_FAILED/ORDER_EXPIRED/LATE_CAPTURE`. Amount/currency lấy từ Capture đã xác minh, không nhận từ client. | `200 OK`: `refundId`, `paymentId`, `orderId` Identifier; `status=IN_PROGRESS\|SUCCEEDED\|FAILED`; `idempotencyKey` string; `amount` decimal string >0; `currency=VND`; `reason` enum; `createdAt` timestamp; `refundedAt` timestamp hoặc null. Tất cả field có mặt; refundedAt chỉ có giá trị khi SUCCEEDED, còn lại null. | `400 VALIDATION_ERROR/INVALID_IDENTIFIER`, `404 PAYMENT_NOT_FOUND`, `409 IDEMPOTENCY_KEY_CONFLICT` hoặc `REFUND_NOT_ALLOWED` nếu nghiệp vụ không cho phép refund, `401/403`, `429`, `5xx`. Timeout là UNKNOWN local; query theo refund key, không tạo key mới. |
+| `GET /internal/v1/payments/refunds/{refundId}` | Path `refundId` Identifier bắt buộc; không body/key. | `200 OK`: schema Refund tại mục 6.3; status `IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN`; mọi field có mặt, refundedAt có thể null. | `400 INVALID_IDENTIFIER`, `404 REFUND_NOT_FOUND`, `401/403`, `429`, `5xx`. |
+| `GET /internal/v1/payments/refunds/by-idempotency-key/{key}` | Path key bắt buộc, percent-decode rồi so sánh nguyên văn; 1–512 ASCII printable, không whitespace/control; không body. | `200 OK`: schema Refund tại mục 6.3; status `IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN`; mọi field có mặt, refundedAt có thể null. | `400 INVALID_IDEMPOTENCY_KEY`, `404 REFUND_NOT_FOUND`, `401/403`, `429`, `5xx`. |
+
+**Quy tắc chung của ma trận:** lỗi giao thức/validation/auth/rate-limit/hạ tầng dùng HTTP error và schema `error` tại mục 3.3; kết quả nghiệp vụ đã xác định dùng `200 OK` với status trong body (riêng Create Order trả 202). `IN_PROGRESS`, `SUCCEEDED`, `FAILED`, `REJECTED` là kết quả nghiệp vụ, không phải HTTP error. `UNKNOWN` là trạng thái đối soát, không phải HTTP status. GET không có Idempotency-Key và không thay đổi trạng thái. Với endpoint có Idempotency-Key, cùng key/cùng payload trả kết quả đã lưu; cùng key/khác payload trả 409.
+
+Order tạo/lưu reservationId, cửa hàng, SKU đã chuẩn hóa và payload Reserve trong cùng transaction tạo Order/Saga. Worker phục hồi dùng snapshot, không dựng lại từ catalog hoặc chọn kho mới. productId chỉ là UUID nội bộ Inventory, không phải trường request Create Order/Reserve.
+
+## 4. API Contract – Order Service
+
+### 4.1. Tạo Order
+
+**Schema request:** `customerId: Identifier`, `storeId: string` không trắng ≤100 ký tự, `items: array` 1–100 object có `sku: string` không trắng ≤128 ký tự và `quantity: integer` 1..2147483647; tất cả bắt buộc/non-null. Gộp SKU trùng, kiểm tra tổng mỗi SKU không tràn integer, phân biệt hoa/thường và không tự trim. Không nhận field lạ, item null, quantity float/chuỗi số/boolean. Header `Idempotency-Key` bắt buộc theo mục 3.1.1; `X-Correlation-Id` optional, nếu có phải theo quy ước tracing. **Response:** `orderId: Identifier`, `status: enum Order` (`PENDING` khi tạo), `createdAt/expireAt: ISO-8601 UTC` và `correlationId: string` đều bắt buộc/non-null; `expireAt > createdAt`.
+
+| Thuộc tính | Đặc tả |
+|---|---|
+| Command | `CreateOrder` |
+| API | `POST /api/v1/orders` |
+| Bên gọi | Client |
+| Bên xử lý | Order Service |
+| Header | `Idempotency-Key` bắt buộc; `X-Correlation-Id` khuyến nghị |
+| Thành công | `202 Accepted` – Order được tạo ở `PENDING`; Saga bắt đầu |
+| Lỗi chính | `400` thiếu key/request không hợp lệ; `409 IDEMPOTENCY_KEY_CONFLICT`; `5xx` lỗi tạm thời |
+
+Request mẫu:
+
+```json
+{
+  "customerId": "CUS-001",
+  "storeId": "DEMO-STORE",
+  "items": [
+    {
+      "sku": "SKU-001",
+      "quantity": 2
+    }
+  ]
+}
+```
+
+Response mẫu:
+
+```json
+{
+  "orderId": "ORD-001",
+  "status": "PENDING",
+  "createdAt": "2026-10-29T10:00:00Z",
+  "expireAt": "2026-10-29T10:15:00Z",
+  "correlationId": "corr-ord-001"
+}
+```
+
+Quy tắc:
+- `Idempotency-Key` do Client tạo cho một yêu cầu đặt hàng logic; gửi lại yêu cầu phải dùng cùng key.
+- Cùng key và cùng payload: trả lại Order/response đã lưu, không tạo Order thứ hai.
+- Cùng key nhưng payload khác: `409 IDEMPOTENCY_KEY_CONFLICT`.
+- Thiếu `Idempotency-Key`: `400 Bad Request`.
+- `expireAt` được tạo theo TTL đã thống nhất; retry không tự gia hạn TTL.
+- Response `202` không có nghĩa Order đã được xác nhận; Client dùng API tra cứu để xem tiến trình.
+
+### 4.2. Tra cứu Order
+
+**Schema request:** không có body; path `orderId: Identifier` bắt buộc/non-null. **Schema response:** `orderId: Identifier`, `status: enum Order`, `createdAt/expireAt: ISO-8601 UTC`, `correlationId: string` đều bắt buộc/non-null; `reservationStatus` optional (nếu có: `NOT_CREATED/RESERVED/RELEASED/REJECTED/UNKNOWN`); `captureStatus` optional (nếu có: `NOT_STARTED/IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN`). Field optional vắng mặt thì omit, không gửi null nếu không được schema cho phép.
+
+| Thuộc tính | Đặc tả |
+|---|---|
+| Command/query | `GetOrder` |
+| API | `GET /api/v1/orders/{orderId}` |
+| Bên gọi | Client hoặc thành phần được cấp quyền |
+| Thành công | `200 OK` |
+| Lỗi chính | `404 ORDER_NOT_FOUND` |
+
+Response mẫu:
+
+```json
+{
+  "orderId": "ORD-001",
+  "status": "PENDING",
+  "createdAt": "2026-10-29T10:00:00Z",
+  "expireAt": "2026-10-29T10:15:00Z",
+  "reservationStatus": "RESERVED",
+  "captureStatus": "UNKNOWN",
+  "correlationId": "corr-ord-001"
+}
+```
+
+Các trường trạng thái con là bản kết quả đã xác minh/lưu tại Order Service; không phải truy vấn trực tiếp database Inventory hoặc Payment. Chỉ trả các trường mà mô hình dữ liệu thực tế có.
+
+Không đặc tả API Cancel Order trong phiên bản này vì các tài liệu nghiệp vụ/State Machine hiện tại chưa xác định một luồng khách hàng chủ động hủy riêng. Hủy tự động do payment thất bại hoặc TTL được điều phối nội bộ bởi Order Service.
+
+## 5. API Contract – Inventory Service
+
+Các API này là internal API, chỉ Order Service/Saga Orchestrator được gọi theo luồng hiện tại.
+
+### 5.1. Reserve Inventory
+
+**Schema request:** Body chỉ gồm `orderId: Identifier`, `reservationId: Identifier`, `storeId: string` không trắng ≤100 ký tự và `items` theo mục 3.1.1; tất cả bắt buộc/non-null. Order sinh và lưu reservationId trước lần gửi đầu. Không gửi commandId/correlationId trong body Reserve; tracing nằm ở header. Header Idempotency-Key đúng `reserve:{orderId}:v1`.
+
+**Schema response Reserve:** Tất cả trường dưới đây bắt buộc có mặt.
+
+| Trường | Kiểu | Null / quy tắc |
+|---|---|---|
+| `reservationId` | Identifier hoặc null | Có giá trị khi `RESERVED`; null khi `REJECTED` |
+| `orderId` | Identifier | Không null; đúng Order trong request |
+| `status` | string | Không null; `RESERVED` hoặc `REJECTED` |
+| `reservedAt` | ISO-8601 UTC hoặc null | Thời điểm giữ hàng khi `RESERVED`; null khi `REJECTED` |
+| `reasonCode` | string hoặc null | Null khi `RESERVED`; khi `REJECTED` bắt buộc là một mã bên dưới |
+
+Mã từ chối: `INVENTORY_NOT_AVAILABLE` (thiếu tồn kho), `PRODUCT_NOT_FOUND` (sản phẩm hợp lệ về định dạng nhưng không tồn tại), `ORDER_ALREADY_RELEASED` (Order đã có guard do Release hoặc Cancel, kể cả chưa từng có Reservation). JSON/field sai định dạng trả `400 VALIDATION_ERROR`, không dùng `REJECTED`. Kết quả từ chối phải được lưu theo reserve key để retry/query trả được kết quả đã xác minh.
+
+| Thuộc tính | Đặc tả |
+|---|---|
+| Command | `ReserveInventory` |
+| API | `POST /internal/v1/reservations` |
+| Bên gọi → nhận | Order Service → Inventory Service |
+| Idempotency key | `reserve:{orderId}:v1` |
+| Kết quả nghiệp vụ đã xác định | `200 OK`; body `status = RESERVED` hoặc `REJECTED` |
+| Lỗi chưa rõ | Timeout/5xx: Order Service ghi nhận `UNKNOWN`, query trước khi quyết định bước tiếp |
+
+Request mẫu:
+
+```json
+{
+  "orderId": "ORD-001",
+  "reservationId": "RSV-001",
+  "storeId": "DEMO-STORE",
+  "items": [
+    {
+      "sku": "SKU-001",
+      "quantity": 2
+    }
+  ]
+}
+```
+
+Response mẫu:
+
+```json
+{
+  "reservationId": "RSV-001",
+  "orderId": "ORD-001",
+  "status": "RESERVED",
+  "reservedAt": "2026-10-29T10:00:02Z",
+  "reasonCode": null
+}
+```
+
+Quy tắc:
+- Kiểm tra và cập nhật tồn kho phải nguyên tử.
+- Một Order không được tạo nhiều reservation có hiệu lực do retry.
+- Cùng key/cùng payload trả lại kết quả đã lưu; cùng key/khác payload bị từ chối.
+- Nếu reserve timeout, không gửi release khi chưa xác minh kết quả reserve; query theo `orderId` qua API mục 5.2 để đối chiếu reserve key ổn định trước.
+- Inventory phải xử lý quy tắc reserve đến muộn sau release của cùng Order theo D-01.5/A-13; Reserve/Release/Cancel khóa cùng guard theo Order. Replay kết quả cũ trước khi xét guard; lệnh Reserve mới sau guard hủy trả REJECTED/ORDER_ALREADY_RELEASED.
+
+Response khi không đủ tồn kho (`200 OK`):
+
+```json
+{
+  "reservationId": null,
+  "orderId": "ORD-002",
+  "status": "REJECTED",
+  "reservedAt": null,
+  "reasonCode": "INVENTORY_NOT_AVAILABLE"
+}
+```
+
+Hash Reserve gồm operation, orderId, reservationId, storeId và items đã gộp/sắp. Header tracing không tham gia hash. Cùng key đổi một trường nghiệp vụ trả 409; ID đã thuộc Order khác trả 409 RESERVATION_ID_CONFLICT. Inventory không gọi vòng sang Order hoặc đọc Order DB để kiểm tra tồn tại; không yêu cầu 404 ORDER_NOT_FOUND ở Reserve.
+
+### 5.2. Tra cứu Reservation
+
+Trong contract này, “tra cứu theo reserve key” được thực hiện bằng `GET /internal/v1/reservations/by-order/{orderId}`. Inventory tìm bản ghi kết quả Reserve của Order tương ứng với key `reserve:{orderId}:v1` và trả key đó trong `idempotencyKey`; Order Service đối chiếu với key đã lưu trước khi sử dụng kết quả. GET này trả trạng thái resource hiện tại; GET operation tại mục 5.5 trả snapshot lệnh theo key.
+
+**Schema response:** `reservationId: Identifier|null`, `orderId: Identifier`, `status: RESERVED|RELEASED|REJECTED`, `idempotencyKey: string`, `reasonCode: string|null` đều bắt buộc có mặt. `orderId`, `status`, `idempotencyKey` không null. `reservationId` không null khi `RESERVED/RELEASED`, null khi `REJECTED`; `reasonCode` dùng enum mục 5.1 khi `REJECTED`, null ở các trạng thái khác. Inventory không lưu/không trả UNKNOWN trong schema này; UNKNOWN thuộc phía gọi khi chưa xác minh. Không có bản ghi trả 404. Path `orderId` theo Identifier.
+
+| Thuộc tính | Đặc tả |
+|---|---|
+| Query | `GetReservation` |
+| API đề xuất | `GET /internal/v1/reservations/by-order/{orderId}` |
+| Bên gọi → nhận | Order Service → Inventory Service |
+| Thành công | `200 OK`; trả trạng thái Reservation đã lưu |
+| Lỗi chính | `404 RESERVATION_NOT_FOUND`; timeout/5xx cần retry query |
+
+Response mẫu:
+
+```json
+{
+  "reservationId": "RSV-001",
+  "orderId": "ORD-001",
+  "status": "RESERVED",
+  "idempotencyKey": "reserve:ORD-001:v1",
+  "reasonCode": null
+}
+```
+
+Nếu không tìm thấy bản ghi theo `orderId`, trả `404 RESERVATION_NOT_FOUND`, không trả `200` với `NOT_CREATED`. `NOT_CREATED` không phải trạng thái của GET Reservation; nó được dùng cục bộ ở Order hoặc trong snapshot Cancel chưa có Reservation. Sau timeout, `404` chỉ phản ánh thời điểm tra cứu, không chứng minh command đang trên đường truyền sẽ không được thực hiện; giữ `UNKNOWN` và đối soát hoặc retry cùng key theo chính sách.
+
+### 5.3. Release Inventory
+
+**Schema request:** Path `reservationId: Identifier` bắt buộc; header `Idempotency-Key` bắt buộc đúng `inventory:release:{orderId}:{reservationId}:v1`; body `commandId`, `orderId`, `correlationId` đều string bắt buộc/non-null, command/correlation theo quy tắc tracing ≤128 ký tự. **Response:** `reservationId/orderId: Identifier`, `status: RELEASED`, `releasedAt: ISO-8601 UTC` đều bắt buộc/non-null. Chỉ dùng `RELEASED`, không có status `ALREADY_RELEASED`: release lại reservation đã giải phóng vẫn trả `200 RELEASED`, giữ nguyên `releasedAt` lần đầu và không tăng tồn kho lần nữa.
+
+| Thuộc tính | Đặc tả |
+|---|---|
+| Command | `ReleaseInventory` |
+| API | `POST /internal/v1/reservations/{reservationId}/release` |
+| Bên gọi → nhận | Order Service → Inventory Service |
+| Idempotency key | `inventory:release:{orderId}:{reservationId}:v1` |
+| Thành công | `200 OK`, `status = RELEASED` |
+| Lỗi chính | `404 RESERVATION_NOT_FOUND`; `409 IDEMPOTENCY_KEY_CONFLICT`; timeout/5xx |
+
+Request mẫu:
+
+```json
+{
+  "commandId": "cmd-release-001",
+  "orderId": "ORD-001",
+  "correlationId": "corr-ord-001"
+}
+```
+
+Response mẫu:
+
+```json
+{
+  "reservationId": "RSV-001",
+  "orderId": "ORD-001",
+  "status": "RELEASED",
+  "releasedAt": "2026-10-29T10:03:00Z"
+}
+```
+
+Quy tắc:
+- Release đúng Reservation của Order; không làm tăng tồn kho hai lần.
+- Gửi lại cùng key/cùng payload trả lại kết quả release đã lưu.
+- Timeout hoặc lỗi chưa rõ không được coi là đã release; query Reservation hoặc retry cùng key theo D-03.
+- Không release khi payment còn `UNKNOWN` hoặc khi reserve chưa được xác minh, theo D-01/D-04.
+- Hash Release nội bộ gồm RELEASE_INTERNAL_V1, orderId, reservationId trên path, commandId và correlationId trong body; retry giữ nguyên toàn bộ body. Header tracing không tham gia hash. Không diễn giải lại hash Release API cũ có reason thành schema mới.
+- Sai Order trả 409 RESERVATION_ORDER_MISMATCH; REJECTED trả 409 RESERVATION_NOT_RESERVED; thiếu lịch sử releasedAt trả 409 RELEASE_HISTORY_UNAVAILABLE. 404/lỗi không commit guard hoặc snapshot thành công. Release đã thành công ghi guard hủy nhưng không tạo snapshot Cancel giả.
+
+### 5.4. Cancel Inventory theo Order
+
+`POST /internal/v1/orders/{orderId}/cancel`; key `inventory:cancel:{orderId}:v1`. Đây là command nội bộ của Orchestrator sau khi đã claim nhánh hủy/hết hạn hợp lệ, không phải API khách hàng hủy Order. Không gọi chỉ vì timeout hoặc Payment UNKNOWN; áp dụng guard State Machine trước khi gửi.
+
+Request chỉ gồm orderId Identifier khớp path và reason string không trắng, tối đa 255 ký tự; đều bắt buộc/non-null. Reason được lưu cố định khi chọn nhánh (ví dụ ORDER_FAILED hoặc ORDER_EXPIRED), không đổi qua retry. Tracing ở header, không thêm vào body.
+
+```json
+{
+  "orderId": "ORD-003",
+  "reason": "ORDER_EXPIRED"
+}
+```
+
+Tất cả field response sau bắt buộc có mặt:
+
+| Field | Kiểu / quy tắc |
+|---|---|
+| orderId | Identifier non-null, đúng request |
+| idempotencyKey | string non-null, đúng cancel key |
+| status | hằng CANCELLATION_RECORDED |
+| reservationId | Identifier hoặc null; null khi NOT_CREATED; có ID khi RELEASED/REJECTED |
+| reservationStatus | NOT_CREATED, RELEASED hoặc REJECTED |
+| cancelledAt | timestamp UTC non-null, thời điểm guard được ghi nhận |
+
+```json
+{
+  "orderId": "ORD-003",
+  "idempotencyKey": "inventory:cancel:ORD-003:v1",
+  "status": "CANCELLATION_RECORDED",
+  "reservationId": null,
+  "reservationStatus": "NOT_CREATED",
+  "cancelledAt": "2026-10-29T10:15:10Z"
+}
+```
+
+Cancel và Reserve/Release khóa cùng guard theo Order. Reserve thắng trước thì Cancel giải phóng trong cùng transaction; Cancel thắng trước thì Reserve mới bị từ chối mà không giữ tồn. Đã RELEASED/REJECTED không trả tồn thêm. Hash gồm CANCEL, orderId, reason. Cùng key/hash replay snapshot ban đầu, khác hash trả 409 IDEMPOTENCY_KEY_CONFLICT. Validation trả 400; lỗi hạ tầng theo mục 3.3, không báo thành công giả.
+
+Cancel chưa có Reservation chỉ tạo guard; GET Reservation vẫn 404. CANCELLATION_RECORDED là kết quả command, không phải trạng thái Reservation/Order. Cancel response là bằng chứng chặn Reserve muộn sau khi đã commit; 404 của GET hoặc Release không thay thế bằng chứng này. Replay Cancel có thể vẫn NOT_CREATED dù Reserve muộn đã tạo bản ghi REJECTED. Orchestrator phải đối chiếu orderId/key, hoàn tất cả nghĩa vụ Payment/Refund trước khi kết thúc Saga.
+
+### 5.5. Tra cứu snapshot command Inventory
+
+`GET /internal/v1/operations?idempotencyKey={key}`. Không body/Idempotency-Key header; X-Correlation-Id bắt buộc. Query key percent-encode như một query value, decode rồi validate 1–512 ASCII hiển thị không whitespace. Không tìm thấy kết quả đã commit trả 404 OPERATION_NOT_FOUND; lỗi validation 400 VALIDATION_ERROR; 5xx không có nghĩa command thất bại.
+
+| Field response | Kiểu / quy tắc |
+|---|---|
+| operation | RESERVE/RELEASE/CANCEL, bắt buộc/non-null |
+| idempotencyKey | string, bắt buộc/non-null, đúng key đã tìm |
+| responseCode | integer, hằng 200 |
+| responsePayload | object, bắt buộc/non-null; snapshot theo operation bên dưới |
+| completedAt | timestamp UTC, bắt buộc/non-null |
+
+Snapshot lưu trong inventory_operations hiện dùng schema gốc, không phải lúc nào cũng trùng response đã ánh xạ của POST nội bộ:
+
+| Operation | responsePayload: tất cả field bắt buộc có mặt |
+|---|---|
+| RESERVE | reservationId và orderId Identifier non-null (kể cả REJECTED); storeId string; reserveKey string; status RESERVED/REJECTED; rejectionReason null khi RESERVED hoặc INSUFFICIENT_STOCK/PRODUCT_NOT_FOUND/ORDER_CANCELLED khi REJECTED; items gồm sku/quantity đã chuẩn hóa; createdAt timestamp UTC |
+| RELEASE | orderId, reservationId Identifier; idempotencyKey string; status RELEASED; releasedAt timestamp UTC; mọi field non-null |
+| CANCEL | Schema Cancel mục 5.4; reservationId có thể null theo reservationStatus |
+
+```json
+{
+  "operation": "CANCEL",
+  "idempotencyKey": "inventory:cancel:ORD-003:v1",
+  "responseCode": 200,
+  "responsePayload": {
+    "orderId": "ORD-003",
+    "idempotencyKey": "inventory:cancel:ORD-003:v1",
+    "status": "CANCELLATION_RECORDED",
+    "reservationId": null,
+    "reservationStatus": "NOT_CREATED",
+    "cancelledAt": "2026-10-29T10:15:10Z"
+  },
+  "completedAt": "2026-10-29T10:15:10Z"
+}
+```
+
+Caller phải chọn schema theo operation, kiểm tra key và Order ID. POST Reserve nội bộ ánh xạ createdAt → reservedAt khi RESERVED, ẩn ID/thời điểm khi REJECTED và ánh xạ INSUFFICIENT_STOCK → INVENTORY_NOT_AVAILABLE, ORDER_CANCELLED → ORDER_ALREADY_RELEASED; PRODUCT_NOT_FOUND giữ nguyên. Snapshot đã commit không bị sửa khi GET resource chuyển RELEASED. Không lấy snapshot RESERVED cũ làm bằng chứng hiện vẫn giữ hàng.
+
+404 operation chỉ cho biết chưa thấy kết quả tại thời điểm query, không chứng minh lệnh đang bay đã bị hủy. Retry giữ nguyên key/body. Không dùng API cũ và mới luân phiên cho cùng key Release vì hash khác schema.
+
+## 6. API Contract – Payment Service
+
+Các API này là internal API. Payment Service sở hữu trạng thái capture/refund; Order Service chỉ lưu bản kết quả đã xác minh.
+
+### 6.1. Capture Payment
+
+**Schema request:** `commandId`, `correlationId` là string UUID/tracing ID ≤128 ký tự bắt buộc/non-null; `orderId: Identifier` bắt buộc/non-null; `amount: decimal string` bắt buộc/non-null, >0, tối đa 2 chữ số thập phân và không vượt giới hạn 12 chữ số nguyên; `currency: string` bắt buộc/non-null, ISO 4217 uppercase, phiên bản này chỉ nhận `VND`. Header `Idempotency-Key` bắt buộc đúng `payment:capture:{orderId}:v1`. Không nhận JSON number/float cho amount.
+
+**Schema response Capture (POST và GET):**
+
+| Trường | Kiểu | Bắt buộc / null | Quy tắc |
+|---|---|---|---|
+| `paymentId` | Identifier | Có, không null | ID giao dịch đã được lưu trước khi trả response |
+| `orderId` | Identifier | Có, không null | Order liên quan |
+| `status` | string | Có, không null | POST: `IN_PROGRESS/SUCCEEDED/FAILED`; GET được thêm `UNKNOWN` nếu Payment lưu trạng thái chưa xác minh |
+| `idempotencyKey` | string | Có, không null | Key Capture ban đầu |
+| `amount` | decimal string | Có, không null | Lớn hơn 0, theo mục 3.1.1 |
+| `currency` | string | Có, không null | `VND` |
+| `capturedAt` | ISO-8601 UTC | Có, được null | Có giá trị khi `SUCCEEDED`; null ở các trạng thái khác |
+
+Không có trường optional trong response trên. Lỗi HTTP dùng error response mục 3.3.
+
+| Thuộc tính | Đặc tả |
+|---|---|
+| Command | `CapturePayment` |
+| API | `POST /internal/v1/payments/captures` |
+| Bên gọi → nhận | Order Service → Payment Service |
+| Idempotency key | `payment:capture:{orderId}:v1` |
+| Kết quả sau khi nhận command | `200 OK` với body `IN_PROGRESS`, `SUCCEEDED` hoặc `FAILED` |
+| Lỗi HTTP | `400 VALIDATION_ERROR`; `404 ORDER_NOT_FOUND`; `409 IDEMPOTENCY_KEY_CONFLICT`; `5xx` tạm thời. Timeout không có response được caller lưu cục bộ là `UNKNOWN`. |
+
+Request mẫu:
+
+```json
+{
+  "commandId": "cmd-capture-001",
+  "orderId": "ORD-001",
+  "amount": "250000.00",
+  "currency": "VND",
+  "correlationId": "corr-ord-001"
+}
+```
+
+Response khi thành công:
+
+```json
+{
+  "paymentId": "PAY-001",
+  "orderId": "ORD-001",
+  "status": "SUCCEEDED",
+  "amount": "250000.00",
+  "currency": "VND",
+  "capturedAt": "2026-10-29T10:00:05Z",
+  "idempotencyKey": "payment:capture:ORD-001:v1"
+}
+```
+
+Response khi đang xử lý trả `200 OK`:
+
+```json
+{
+  "paymentId": "PAY-001",
+  "orderId": "ORD-001",
+  "status": "IN_PROGRESS",
+  "amount": "250000.00",
+  "currency": "VND",
+  "idempotencyKey": "payment:capture:ORD-001:v1",
+  "capturedAt": null
+}
+```
+
+Quy tắc:
+- `UNKNOWN` là kết quả chưa xác định, không phải `FAILED`.
+- Timeout/mất kết nối có thể xảy ra sau khi Payment đã thực hiện capture; Order Service lưu cục bộ `UNKNOWN` và query theo paymentId hoặc capture key. Nếu Payment đã ghi nhận giao dịch đang chạy, API query trả `IN_PROGRESS`.
+- Không gửi capture mới bằng key khác để xử lý timeout.
+- Chỉ Order ở `PENDING` mới được bắt đầu lệnh tiến capture; sau khi Order rời `PENDING`, không gửi lệnh tiến mới.
+- Order chỉ được xác nhận khi capture `SUCCEEDED` đã xác minh, Reservation `RESERVED` đã xác minh, và conditional update `PENDING → CONFIRMED` hợp lệ theo D-01.
+
+### 6.2. Tra cứu Payment
+
+**Schema request:** Không có body. `paymentId` trên path là Identifier bắt buộc; với endpoint by-idempotency-key, `{key}` bắt buộc, percent-decode rồi validate 1–512 ASCII ký tự printable, không whitespace/control. Không gửi Idempotency-Key header cho GET.
+
+**Schema response:** Dùng schema Capture tại mục 6.1; mọi trường bắt buộc có mặt, chỉ `capturedAt` được null. Không có bản ghi thì trả `404 PAYMENT_NOT_FOUND` theo error response mục 3.3.
+
+| Thuộc tính | Đặc tả |
+|---|---|
+| Query | `GetPayment` |
+| API đề xuất | `GET /internal/v1/payments/{paymentId}` |
+| API tra cứu theo key (nếu chưa có paymentId) | `GET /internal/v1/payments/by-idempotency-key/{key}` |
+| Bên gọi → nhận | Order Service/Reconciliation Worker → Payment Service |
+| Query thành công | `200 OK`; trả `IN_PROGRESS/SUCCEEDED/FAILED`; chỉ trả `UNKNOWN` nếu Payment Service thực sự lưu trạng thái chưa xác minh |
+| Lỗi chính | `404 PAYMENT_NOT_FOUND`; timeout/5xx chỉ retry query |
+
+Response mẫu:
+
+```json
+{
+  "paymentId": "PAY-001",
+  "orderId": "ORD-001",
+  "status": "IN_PROGRESS",
+  "amount": "250000.00",
+  "currency": "VND",
+  "idempotencyKey": "payment:capture:ORD-001:v1",
+  "capturedAt": null
+}
+```
+
+Quy tắc:
+- Query không tạo tác dụng phụ.
+- Nếu kết quả vẫn `UNKNOWN`, tiếp tục lịch đối soát D-04; hết lịch chính thì Saga chuyển `RECONCILIATION_REQUIRED` và polling nền theo quyết định hiện hành.
+- Không release Reservation, refund hoặc chốt Order `EXPIRED` chỉ dựa trên kết quả `UNKNOWN`.
+
+Khi không tìm thấy bản ghi, cả tra cứu theo `paymentId` và theo key đều trả `404 PAYMENT_NOT_FOUND`, không trả `200 NOT_STARTED`. Sau timeout, `404` không chứng minh Capture chưa hoặc sẽ không được thực hiện; tiếp tục đối soát hoặc retry cùng key, không tạo key mới.
+
+### 6.3. Refund Payment
+
+**Schema request:** Path `paymentId: Identifier` bắt buộc; header `Idempotency-Key` bắt buộc đúng `payment:refund:{orderId}:{paymentId}:v1`; body `commandId`, `correlationId` là string UUID/tracing ID ≤128 ký tự, `orderId: Identifier`, `reason: enum` (`ORDER_FAILED/ORDER_EXPIRED/LATE_CAPTURE`) đều bắt buộc/non-null. Amount/currency được lấy từ Capture đã xác minh, không nhận từ caller.
+
+**Schema response Refund (POST và GET):**
+
+| Trường | Kiểu | Bắt buộc / null | Quy tắc |
+|---|---|---|---|
+| `refundId` | Identifier | Có, không null | ID giao dịch đã lưu trước khi trả response |
+| `paymentId` | Identifier | Có, không null | Capture được hoàn tiền |
+| `orderId` | Identifier | Có, không null | Order liên quan |
+| `status` | string | Có, không null | POST: `IN_PROGRESS/SUCCEEDED/FAILED`; GET được thêm `UNKNOWN` nếu Payment lưu trạng thái chưa xác minh |
+| `idempotencyKey` | string | Có, không null | Key Refund ban đầu |
+| `amount` | decimal string | Có, không null | Số tiền hoàn, lấy từ Capture thành công; lớn hơn 0 |
+| `currency` | string | Có, không null | Cùng currency của Capture, hiện là `VND` |
+| `reason` | string | Có, không null | `ORDER_FAILED/ORDER_EXPIRED/LATE_CAPTURE` |
+| `createdAt` | ISO-8601 UTC | Có, không null | Thời điểm tạo giao dịch Refund |
+| `refundedAt` | ISO-8601 UTC | Có, được null | Có giá trị khi `SUCCEEDED`; null ở các trạng thái khác |
+
+Không có trường optional trong response trên. Lỗi HTTP dùng error response mục 3.3.
+
+| Thuộc tính | Đặc tả |
+|---|---|
+| Command | `RefundPayment` |
+| API | `POST /internal/v1/payments/{paymentId}/refunds` |
+| Bên gọi → nhận | Order Service → Payment Service |
+| Idempotency key | `payment:refund:{orderId}:{paymentId}:v1` |
+| Kết quả sau khi nhận command | `200 OK` với body `IN_PROGRESS`, `SUCCEEDED` hoặc `FAILED` |
+| Lỗi HTTP | `400 VALIDATION_ERROR`; `404 PAYMENT_NOT_FOUND`; `409 IDEMPOTENCY_KEY_CONFLICT`; `5xx` tạm thời. Timeout không có response được caller lưu cục bộ là `UNKNOWN`. |
+
+Request mẫu:
+
+```json
+{
+  "commandId": "cmd-refund-001",
+  "orderId": "ORD-001",
+  "reason": "ORDER_EXPIRED",
+  "correlationId": "corr-ord-001"
+}
+```
+
+Response khi đã hoàn tiền thành công:
+
+```json
+{
+  "refundId": "REF-001",
+  "paymentId": "PAY-001",
+  "orderId": "ORD-001",
+  "status": "SUCCEEDED",
+  "refundedAt": "2026-10-29T10:16:00Z",
+  "idempotencyKey": "payment:refund:ORD-001:PAY-001:v1",
+  "amount": "250000.00",
+  "currency": "VND",
+  "reason": "ORDER_EXPIRED",
+  "createdAt": "2026-10-29T10:15:50Z"
+}
+```
+
+Quy tắc:
+- Chỉ refund khi capture đã được xác minh `SUCCEEDED` và chính sách nghiệp vụ yêu cầu hoàn tiền.
+- Capture và refund là hai trạng thái/giao dịch riêng.
+- Timeout refund không có response được caller ghi cục bộ là `UNKNOWN`; query theo refundId/key trước khi retry.
+- Cùng key/cùng payload không tạo refund thứ hai; cùng key/khác payload bị từ chối.
+- Refund `FAILED` đã xác minh không được tự động né bằng cách tạo key mới; xử lý theo quyết định vận hành/Q-08.
+- Khi đang xử lý, Refund API trả `200 OK` với `status = IN_PROGRESS`; response phải gồm `refundId` đã lưu, `paymentId`, `orderId`, `idempotencyKey`, `amount`, `currency`, `reason`, `createdAt` và `refundedAt = null`.
+
+### 6.4. Tra cứu Refund
+
+**Schema request:** Không có body. `refundId` trên path là Identifier bắt buộc; với endpoint by-idempotency-key, `{key}` bắt buộc, percent-decode rồi validate 1–512 ASCII ký tự printable, không whitespace/control. Không gửi Idempotency-Key header cho GET.
+
+Refund có vòng đời riêng; không dùng trạng thái capture để suy ra trạng thái refund.
+
+| Thuộc tính | Đặc tả |
+|---|---|
+| Theo refundId | `GET /internal/v1/payments/refunds/{refundId}` |
+| Theo idempotency key | `GET /internal/v1/payments/refunds/by-idempotency-key/{key}` |
+| Bên gọi → nhận | Order Service / Reconciliation Worker → Payment Service |
+| Thành công | `200 OK`; body status `IN_PROGRESS/SUCCEEDED/FAILED`; `UNKNOWN` chỉ khi Payment Service lưu rõ tình trạng chưa xác minh |
+| Không tìm thấy | `404 REFUND_NOT_FOUND` |
+| Lỗi khác | `400 INVALID_IDENTIFIER`; `5xx`; timeout query chỉ retry query |
+
+**Schema response:** Dùng schema Refund tại mục 6.3; mọi trường bắt buộc có mặt, chỉ `refundedAt` được null. Không có bản ghi thì trả `404 REFUND_NOT_FOUND` theo error response mục 3.3.
+
+Response mẫu:
+
+```json
+{
+  "refundId": "REF-001",
+  "paymentId": "PAY-001",
+  "orderId": "ORD-001",
+  "status": "IN_PROGRESS",
+  "idempotencyKey": "payment:refund:ORD-001:PAY-001:v1",
+  "amount": "250000.00",
+  "currency": "VND",
+  "reason": "ORDER_EXPIRED",
+  "createdAt": "2026-10-29T10:15:50Z",
+  "refundedAt": null
+}
+```
+
+Quy tắc:
+- Query không tạo tác dụng phụ.
+- `IN_PROGRESS` xác nhận Payment Service đã nhận command và giao dịch đang xử lý; caller polling.
+- `UNKNOWN` nghĩa là chưa thể xác định giao dịch được tiếp nhận/thực hiện; đối soát bằng refund key, không tạo key mới.
+- `FAILED` chỉ được trả khi Payment Service xác minh thất bại; không đồng nhất với timeout.
+- `404 REFUND_NOT_FOUND` không cho phép tạo key mới; retry command (nếu phù hợp) phải giữ key ban đầu.
+
+Cả tra cứu theo `refundId` và theo key đều trả `404 REFUND_NOT_FOUND` nếu không tìm thấy bản ghi; không trả `200 NOT_STARTED`.
+
+### 6.5. Phân biệt IN_PROGRESS và UNKNOWN
+
+| Trạng thái | Ý nghĩa | API POST | API GET |
+|---|---|---|---|
+| `NOT_STARTED` | Trạng thái cục bộ của Order trước khi gửi command | Không trả trạng thái này | Không trả trạng thái này; không tìm thấy bản ghi thì trả `404` |
+| `IN_PROGRESS` | Payment đã nhận command, giao dịch đang xử lý | `200 OK`, body IN_PROGRESS | `200 OK`, body IN_PROGRESS |
+| `SUCCEEDED` | Thành công đã xác minh | `200 OK`, body SUCCEEDED | `200 OK`, body SUCCEEDED |
+| `FAILED` | Thất bại đã xác minh | `200 OK`, body FAILED | `200 OK`, body FAILED |
+| `UNKNOWN` | Chưa thể xác định command được tiếp nhận/thực hiện hay không | Nếu response timeout, caller tự ghi local UNKNOWN; không phải HTTP status | Chỉ trả nếu Payment Service lưu trạng thái chưa xác minh |
+
+`IN_PROGRESS` khác `UNKNOWN`: trạng thái đầu xác nhận command đã được tiếp nhận; trạng thái sau không khẳng định điều đó. Nếu response POST mất, caller phải query theo idempotency key.
+
+## 7. Danh sách command và API tương ứng
+
+Các command dưới đây là hành động nghiệp vụ được gọi qua API nội bộ trong thiết kế hiện tại, không phải danh sách message broker độc lập.
+
+| Command | Service nhận | API tương ứng | Idempotency key |
+|---|---|---|---|
+| `ReserveInventory` | Inventory | `POST /internal/v1/reservations` | `reserve:{orderId}:v1` |
+| `GetReservation` | Inventory | `GET /internal/v1/reservations/by-order/{orderId}` | Không áp dụng (query) |
+| `ReleaseInventory` | Inventory | `POST /internal/v1/reservations/{reservationId}/release` | `inventory:release:{orderId}:{reservationId}:v1` |
+| `CancelInventoryOrder` | Inventory | `POST /internal/v1/orders/{orderId}/cancel` | `inventory:cancel:{orderId}:v1` |
+| `GetInventoryOperation` | Inventory | `GET /internal/v1/operations?idempotencyKey={key}` | Không áp dụng (query) |
+| `CapturePayment` | Payment | `POST /internal/v1/payments/captures` | `payment:capture:{orderId}:v1` |
+| `GetPayment` | Payment | `GET /internal/v1/payments/{paymentId}` hoặc tra cứu theo key | Không áp dụng (query) |
+| `RefundPayment` | Payment | `POST /internal/v1/payments/{paymentId}/refunds` | `payment:refund:{orderId}:{paymentId}:v1` |
+| `GetRefund` | Payment | `GET /internal/v1/payments/refunds/{refundId}` hoặc `GET /internal/v1/payments/refunds/by-idempotency-key/{key}` | Không áp dụng (query) |
+
+Order API không dùng idempotency key nội bộ thay cho các key của Inventory/Payment. Mỗi tác dụng phụ có key riêng do Order Service tạo và lưu bền vững.
+
+## 8. Event Contract
+
+### 8.1. Domain event được chốt trong phạm vi hiện tại
+
+| Event | Producer | Consumer | Thời điểm phát |
+|---|---|---|---|
+| `OrderConfirmed` | Order Service | Notification Service | Sau khi `PENDING → CONFIRMED` thành công và transaction Order + Outbox commit |
+| `OrderFailed` | Order Service | Notification Service | Sau khi nhánh thất bại hoàn tất các compensation bắt buộc và Order chuyển `FAILED` |
+| `OrderExpired` | Order Service | Notification Service | Sau khi nhánh hết hạn hoàn tất release/refund bắt buộc và Order chuyển `EXPIRED` |
+
+Không đưa `InventoryReserved`, `PaymentSucceeded`, `PaymentFailed`, `PaymentUnknown` thành domain event trong phiên bản contract này: theo luồng sequence hiện tại, Inventory/Payment trả kết quả trực tiếp qua API cho Order Service. Nếu sau này nhóm chuyển sang giao tiếp bất đồng bộ, cần cập nhật contract, Saga và sequence diagram đồng thời; không phát sinh thêm event song song với response đồng bộ nếu chưa có nhu cầu rõ ràng.
+
+### 8.2. Message envelope
+
+Envelope JSON thống nhất:
+
+```json
+{
+  "eventId": "evt-uuid-001",
+  "commandId": "cmd-capture-001",
+  "correlationId": "corr-ord-001",
+  "schemaVersion": 1,
+  "eventType": "OrderConfirmed",
+  "occurredAt": "2026-10-29T10:00:06Z",
+  "producer": "order-service",
+  "payload": {
+    "orderId": "ORD-001",
+    "status": "CONFIRMED",
+    "confirmedAt": "2026-10-29T10:00:06Z"
+  }
+}
+```
+
+| Trường | Kiểu logic | Bắt buộc | Ý nghĩa |
+|---|---|---:|---|
+| `eventId` | string Identifier (UUID dạng chuỗi hợp lệ) | Có | Định danh duy nhất của event; tạo một lần khi ghi Outbox |
+| `commandId` | string/null | Có mặt trong envelope; có thể null nếu không truy được command gây ra event | Truy vết command/causation liên quan; không dùng dedupe thay eventId |
+| `correlationId` | string | Có | Liên kết toàn bộ luồng Order/Saga |
+| `schemaVersion` | integer | Có | Phiên bản schema payload |
+| `eventType` | string | Có | Tên domain event |
+| `occurredAt` | ISO-8601 UTC | Có | Thời điểm nghiệp vụ được commit/phát sinh |
+| `producer` | string | Có | Service phát event |
+| `payload` | object | Có | Dữ liệu nghiệp vụ của event |
+
+Quy tắc:
+- `eventId` sinh một lần khi ghi Outbox; publish lại phải giữ nguyên eventId và payload.
+- `commandId` chỉ phục vụ liên kết nguyên nhân; không thay thế `eventId`.
+- `correlationId` được truyền xuyên suốt từ request tạo Order qua các API nội bộ đến Outbox.
+- Timestamp dùng UTC.
+- Không đưa dữ liệu nhạy cảm hoặc thông tin thanh toán không cần thiết vào event.
+- Payload chỉ chứa dữ liệu cần cho consumer; Notification Service không được tự suy diễn trạng thái từ một event khác.
+
+### 8.3. Schema payload và ví dụ
+
+Các trường được liệt kê dưới đây đều bắt buộc và không được null. Field bổ sung optional tuân theo mục 11. `orderId` theo Identifier tại mục 3.1.1; timestamp phải là ISO-8601 UTC. Envelope phiên bản này dùng `schemaVersion = 1`, `producer = order-service`; chỉ `commandId` được null.
+
+| Event | Trường payload | Kiểu / giá trị |
+|---|---|---|
+| `OrderConfirmed` | `orderId` | Identifier |
+| `OrderConfirmed` | `status` | Hằng `CONFIRMED` |
+| `OrderConfirmed` | `confirmedAt` | ISO-8601 UTC; thời điểm Order chuyển CONFIRMED |
+| `OrderFailed` | `orderId` | Identifier |
+| `OrderFailed` | `status` | Hằng `FAILED` |
+| `OrderFailed` | `failedAt` | ISO-8601 UTC; thời điểm Order chuyển FAILED |
+| `OrderFailed` | `reasonCode` | `INVENTORY_REJECTED` hoặc `PAYMENT_FAILED` |
+| `OrderExpired` | `orderId` | Identifier |
+| `OrderExpired` | `status` | Hằng `EXPIRED` |
+| `OrderExpired` | `expiredAt` | ISO-8601 UTC; thời điểm chốt EXPIRED, không phải hạn expireAt |
+
+`INVENTORY_REJECTED` ứng với nhánh thất bại do Reserve bị từ chối đã xác minh (T-02); `PAYMENT_FAILED` ứng với Capture thất bại đã xác minh (T-03). Lưu nguyên nhân khi claim nhánh thất bại và giữ nguyên qua compensation. Timeout, retry vượt ngưỡng hoặc compensation chưa xong không được biến thành lý do phát `OrderFailed`.
+
+`occurredAt` bằng timestamp chuyển trạng thái trong payload. Producer kiểm tra eventType/status/timestamp khớp nhau trước khi ghi Outbox; consumer kiểm tra schema trước khi xử lý. Thiếu field bắt buộc, null sai quy định hoặc enum không hỗ trợ phải cách ly/ghi lỗi theo mục 10, không tự suy diễn.
+
+**OrderConfirmed**
+
+```json
+{
+  "eventId": "evt-confirmed-001",
+  "commandId": "cmd-capture-001",
+  "correlationId": "corr-ord-001",
+  "schemaVersion": 1,
+  "eventType": "OrderConfirmed",
+  "occurredAt": "2026-10-29T10:00:06Z",
+  "producer": "order-service",
+  "payload": {
+    "orderId": "ORD-001",
+    "status": "CONFIRMED",
+    "confirmedAt": "2026-10-29T10:00:06Z"
+  }
+}
+```
+
+**OrderFailed**
+
+```json
+{
+  "eventId": "evt-failed-001",
+  "commandId": "cmd-release-001",
+  "correlationId": "corr-ord-002",
+  "schemaVersion": 1,
+  "eventType": "OrderFailed",
+  "occurredAt": "2026-10-29T10:03:00Z",
+  "producer": "order-service",
+  "payload": {
+    "orderId": "ORD-002",
+    "status": "FAILED",
+    "reasonCode": "PAYMENT_FAILED",
+    "failedAt": "2026-10-29T10:03:00Z"
+  }
+}
+```
+
+**OrderExpired**
+
+```json
+{
+  "eventId": "evt-expired-001",
+  "commandId": "cmd-expire-001",
+  "correlationId": "corr-ord-003",
+  "schemaVersion": 1,
+  "eventType": "OrderExpired",
+  "occurredAt": "2026-10-29T10:15:10Z",
+  "producer": "order-service",
+  "payload": {
+    "orderId": "ORD-003",
+    "status": "EXPIRED",
+    "expiredAt": "2026-10-29T10:15:10Z"
+  }
+}
+```
+
+Các giá trị ID và timestamp trong ví dụ chỉ minh họa cấu trúc, không phải dữ liệu cố định. Enum `reasonCode` được quy định tại mục 8.3; thêm giá trị phải tuân theo quy tắc tiến hóa schema tại mục 11.
+
+## 9. Quy tắc Outbox, Inbox và xử lý trùng
+
+### 9.1. Producer / Outbox
+
+- Service sở hữu trạng thái Order ghi thay đổi Order và domain event tương ứng trong cùng transaction DB.
+- Outbox tối thiểu lưu `eventId`, `eventType`, `schemaVersion`, `correlationId`, `payload`, `occurredAt`, trạng thái publish và thời điểm tạo.
+- Publisher chỉ phát event đã commit.
+- Nếu publish thành công nhưng Publisher crash trước khi đánh dấu, event có thể được phát lại; eventId không đổi.
+- Không xóa event chưa được xác nhận publish; chính sách lưu trữ do Dev xác nhận.
+
+### 9.2. Consumer / Inbox
+
+- Consumer Notification Service lưu dấu đã xử lý với unique key `(consumerName, eventId)`.
+- Event đã xử lý: acknowledge/skip, không gửi lại tác dụng phụ nghiệp vụ.
+- Event mới: ghi nhận xử lý và tạo tác vụ notification theo transaction nội bộ phù hợp.
+- Ghi nhận inbox và tác vụ notification phải được thiết kế tránh trường hợp đánh dấu đã xử lý nhưng mất tác vụ gửi.
+- Gửi ra hệ thống bên ngoài không được tuyên bố exactly-once nếu nhà cung cấp không hỗ trợ idempotency hoặc tra cứu giao nhận. Mục tiêu hiện tại là chống xử lý logic trùng trong hệ thống và retry at-least-once.
+
+## 10. Timeout, UNKNOWN và ma trận lỗi
+
+| Thao tác | Tình huống | Trạng thái cần lưu ở Order/Saga | Hành động bắt buộc |
+|---|---|---|---|
+| Reserve | Timeout/mất phản hồi | Reservation `UNKNOWN`; Saga `RECONCILING` | Query theo `orderId` qua API mục 5.2, đối chiếu `idempotencyKey = reserve:{orderId}:v1`; chưa xác minh thì không capture và không release mù |
+| Reserve | Không đủ tồn kho đã xác minh | Reservation `REJECTED`; claim nhánh thất bại nếu Order còn `PENDING` | Không capture; hoàn tất nhánh thất bại theo State Machine |
+| Capture | Timeout/mất phản hồi | Capture `UNKNOWN`; Saga `RECONCILING` | Query theo paymentId/capture key; không coi là FAILED |
+| Capture | `FAILED` đã xác minh | Capture `FAILED` | Claim nhánh thất bại bằng conditional update; release reservation đã xác minh |
+| Release | Timeout/mất phản hồi | Release `UNKNOWN`; Saga `RECONCILING` | GET operation theo release key hoặc GET Reservation theo orderId; retry nguyên body/key, không tuyên bố đã release khi chưa xác minh |
+| Cancel | Timeout/mất phản hồi | Bước CANCEL UNKNOWN; giữ nhánh Order đã claim | GET operation theo cancel key hoặc retry nguyên body/key; chưa xác minh thì không chốt đã chặn Reserve muộn |
+| Refund | Timeout/mất phản hồi | Refund `UNKNOWN`; Saga `RECONCILING` | Query theo refundId/refund key; không tạo refund key mới |
+| Refund | `FAILED` đã xác minh | Refund `FAILED`; Saga cần xử lý ngoại lệ/đối soát | Không đánh dấu Saga hoàn tất; xử lý theo Q-08 |
+| Bất kỳ POST nào | Cùng key, khác payload | Không thay đổi trạng thái nghiệp vụ | Trả `409 IDEMPOTENCY_KEY_CONFLICT` |
+| Event | Nhận lại cùng eventId | Inbox đã có bản ghi | Bỏ qua tác dụng phụ lặp |
+| Event | Schema không tương thích | Không xử lý payload không hiểu | Cách ly/ghi lỗi và cảnh báo; không đoán trường bị thiếu |
+
+### 10.1. Idempotency key chuẩn
+
+| Hành động | Key |
+|---|---|
+| Create Order | Client sinh UUID; lưu cùng payload hash và Order ID |
+| Reserve | `reserve:{orderId}:v1` |
+| Cancel | `inventory:cancel:{orderId}:v1` |
+| Capture | `payment:capture:{orderId}:v1` |
+| Release | `inventory:release:{orderId}:{reservationId}:v1` |
+| Refund | `payment:refund:{orderId}:{paymentId}:v1` |
+| Outbox event | UUID `eventId` sinh một lần |
+| Consumer xử lý event | `UNIQUE(consumerName, eventId)` |
+| Notification logic | `notification:{eventId}:{notificationType}:{channel}` |
+
+Cùng key/cùng payload phải trả lại kết quả đã lưu; cùng key/khác payload trả `409 IDEMPOTENCY_KEY_CONFLICT`. Unique constraint phải được áp dụng tại nơi thực hiện tác dụng phụ, không chỉ kiểm tra ở code gọi.
+
+### 10.2. Retry
+
+Áp dụng chính sách D-03 trong `06-design-decisions.md`: retry lỗi tạm thời theo giới hạn và backoff cấu hình; retry cùng hành động phải dùng cùng key. Trước khi retry thao tác có thể đã thành công nhưng mất phản hồi, query trạng thái hoặc gửi lại cùng key theo contract. Không retry tự động lỗi validation, out-of-stock đã xác minh hoặc idempotency conflict.
+
+## 11. Tương thích và tiến hóa schema
+
+Một cặp `eventType + schemaVersion` xác định duy nhất một cấu trúc và ngữ nghĩa schema.
+
+| Thay đổi | Phân loại | Version |
+|---|---|---|
+| Thêm field optional; consumer cũ bỏ qua field lạ, semantics cũ không đổi | Tương thích ngược | Có thể giữ version |
+| Thêm enum value mà consumer cũ không xử lý | Không mặc nhiên tương thích | Mặc định tăng version nếu chưa quy định fallback an toàn |
+| Thêm field bắt buộc | Phá vỡ tương thích | Tăng version |
+| Xóa/đổi tên field | Phá vỡ tương thích | Tăng version |
+| Đổi kiểu, format, đơn vị hoặc cấu trúc lồng nhau | Phá vỡ tương thích | Tăng version |
+| Đổi ý nghĩa hoặc ràng buộc của field hiện có | Phá vỡ tương thích | Tăng version |
+
+Quy tắc:
+- Chỉ thay đổi tương thích ngược như thêm field optional mới được phép giữ version; consumer phải bỏ qua field không biết và không giả định field optional luôn có mặt.
+- Thay đổi phá vỡ tương thích phải có version mới; không tái sử dụng cùng version cho hai schema/semantics khác nhau.
+- Producer và consumer validate payload theo đúng cặp `eventType + schemaVersion`.
+- Producer có thể phát nhiều version trong giai đoạn migration chỉ khi consumer hỗ trợ rõ từng version theo kế hoạch.
+- Event đã ghi Outbox phải giữ nguyên payload và version khi publish lại.
+- Registry và lựa chọn JSON Schema/Avro/Protobuf là quyết định triển khai, không làm thay đổi quy tắc trên.
+
+### 11.1. Đồng bộ với Inventory và giới hạn triển khai
+
+Đối chiếu nhánh Inventory tại commit eb856bc, migration V001–V005. V004 hỗ trợ key 512; V005 hỗ trợ Order/Reservation Identifier 128 ký tự. ProductId vẫn UUID nội bộ. DB Order/Payment phải theo cùng giới hạn trước khi nghiệm thu tích hợp; tài liệu thiết kế không chứng minh các service đó đã triển khai.
+
+Reserve/Cancel dùng tracing header; Release còn có commandId/correlationId bắt buộc trong body và hash. Bên gọi giữ chúng ổn định; nếu gửi cả header/body thì dùng cùng giá trị để truy vết, nhưng Inventory hiện chưa kiểm tra hai nguồn khớp nhau. Header X-Correlation-Id bắt buộc không trắng ≤128 ASCII hiển thị, X-Command-Id tùy chọn cùng validation. Body tracing Release theo implementation hiện tại: string không trắng ≤128 ký tự. Không đổi hash của dữ liệu cũ khi chuẩn hóa tracing trong tương lai.
+
+Request Create Order chuyển productId sang storeId/SKU và Reserve thêm caller reservationId là thay đổi phá vỡ tương thích với bản draft trước. Chốt bản này trước rollout Order; không replay payload cũ bằng key mới để né xung đột, không sửa migration/checksum hoặc snapshot lịch sử. API cũ /api/v1/inventory giữ riêng để tương thích; mọi ví dụ mới dùng /internal/v1.
+
+Inventory đã có handler cho validation và một số lỗi DB/transaction; auth và chuẩn hóa mọi exception/routing chưa hoàn tất. 401/403/429 trong ma trận là yêu cầu kiến trúc khi triển khai cơ chế tương ứng, không khẳng định đã có trong code. Chưa nghiệm thu tương thích toàn hệ thống chỉ dựa vào tài liệu hay số test Inventory.
+
+### 11.2. Tiêu chí kiểm chứng đồng bộ
+
+- Create Order lưu customerId, storeId/SKU, reservationId và payload trước gửi mạng; restart không đổi yêu cầu.
+- Reserve hai SKU cùng cửa hàng, SKU trùng/gộp/tràn integer, ID/key tại biên và vượt giới hạn.
+- Cùng key đổi storeId/reservationId/quantity trả 409; không oversell hoặc giữ một phần.
+- Reserve/Cancel và Release/Cancel cạnh tranh không trả tồn hai lần; Cancel trước Reserve chặn tác dụng muộn.
+- GET operation giữ snapshot gốc, GET Reservation phản ánh trạng thái hiện tại; 404 không được suy thành thất bại xác định.
+- Release retry nguyên tracing body thành công; đổi body cùng key trả 409.
+- Migrate giữ dữ liệu/hash/snapshot cũ; xác minh ba event kết thúc và không phát OrderCreated.
+
+Các mục này là tiêu chí cho contract/integration tests; lần đồng bộ tài liệu không chạy hoặc tuyên bố các test runtime đã pass.
+
+## 12. Bảo mật và quan sát
+
+- API nội bộ chỉ được gọi bởi service/identity được cấp quyền.
+- Không ghi thông tin xác thực, token, dữ liệu thẻ hoặc bí mật vào log/event.
+- Log tối thiểu các định danh: `orderId`, `correlationId`, `commandId`, `eventId` (khi có), operation key ở dạng được phép ghi log.
+- Không log toàn bộ payload nếu chứa dữ liệu cá nhân/nhạy cảm.
+- Theo dõi số lần retry, timeout, trạng thái `UNKNOWN`, tuổi của Saga chưa hoàn tất, Outbox chưa publish và notification đang retry.
+- `correlationId` phải được giữ qua các hop để có thể truy vết một luồng từ request tạo Order đến event kết thúc.
+- Issue #6 – Draft API and Event Contracts
+- Issue #20 – Hoàn thiện API Contract và Event Contract giữa các service
