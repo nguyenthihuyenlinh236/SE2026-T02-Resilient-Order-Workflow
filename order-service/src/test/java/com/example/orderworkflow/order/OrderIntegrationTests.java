@@ -11,6 +11,9 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -310,6 +313,12 @@ class OrderIntegrationTests {
         assertThat(steps).singleElement().satisfies(step -> {
             assertThat(step.operation()).isEqualTo("RESERVE");
             assertThat(step.requestPayload()).contains("\"SKU-001\"").contains("\"SKU-002\"");
+            assertThat(step.requestPayload()).doesNotContain("schemaVersion");
+            String canonical = jdbc.queryForObject("SELECT request_payload::text FROM saga_steps WHERE step_id=?",
+                    String.class, step.stepId());
+            assertThat(step.payloadHash()).isEqualTo(sha256(canonical));
+            assertThat(jdbc.queryForObject("SELECT saga_payload->>'schemaVersion' FROM saga_steps WHERE step_id=?",
+                    Integer.class, step.stepId())).isEqualTo(1);
         });
     }
 
@@ -361,5 +370,11 @@ class OrderIntegrationTests {
 
     private int count(String table) {
         return jdbc.queryForObject("SELECT count(*) FROM " + table, Integer.class);
+    }
+
+    private static String sha256(String value) {
+        try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(value.getBytes(StandardCharsets.UTF_8))); }
+        catch (Exception exception) { throw new IllegalStateException(exception); }
     }
 }

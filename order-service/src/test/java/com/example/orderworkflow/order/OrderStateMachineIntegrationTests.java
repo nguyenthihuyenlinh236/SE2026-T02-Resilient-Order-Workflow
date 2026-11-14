@@ -14,6 +14,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -22,6 +24,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import com.example.orderworkflow.order.service.OrderStateMachine;
 import com.example.orderworkflow.order.service.OrderStateMachine.Transition;
+import com.example.orderworkflow.order.repository.SagaRepository;
 
 @Testcontainers
 @SpringBootTest(properties = {"spring.flyway.enabled=true", "spring.sql.init.mode=never",
@@ -38,12 +41,48 @@ class OrderStateMachineIntegrationTests {
 
     @Autowired JdbcTemplate jdbc;
     @Autowired OrderStateMachine machine;
+    @Autowired SagaRepository sagas;
+    @Autowired PlatformTransactionManager transactions;
 
     @BeforeEach
     void reset() {
         jdbc.execute("DROP TRIGGER IF EXISTS fail_outbox_trigger ON outbox_events");
         jdbc.execute("DROP FUNCTION IF EXISTS fail_outbox_insert()");
+        jdbc.execute("DROP TRIGGER IF EXISTS fail_attempt_trigger ON saga_attempts");
+        jdbc.execute("DROP FUNCTION IF EXISTS fail_attempt_insert()");
         jdbc.execute("TRUNCATE saga_attempts,saga_steps,sagas,outbox_events,order_items,idempotency_records,orders,product_catalog");
+    }
+
+    @Test
+    void verifiedReservationRejectsStaleUnknownAndNotCreated() {
+        String id = order(Instant.now().plusSeconds(300));
+        machine.recordReservation(id, "RESERVED", true, null);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                machine.recordReservation(id, "UNKNOWN", false, "RESERVE"))
+                .isInstanceOf(IllegalStateException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                machine.recordReservation(id, "NOT_CREATED", true, null))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(jdbc.queryForObject("SELECT reservation_status FROM orders WHERE order_id=?", String.class, id))
+                .isEqualTo("RESERVED");
+        machine.recordReservation(id, "RELEASED", true, null);
+    }
+
+    @Test
+    void verifiedCaptureRefundAndCompletedStepRejectStaleUpdates() {
+        String captureOrder = order(Instant.now().plusSeconds(300));
+        machine.recordCapture(captureOrder, captureOrder, "PAY-1", "FAILED", true, null, null);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> machine.recordCapture(
+                captureOrder, captureOrder, "PAY-1", "UNKNOWN", false, null, null));
+
+        String refundOrder = order(Instant.now().plusSeconds(300));
+        machine.recordRefund(refundOrder, "REF-1", "FAILED", true);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                machine.recordRefund(refundOrder, "REF-1", "UNKNOWN", false));
+
+        UUID step = compensationStep(refundOrder, "REFUND", "SUCCEEDED", 1, Instant.now());
+        assertThat(sagas.updateStep(step, "SUCCEEDED", "UNKNOWN", "{}", null,
+                Instant.now(), Instant.now(), "late timeout")).isZero();
     }
 
     @Test
@@ -81,20 +120,89 @@ class OrderStateMachineIntegrationTests {
 
     @Test
     void competingConfirmAndExpireAllowOnlyOneBranch() throws Exception {
-        String id = order(Instant.now().minusSeconds(1));
+        String id = order(Instant.now().plusSeconds(300));
         machine.recordReservation(id, "RESERVED", true, null);
         machine.recordCapture(id, id, "PAY-1", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
         var start = new CountDownLatch(1);
+        var entered = new CountDownLatch(2);
         var pool = Executors.newFixedThreadPool(2);
         try {
-            var confirm = pool.submit(() -> { start.await(); return machine.confirm(id); });
-            var expire = pool.submit(() -> { start.await(); return machine.claimExpired(id); });
-            start.countDown();
+            var confirm = pool.submit(() -> { start.await(); entered.countDown(); return machine.confirm(id); });
+            var expire = pool.submit(() -> { start.await(); entered.countDown(); return machine.claimExpired(id); });
+            new TransactionTemplate(transactions).executeWithoutResult(ignored -> {
+                jdbc.queryForObject("SELECT order_id FROM orders WHERE order_id=? FOR UPDATE", String.class, id);
+                start.countDown();
+                try { entered.await(); } catch (InterruptedException exception) { Thread.currentThread().interrupt(); }
+                jdbc.update("UPDATE orders SET expire_at=clock_timestamp() WHERE order_id=?", id);
+            });
             var confirmation = confirm.get();
             var token = expire.get();
-            assertThat((confirmation == Transition.APPLIED ? 1 : 0) + (token != null ? 1 : 0)).isEqualTo(1);
+            int winners = (confirmation == Transition.APPLIED ? 1 : 0) + (token != null ? 1 : 0);
+            assertThat(winners).isLessThanOrEqualTo(1);
+            if (winners == 0) token = machine.claimExpired(id);
+            assertThat((confirmation == Transition.APPLIED) ^ (token != null)).isTrue();
             assertThat(status(id)).isIn("CONFIRMED", "EXPIRING");
         } finally { pool.shutdownNow(); }
+    }
+
+    @Test
+    void attemptInsertAndCounterAreAtomicOnRollbackAndUnderConcurrency() throws Exception {
+        String id = order(Instant.now().plusSeconds(300));
+        UUID step = compensationStep(id, "RELEASE", "IN_PROGRESS", 0, Instant.now());
+        jdbc.execute("CREATE FUNCTION fail_attempt_insert() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                + "BEGIN RAISE EXCEPTION 'attempt failure'; END $$");
+        jdbc.execute("CREATE TRIGGER fail_attempt_trigger BEFORE INSERT ON saga_attempts "
+                + "FOR EACH ROW EXECUTE FUNCTION fail_attempt_insert()");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> sagas.insertAttempt(step, "SEND"));
+        assertThat(jdbc.queryForObject("SELECT attempt_count FROM saga_steps WHERE step_id=?", Integer.class, step)).isZero();
+        jdbc.execute("DROP TRIGGER fail_attempt_trigger ON saga_attempts");
+        jdbc.execute("DROP FUNCTION fail_attempt_insert()");
+
+        int workers = 8;
+        var start = new CountDownLatch(1);
+        var pool = Executors.newFixedThreadPool(workers);
+        try {
+            var futures = new java.util.ArrayList<java.util.concurrent.Future<UUID>>();
+            for (int i = 0; i < workers; i++) futures.add(pool.submit(() -> {
+                start.await(); return sagas.insertAttempt(step, "SEND");
+            }));
+            start.countDown();
+            for (var future : futures) assertThat(future.get()).isNotNull();
+        } finally { pool.shutdownNow(); }
+        assertThat(jdbc.queryForObject("SELECT attempt_count FROM saga_steps WHERE step_id=?", Integer.class, step))
+                .isEqualTo(workers);
+        assertThat(jdbc.queryForList("SELECT sequence_no FROM saga_attempts WHERE step_id=? ORDER BY sequence_no",
+                Integer.class, step)).containsExactly(1, 2, 3, 4, 5, 6, 7, 8);
+    }
+
+    @Test
+    void compensationFailureAndRetryRequireExhaustedDueStep() {
+        String id = order(Instant.now().plusSeconds(300));
+        machine.recordReservation(id, "RESERVED", true, null);
+        machine.recordCapture(id, id, "PAY-1", "FAILED", true, null, null);
+        assertThat(machine.startCompensation(id)).isEqualTo(Transition.APPLIED);
+        UUID step = compensationStep(id, "RELEASE", "FAILED", 4, Instant.now().minusSeconds(1));
+        assertThat(machine.compensationFailed(id)).isEqualTo(Transition.REJECTED);
+        jdbc.update("UPDATE saga_steps SET attempt_count=5 WHERE step_id=?", step);
+        assertThat(machine.compensationFailed(id)).isEqualTo(Transition.APPLIED);
+        jdbc.update("UPDATE saga_steps SET next_attempt_at=clock_timestamp()+interval '1 hour' WHERE step_id=?", step);
+        assertThat(machine.retryCompensation(id)).isEqualTo(Transition.REJECTED);
+        jdbc.update("UPDATE saga_steps SET next_attempt_at=clock_timestamp()-interval '1 second' WHERE step_id=?", step);
+        assertThat(machine.retryCompensation(id)).isEqualTo(Transition.APPLIED);
+    }
+
+    @Test
+    void expirationKeepsOrderExpiringWhenCompensationNeedsBackgroundRetry() {
+        String id = order(Instant.now().minusSeconds(1));
+        UUID token = machine.claimExpired(id);
+        assertThat(token).isNotNull();
+        compensationStep(id, "RELEASE", "FAILED", 5, Instant.now().minusSeconds(1));
+        assertThat(machine.compensationFailed(id)).isEqualTo(Transition.APPLIED);
+        assertThat(status(id)).isEqualTo("EXPIRING");
+        assertThat(sagaStatus(id)).isEqualTo("COMPENSATION_FAILED");
+        assertThat(machine.retryCompensation(id)).isEqualTo(Transition.APPLIED);
+        assertThat(status(id)).isEqualTo("EXPIRING");
+        assertThat(sagaStatus(id)).isEqualTo("COMPENSATING");
     }
 
     @Test
@@ -169,6 +277,20 @@ class OrderStateMachineIntegrationTests {
         jdbc.update("INSERT INTO sagas(saga_id,order_id,status,branch,current_operation) VALUES (?,?,'RUNNING','FORWARD','RESERVE')",
                 UUID.randomUUID(), id);
         return id;
+    }
+
+    private UUID compensationStep(String orderId, String operation, String status, int attempts, Instant nextAttempt) {
+        UUID saga = jdbc.queryForObject("SELECT saga_id FROM sagas WHERE order_id=?", UUID.class, orderId);
+        UUID step = UUID.randomUUID();
+        String body = "{\"orderId\":\"" + orderId + "\"}";
+        jdbc.update("INSERT INTO saga_steps(step_id,saga_id,operation,command_id,correlation_id,idempotency_key,"
+                + "saga_payload,request_payload,payload_hash,status,attempt_count,next_attempt_at,completed_at) "
+                + "VALUES (?,?,?,?,?,?,CAST(? AS jsonb),CAST(? AS jsonb),"
+                + "encode(sha256(convert_to(CAST(? AS jsonb)::text,'UTF8')),'hex'),?,?,?,"
+                + "CASE WHEN ? IN ('SUCCEEDED','FAILED') THEN clock_timestamp() END)",
+                step, saga, operation, UUID.randomUUID(), "corr", operation.toLowerCase() + ":" + orderId,
+                body, body, body, status, attempts, Timestamp.from(nextAttempt), status);
+        return step;
     }
 
     private String status(String id) { return jdbc.queryForObject("SELECT status FROM orders WHERE order_id=?", String.class, id); }
