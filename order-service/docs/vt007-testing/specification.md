@@ -29,7 +29,7 @@ Body:
 }
 ```
 
-Draft được phép chưa hoàn chỉnh: `customerId`, `storeId`, `items`, và các field của item có thể null/empty. `revision` phải >= 1. Không tra Catalog và không gọi Saga/Inventory/Payment. Snapshot giữ nguyên thứ tự và dòng item; không gộp hoặc sắp xếp.
+Draft được phép chưa hoàn chỉnh: `customerId`, `storeId`, `items`, và các field của item có thể null/empty. `revision` phải >= 1. Không tra Catalog và không gọi Saga/Inventory/Payment. Snapshot giữ nguyên thứ tự và dòng item; không gộp hoặc sắp xếp. `items: null` và `items: []` là hai snapshot khác nhau, không được canonicalize thành cùng payload/hash.
 
 Response thành công `200 OK` gồm `draftId`, `revision`, `outcome` (`CREATED`, `UPDATED`, `REPLAYED`), `savedAt`, `correlationId`, và snapshot đã lưu.
 

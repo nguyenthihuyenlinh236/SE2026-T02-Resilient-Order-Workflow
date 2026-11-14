@@ -9,5 +9,6 @@
 - Repository evidence: Surefire records `NoResourceFoundException: No static resource api/v1/order-drafts/...`; the existing global handler converts this missing-route exception to HTTP 500, so assertions expecting the specified 2xx/4xx outcomes fail.
 - This is an executable behavioral RED, not a compilation failure: the application context, Flyway and PostgreSQL container all started, and all 10 test methods ran.
 
-Raw machine-readable output remains available locally at
-`order-service/target/surefire-reports/TEST-com.example.orderworkflow.order.OrderDraftIntegrationTests.xml` until the next clean build.
+The original raw Surefire XML was overwritten by the later required `clean verify`. It was not copied
+into Git before that clean build. The command, test-only SHA, counts and representative root cause
+above were recorded immediately from that real run; no raw log has been reconstructed or simulated.
