@@ -1,224 +1,85 @@
-# Resilient Order Workflow — Microservices Skeleton
+﻿# Resilient Order Workflow – VT-006
 
-Bộ khung ban đầu cho ba Spring Boot microservices độc lập, dùng Java 17, Maven, PostgreSQL và RabbitMQ. Issue SETUP-01 chỉ thiết lập nền tảng chạy và kiểm tra sức khỏe; chưa triển khai nghiệp vụ đặt hàng, Saga hoặc Outbox.
+Repository gồm Order, Inventory và Payment Spring Boot services; VT-006 bổ sung vertical slice lưu Order/Saga/RESERVE intent rồi gọi Inventory Reserve bất đồng bộ. Worker **tắt mặc định** vì expiry/late-Reserve coordination chưa được giải quyết đầy đủ.
 
-## Thành phần
+## Yêu cầu môi trường
 
-- `order-service` — cổng mặc định `8081`, database `order_db`.
-- `inventory-service` — cổng mặc định `8082`, database `inventory_db`.
-- `payment-service` — cổng mặc định `8083`, database `payment_db`.
-- PostgreSQL — cổng `5432`; script `infra/postgres/init-databases.sql` tạo ba database.
-- RabbitMQ — cổng AMQP `5672`, giao diện quản trị `15672`.
-- `docs/` — tài liệu hiện có của nhóm, được giữ nguyên.
+- JDK 17 (một số lần kiểm thử ghi nhận JVM runtime 21.0.2; project compile target Java 17).
+- Maven 3.9+.
+- Docker Desktop/Engine để chạy Testcontainers cho integration/API tests.
+- Maven tải dependencies khai báo trong POM khi chạy lần đầu; không cần cài dependency riêng bằng tay.
+- Integration tests dùng PostgreSQL 16 Testcontainers và HTTP fixture cục bộ; không cần khởi động PostgreSQL, RabbitMQ hay Inventory service riêng cho các test được liệt kê.
 
-## Yêu cầu
+Các lệnh test đã được chạy trên Windows bằng Maven IntelliJ IDEA 2023.3.3. Thiết lập executable/repository local trong PowerShell:
 
-- JDK 17
-- Maven 3.9+
-- Docker Engine/Desktop với Docker Compose v2
-- Git để tải và cập nhật repository
+~~~powershell
+$mvn = 'D:\IntelliJ IDEA Community Edition 2023.3.3\plugins\maven\lib\maven3\bin\mvn.cmd'
+$repo = 'C:\Users\fah4i\.m2\repository'
+~~~
 
-Các lệnh dưới đây dùng PowerShell, có thể chạy trong terminal của VS Code. Mở Docker Desktop và đợi Docker Engine sẵn sàng trước khi chạy hạ tầng.
+Nếu cài Maven ở vị trí khác, đổi giá trị $mvn sang executable Maven của máy đó.
 
-Kiểm tra công cụ:
+## Unit tests
 
-```powershell
-java -version
-javac -version
-mvn -version
-docker compose version
-docker info
-```
+Đã chạy OrderService unit tests: 4 tests, 0 failures, 0 errors.
 
-`javac` cần hoạt động; chỉ cài Java runtime là chưa đủ. Kiểm tra Java mà Maven sử dụng trong kết quả `mvn -version`.
+~~~powershell
+& $mvn "-Dmaven.repo.local=$repo" -pl order-service '-Dtest=OrderServiceTests' test
+~~~
 
-## Lấy mã nguồn và mở đúng nhánh
+## Integration/API và vertical-slice tests
 
-Nếu chưa có repository trên máy:
+Docker phải hoạt động để Testcontainers chạy PostgreSQL 16. Lệnh focused suite dưới đây đã chạy: 36 tests, 0 failures, 0 errors, 0 skipped.
 
-```powershell
-git clone --branch feature/setup-01-skeleton https://github.com/nguyenthihuyenlinh236/SE2026-T02-Resilient-Order-Workflow.git
-cd SE2026-T02-Resilient-Order-Workflow
-```
+~~~powershell
+& $mvn "-Dmaven.repo.local=$repo" -pl order-service '-Dtest=OrderDispatchIntegrationTests,SagaRepositoryIntegrationTests,OrderIntegrationTests,OrderStateMachineIntegrationTests' test
+~~~
 
-Nếu đã có repository, mở terminal tại thư mục đó:
+T03 sau implementation:
 
-```powershell
-git status
-git fetch origin
-git switch feature/setup-01-skeleton
-git pull --ff-only origin feature/setup-01-skeleton
-```
+~~~powershell
+& $mvn "-Dmaven.repo.local=$repo" -pl order-service '-Dtest=OrderDispatchIntegrationTests#postDispatchesPersistedReserveIntentToInventory' test
+~~~
 
-Nếu có thay đổi chưa commit hoặc Git báo không thể chuyển/cập nhật nhánh, hãy lưu và xử lý các thay đổi trước; không dùng reset/clean để xóa chúng. Trong VS Code, chọn **File → Open Folder** để mở thư mục gốc có `pom.xml` và `docker-compose.yml`.
+T03 trước implementation là behavioral failure được ghi ở evidence/part3_test_first_execution.md. Hai test source hiện tại gồm OrderDispatchIntegrationTests.java và OrderIntegrationTests.java; tên test T03 đã được chuyển sang class dispatch để cách ly worker context.
 
-## Chạy và kiểm tra
+## Mutation experiment
 
-Tại thư mục gốc repository, khởi động PostgreSQL và RabbitMQ:
+Mutation dùng test method T03 nêu trên. Experiment đã đổi mapping thật của Inventory response field status, chạy test để quan sát FAIL, khôi phục source rồi chạy clean test để xác nhận PASS. Không giữ mutation trong code. Chi tiết mutation, hash bản gốc, assertion và lệnh thực tế trong evidence/part4_mutation_testing.md.
 
-```powershell
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-docker compose up -d --wait
-docker compose ps
-```
+## Coverage và performance harness
 
-Có thể bỏ qua bước tạo `.env` nếu dùng giá trị mặc định. Lệnh trên giữ nguyên `.env` đã có. Compose tự đọc `.env`; các giá trị trong `.env.example` chỉ dành cho phát triển cục bộ, không dùng trong production. `docker compose ps` cần hiển thị cả hai container ở trạng thái `healthy`.
+JaCoCo 0.8.12 chạy one-off; chưa được cấu hình thường trực trong POM. Lệnh, run và số liệu ở evidence/part4_coverage_flaky_review.md.
 
-Biên dịch và chạy smoke test ứng dụng/HTTP:
+Harness performance 60 tasks, đo riêng POST acceptance và GET status:
 
-```powershell
-mvn clean verify
-```
+~~~powershell
+& $mvn "-Dmaven.repo.local=$repo" -pl order-service '-Dtest=OrderPerformanceHarnessTest' test
+~~~
 
-Mở ba terminal riêng tại thư mục gốc và chạy từng service:
+Một burst thực tế đo POST p95 1,658 ms. Harness đặt order.worker.enabled=false; không đo Inventory dispatch hoặc Order completion. Kết quả và giới hạn tại evidence/part4_performance_test.md. Không bật worker runtime trong khi expiry/late-Reserve coordination chưa được giải quyết.
 
-```powershell
-mvn -pl order-service spring-boot:run
-```
+## Database và service configuration
 
-```powershell
-mvn -pl inventory-service spring-boot:run
-```
+Application YAML cấu hình Order Service mặc định:
 
-```powershell
-mvn -pl payment-service spring-boot:run
-```
+| Thành phần | Cấu hình mặc định |
+|---|---|
+| Order HTTP | port 8081 (ORDER_SERVICE_PORT) |
+| PostgreSQL | localhost:5432, database order_db, user workflow; password mặc định workflow_local |
+| RabbitMQ | localhost:5672, user workflow; password mặc định workflow_local |
+| Flyway | Chạy migration khi Order Service khởi động |
+| Worker Reserve | Không khởi tạo mặc định; integration test bật worker với Inventory fixture riêng |
 
-Spring Boot khi chạy qua Maven đọc biến môi trường của tiến trình, không tự đọc file `.env`. Giá trị mặc định trong cấu hình service khớp với `.env.example`. Nếu đổi thông tin kết nối hoặc cổng, hãy đặt các biến tương ứng trong terminal chạy service.
+Docker Compose khai báo PostgreSQL 16 và RabbitMQ 4-management; PostgreSQL init script tạo order_db, inventory_db, payment_db khi data volume mới. Các biến POSTGRES_*, RABBITMQ_* và service port được định nghĩa trong .env.example/application.yml. Testcontainers tự cấp PostgreSQL test database; RabbitMQ health indicator bị tắt trong các Order test liên quan. README này không ghi nhận việc khởi động Compose như một phần của các test trên.
 
-Giữ ba terminal mở và đợi mỗi service báo `Started ...Application`. Mở terminal thứ tư để chạy các lệnh kiểm tra bên dưới. Frontend hiện chỉ là placeholder; chưa có giao diện, API đặt hàng hoặc bước chạy `npm`.
+## Evidence và báo cáo
 
-Khi cả ba service và hạ tầng đang chạy, kiểm tra endpoint:
+- Specification/plan: evidence/part1_*.md.
+- Test strategy: evidence/part2_test_strategy.md.
+- Contract, test-first, implementation: evidence/part3_*.md.
+- Mutation, coverage/flaky review, performance: evidence/part4_*.md.
+- Traceability, AI Usage Log, reflection: evidence/part5_*.md.
+- Báo cáo nộp bài Markdown để tự chuyển PDF: BT3_23001866_VT-006.md.
 
-```powershell
-Invoke-RestMethod http://localhost:8081/actuator/health
-Invoke-RestMethod http://localhost:8082/actuator/health
-Invoke-RestMethod http://localhost:8083/actuator/health
-```
-
-Cả ba endpoint cần trả về `status: UP`. Health indicator của PostgreSQL và RabbitMQ được bật khi chạy service, nên trạng thái `UP` xác nhận các kết nối đó đang khỏe. Smoke test tự động tắt hai indicator này để kiểm tra HTTP độc lập với hạ tầng; bước kiểm tra runtime phía trên xác minh kết nối thực tế.
-
-## Dừng ứng dụng
-
-Nhấn `Ctrl+C` trong từng terminal chạy service để dừng ba ứng dụng Spring Boot. Sau đó, tại thư mục gốc repository, dừng hạ tầng và giữ nguyên container/volume để dùng tiếp:
-
-```powershell
-docker compose stop
-```
-
-Lần chạy sau dùng lại `docker compose up -d --wait` rồi chạy ba service như trên. Nếu muốn gỡ container và network của Compose, vẫn giữ dữ liệu trong named volume:
-
-```powershell
-docker compose down
-```
-
-Lưu ý: script tạo database của PostgreSQL chỉ chạy khi volume dữ liệu được khởi tạo lần đầu. Nếu dùng volume cũ chưa có ba database, hãy kiểm tra dữ liệu local trước khi quyết định tạo lại volume; lệnh `docker compose down -v` sẽ xóa dữ liệu trong volume.
-
-## Cấu hình
-
-Compose đọc các biến trong `.env`. Khi chạy service bằng Maven, đặt biến kết nối trong môi trường của terminal nếu cần ghi đè giá trị mặc định. Danh sách biến và cổng nằm trong `.env.example`.
-
-## Xử lý lỗi thường gặp
-
-### Không tìm thấy `mvn`, `java` hoặc `javac`
-
-Cài JDK 17 và Maven 3.9+, cấu hình `JAVA_HOME` trỏ tới thư mục JDK và thêm thư mục `bin` của JDK/Maven vào `PATH`. Đóng rồi mở lại terminal/VS Code và chạy lại các lệnh kiểm tra công cụ.
-
-### Docker chưa chạy hoặc container không healthy
-
-Mở Docker Desktop, kiểm tra `docker info`, rồi xem trạng thái và log:
-
-```powershell
-docker compose ps -a
-docker compose logs --tail 100 postgres rabbitmq
-```
-
-### Cổng đang được sử dụng
-
-Kiểm tra các cổng trên Windows:
-
-```powershell
-Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in 5432,5672,15672,8081,8082,8083 } | Select-Object LocalAddress,LocalPort,OwningProcess
-```
-
-Xác định ứng dụng đang chiếm cổng trước khi dừng nó. Nếu đổi cổng PostgreSQL/RabbitMQ trong `.env`, đặt cùng biến `POSTGRES_PORT`/`RABBITMQ_PORT` trong **cả ba terminal service** trước khi chạy Maven. Ví dụ đổi PostgreSQL sang `5433`: đặt `POSTGRES_PORT=5433` trong `.env`, chạy lại `docker compose up -d --wait`, rồi chạy `$env:POSTGRES_PORT = "5433"` trong mỗi terminal service. Với cổng HTTP, dùng `ORDER_SERVICE_PORT`, `INVENTORY_SERVICE_PORT`, `PAYMENT_SERVICE_PORT` và sửa URL kiểm tra tương ứng.
-
-### PostgreSQL báo sai mật khẩu hoặc thiếu database
-
-Kiểm tra service đang kết nối đúng PostgreSQL của Compose, thay vì một PostgreSQL khác trên máy. Đối chiếu các biến `POSTGRES_*` trong terminal service với cấu hình `.env`. Đổi `POSTGRES_USER`/`POSTGRES_PASSWORD` trong `.env` không cập nhật tài khoản đã tồn tại trong volume; cần dùng thông tin của database hiện có hoặc cập nhật tài khoản bằng quyền quản trị phù hợp. Không xóa volume để thử sửa lỗi khi chưa sao lưu dữ liệu.
-
-Nếu log báo thiếu `order_db`, `inventory_db` hoặc `payment_db`, script khởi tạo có thể chưa chạy vì volume đã tồn tại. Kiểm tra danh sách database trước (thay `workflow` nếu dùng tài khoản khác):
-
-```powershell
-docker compose exec postgres psql -U workflow -d postgres -c "\l"
-```
-
-Chỉ tạo database còn thiếu sau khi kiểm tra. Nếu dùng Linux và log báo `Permission denied` khi đọc `01-databases.sql`, chạy `chmod a+r infra/postgres/init-databases.sql` trên máy host. Nếu lần khởi tạo đã dừng giữa chừng, sửa quyền không tự chạy lại script trên volume cũ; cần kiểm tra và tạo các database còn thiếu.
-
-### Health endpoint không trả `UP`
-
-Kiểm tra container và log bằng các lệnh trên, sau đó xem terminal của service bị lỗi. `Connection refused` thường cho thấy service/hạ tầng chưa chạy hoặc sai cổng. Nếu Maven kết thúc bằng `BUILD FAILURE`, tìm `APPLICATION FAILED TO START` và `Caused by:` phía trên để xác định nguyên nhân; dòng `exit code: 1` chỉ là thông báo kết thúc.
-
-## Continuous Integration (CI)
-
-Dự án sử dụng GitHub Actions để tự động build và chạy kiểm thử Maven khi mở hoặc cập nhật Pull Request vào `dev` hoặc `main`.
-
-**Các nhánh feature tạo PR vào `dev`. Không làm việc trực tiếp trên `main`.**
-
-### Quy trình kiểm tra
-
-Workflow được cấu hình tại `.github/workflows/ci.yml`:
-
-1. Lấy mã nguồn của PR.
-2. Thiết lập môi trường Ubuntu và JDK 17.
-3. Khôi phục cache dependencies Maven nếu có.
-4. Chạy lệnh tại thư mục gốc:
-
-```bash
-mvn -B clean verify
-```
-
-Maven build và chạy kiểm thử cho cả ba module:
-
-- `order-service`
-- `inventory-service`
-- `payment-service`
-
-Nếu bất kỳ module nào build hoặc kiểm thử thất bại, CI báo thất bại.
-
-### Xem kết quả và xử lý lỗi
-
-1. Mở PR trên GitHub.
-2. Chọn tab **Checks**.
-3. Mở job **Maven build and test**.
-4. Xem log của bước **Build and test all modules**.
-
-Có thể xem lịch sử chạy trong tab **Actions**, workflow **Maven CI**.
-
-- **Check xanh:** các bước kiểm tra đã chạy thành công.
-- **Check đỏ:** có bước thất bại; đọc log để xác định module, test hoặc cấu hình gây lỗi.
-
-Khi CI thất bại:
-
-1. Đọc thông báo lỗi đầu tiên có liên quan trong log.
-2. Sửa trên nhánh feature của PR.
-3. Chạy lại `mvn -B clean verify` trên máy.
-4. Commit và push lên cùng nhánh; CI sẽ tự chạy lại.
-
-Không bỏ qua test hoặc vô hiệu hóa kiểm tra chỉ để làm CI xanh.
-
-### Phạm vi kiểm thử
-
-CI này kiểm tra khả năng build và các bài kiểm thử Maven hiện có. Các smoke test của skeleton không yêu cầu PostgreSQL và RabbitMQ đang chạy.
-
-**CI xanh chưa chứng minh các service kết nối được hạ tầng thực tế.** Kiểm thử tích hợp cần khởi động PostgreSQL, RabbitMQ và các service, sau đó xác minh kết nối và `/actuator/health` theo hướng dẫn chạy local.
-
-Workflow không tự deploy ứng dụng.
-
-### Điều kiện merge
-
-PR cần được review và đáp ứng các quy tắc bảo vệ nhánh trước khi merge vào `dev`.
-
-Sau khi CI hoạt động ổn định, quản trị viên cấu hình ruleset yêu cầu status check **Maven build and test** thành công trước khi merge. Việc thêm workflow không tự bật quy tắc này.
-
-Kết quả CI hỗ trợ review, không thay thế việc kiểm tra mã nguồn và đối chiếu yêu cầu của issue.
+\n

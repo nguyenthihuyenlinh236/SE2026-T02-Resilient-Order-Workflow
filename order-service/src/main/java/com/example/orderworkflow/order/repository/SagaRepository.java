@@ -20,6 +20,76 @@ public class SagaRepository {
 
     public SagaRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
 
+    public record ClaimedReserve(UUID stepId, UUID sagaId, String orderId, String idempotencyKey,
+            String requestPayload, UUID claimToken, UUID attemptId, int attemptCount) { }
+
+    /** Atomically claims one due RESERVE step and starts its durable SEND attempt. */
+    @Transactional
+    public Optional<ClaimedReserve> claimReserve(long leaseMillis) {
+        UUID token = UUID.randomUUID();
+        var rows = jdbc.query("""
+                    WITH candidate AS (
+                        SELECT st.step_id
+                        FROM saga_steps st
+                        JOIN sagas s ON s.saga_id=st.saga_id
+                        JOIN orders o ON o.order_id=s.order_id
+                        WHERE st.operation='RESERVE'
+                          AND s.status='RUNNING' AND s.branch='FORWARD'
+                          AND o.status='PENDING'
+                          AND ((st.status IN ('NOT_STARTED','UNKNOWN')
+                                AND (st.next_attempt_at IS NULL OR st.next_attempt_at<=clock_timestamp()))
+                               OR (st.status='IN_PROGRESS' AND st.lease_until<=clock_timestamp()))
+                        ORDER BY st.next_attempt_at NULLS FIRST,st.created_at,st.step_id
+                        FOR UPDATE OF st SKIP LOCKED
+                        LIMIT 1
+                    ), claimed AS (
+                        UPDATE saga_steps st SET status='IN_PROGRESS',failure_class='NONE',
+                            claim_token=?,claimed_at=clock_timestamp(),
+                            lease_until=clock_timestamp()+(? * interval '1 millisecond'),
+                            attempt_count=attempt_count+1,next_attempt_at=NULL,last_error=NULL,
+                            updated_at=clock_timestamp()
+                        FROM candidate c WHERE st.step_id=c.step_id
+                        RETURNING st.step_id,st.saga_id,st.idempotency_key,st.request_payload::text,
+                                  st.claim_token,st.attempt_count
+                    )
+                    SELECT c.step_id,c.saga_id,s.order_id,c.idempotency_key,c.request_payload,
+                           c.claim_token,c.attempt_count
+                    FROM claimed c JOIN sagas s ON s.saga_id=c.saga_id
+                    """, (rs, row) -> {
+                UUID stepId = rs.getObject("step_id", UUID.class);
+                int sequence = rs.getInt("attempt_count");
+                return new ClaimedReserve(stepId, rs.getObject("saga_id", UUID.class), rs.getString("order_id"),
+                        rs.getString("idempotency_key"), rs.getString("request_payload"),
+                        rs.getObject("claim_token", UUID.class), null, sequence);
+            }, token, leaseMillis);
+        if (rows.isEmpty()) return Optional.empty();
+        var claimed = rows.get(0);
+        UUID attemptId = UUID.randomUUID();
+        jdbc.update("INSERT INTO saga_attempts(attempt_id,step_id,kind,sequence_no) VALUES (?,?,'SEND',?)",
+                attemptId, claimed.stepId(), claimed.attemptCount());
+        return Optional.of(new ClaimedReserve(claimed.stepId(), claimed.sagaId(), claimed.orderId(),
+                claimed.idempotencyKey(), claimed.requestPayload(), claimed.claimToken(), attemptId,
+                claimed.attemptCount()));
+    }
+
+    /** Persists a worker result only while its claim token still owns the row. */
+    public int finishReserveClaim(ClaimedReserve claim, String status, String failureClass,
+            String resultPayload, String error, long retryDelayMillis) {
+        return jdbc.update("UPDATE saga_steps SET status=?,failure_class=?,result_payload=CAST(? AS jsonb),"
+                + "unknown_since=CASE WHEN ?='UNKNOWN' THEN COALESCE(unknown_since,clock_timestamp()) ELSE NULL END,"
+                + "next_attempt_at=CASE WHEN ?='UNKNOWN' THEN clock_timestamp()+(? * interval '1 millisecond') ELSE NULL END,"
+                + "last_error=?,claim_token=NULL,claimed_at=NULL,lease_until=NULL,updated_at=clock_timestamp(),"
+                + "completed_at=CASE WHEN ? IN ('SUCCEEDED','FAILED') THEN clock_timestamp() ELSE NULL END "
+                + "WHERE step_id=? AND status='IN_PROGRESS' AND claim_token=?",
+                status, failureClass, resultPayload, status, status, retryDelayMillis, error, status,
+                claim.stepId(), claim.claimToken());
+    }
+
+    public void finishSendAttempt(ClaimedReserve claim, String outcome, String errorCode, String message) {
+        jdbc.update("UPDATE saga_attempts SET finished_at=clock_timestamp(),outcome=?,error_code=?,error_message=? "
+                + "WHERE attempt_id=? AND finished_at IS NULL", outcome, errorCode, message, claim.attemptId());
+    }
+
     public UUID insertSaga(String orderId) {
         UUID id = UUID.randomUUID();
         jdbc.update("INSERT INTO sagas(saga_id,order_id,status,branch,current_operation) "

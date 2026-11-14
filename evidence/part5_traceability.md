@@ -1,0 +1,30 @@
+# BT3 – APP-08 – VT-006: Traceability
+
+**Nguồn yêu cầu:** `evidence/part1_specification.md` (AC-01–AC-05 và constraints); risk IDs R1–R7 từ `evidence/part2_test_strategy.md`. Test results bên dưới lấy từ Surefire/evidence Part 3–4, không lấy test plan làm bằng chứng PASS.
+
+| Acceptance Criteria/Risk | Test Case | Test File | Evidence/Result | Status |
+|---|---|---|---|---|
+| AC-01 tiếp nhận: `POST /api/v1/orders` trả 202, `orderId`, `PENDING`; intent được lưu | `createsPendingOrderWithDatabaseTtl`; T03 `postDispatchesPersistedReserveIntentToInventory` | `OrderIntegrationTests.java`; `OrderDispatchIntegrationTests.java` | 13 Order integration tests và 3 dispatch tests PASS trong run 36-test; T03 quan sát request từ fixture và intent snapshot | COVERED (slice acceptance and dispatch) |
+| AC-02 query Order status đã lưu cho đúng ID | `getsExistingOrderAndReportsMissingOrInvalidIdentifiers`; T03/dispatch rejection GET | `OrderIntegrationTests.java`; `OrderDispatchIntegrationTests.java` | GET current/missing/malformed cases thuộc 13 tests PASS; rejection test GET thấy `FAILED`; status Reserve success vẫn `PENDING` | COVERED for current Order status; step progress is NOT COVERED by API contract |
+| AC-03 replay cùng key/payload không tạo Order/Saga/step thứ hai; conflict và client scope | `sameKeyAndNormalizedPayloadReplaysOriginalOrderWithoutExtendingTtl`; `sameKeyWithDifferentNormalizedPayloadIsConflict`; `sameKeyIsScopedByTechnicalClientIdNotCustomerId`; `concurrentRequestsWithSameKeyCreateOneOrder` | `OrderIntegrationTests.java` | 13 integration tests PASS; assertions cover logical identity/count and conflict/scope | COVERED |
+| AC-04 / R2 retry sau timeout/lost response không tạo business effect lặp; idempotency key ổn định | `lostReserveResponseRemainsUnknownAndDoesNotFailOrder`; T03 checks `reserve:{orderId}:v1` | `OrderDispatchIntegrationTests.java` | UNKNOWN and stable request key are exercised. Test does not assert a second send, identical replay/effect count, query reconciliation, retry limit or backoff | PARTIALLY COVERED; replay/reconciliation NOT COVERED |
+| AC-04 / R3 concurrent claim, stale worker fencing | `claimsDueStepForSingleOwnerAndFencesStaleToken` | `SagaRepositoryIntegrationTests.java` | PostgreSQL test: one owner, expired lease takeover/new token, stale-token update rejected; 1 test PASS. Does not establish sustained multi-worker load or remote-call overlap | COVERED for atomic claim/fence cases tested |
+| AC-04/05 outcome classification: verified RESERVED vs REJECTED vs UNKNOWN | `postDispatchesPersistedReserveIntentToInventory`; `verifiedRejectionCompletesGuardedFailureBranch`; `lostReserveResponseRemainsUnknownAndDoesNotFailOrder` | `OrderDispatchIntegrationTests.java` | 3 dispatch tests PASS. RESERVED persists verified/step SUCCEEDED/Order PENDING; REJECTED ends Order FAILED after committed transaction; dropped response remains UNKNOWN/unverified/PENDING | COVERED for these three observed paths |
+| AC-05 no false final outcome; Outbox/guarded transitions | `verifiedRejectionCompletesGuardedFailureBranch`; state machine tests `unknownIsNotFailureAndBlocksExpiration`, `confirmationRequiresVerifiedEvidenceAndWritesOneOutboxEvent`, `outboxFailureRollsBackTerminalOrderAndSaga` | `OrderDispatchIntegrationTests.java`; `OrderStateMachineIntegrationTests.java` | Dispatch + state machine included in 36-test PASS; rejection GET observes committed `FAILED`, not transient `COMPENSATING` | COVERED for listed guards; event publisher/delivery NOT COVERED |
+| R4 response-field mapping | Dispatch checks public request body/key and persisted reservation/step/Order; GET contract tests; mutation maps Inventory `status` to nonexistent JSON field | `OrderIntegrationTests.java`; `OrderDispatchIntegrationTests.java` | Part 4 mutation failed at expected `SUCCEEDED` vs actual `UNKNOWN`; restored source hash then clean focused test PASS. No blanket assertion of every OrderResponse field against DB | PARTIALLY COVERED; see mutation evidence |
+| R5 concurrency / duplicate creation | `concurrentRequestsWithSameKeyCreateOneOrder`; Saga claim/fencing test | `OrderIntegrationTests.java`; `SagaRepositoryIntegrationTests.java` | Both in actual passing suites; static flake review says latch does not prove overlapping SQL lock execution | COVERED for observed assertions; stress/repeated overlap NOT COVERED |
+| AC-01 durable acceptance / NFR restart recovery | No test in current test tree asserts service restart then worker resumes without duplicate | — | No restart/resume execution evidence found | NOT COVERED |
+| AC-05 notification/event replay has no duplicate consumer effect | No Outbox publisher/Notification consumer test in current Order test tree | — | Outbox persistence is tested, downstream delivery/dedup is not implemented/verified in this slice | NOT COVERED |
+| 60 concurrent tasks / p95 acceptance ≤ 2.0 s | `sixtyConcurrentTasksMeasurePostAcceptanceAndGetStatus` | `OrderPerformanceHarnessTest.java` | One local burst: 60 POST + 60 GET, 120/120 successful; POST p95 1,658 ms. Worker disabled; terminal Order completion not measured | MEASURED once for acceptance/query only; not a production capacity claim |
+
+## Interpretation
+
+The 36-test result is the Part 3 focused regression run (13 Order integration, 3 dispatch, 1 claim/fencing, 19 state-machine). The Part 4 focused mutation restoration test and one-task-class performance run are additional evidence; do not add their test counts to claim a single larger suite. A PASS establishes only the assertions and environment named in the relevant record. Step progress is persisted internally, but Order GET exposes Order status only. Full workflow completion, worker enablement safety, repeatable retry/reconciliation, restart recovery, and notification delivery remain unproven.
+
+## Evidence files
+
+- `evidence/part1_specification.md`
+- `evidence/part2_test_strategy.md`
+- `evidence/part3_test_T03.md`, `evidence/part3_test_first_execution.md`
+- `evidence/part3_implementation.md`
+- `evidence/part4_mutation_testing.md`, `evidence/part4_coverage_flaky_review.md`, `evidence/part4_performance_test.md`
