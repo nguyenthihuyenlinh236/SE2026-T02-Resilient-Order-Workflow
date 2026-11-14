@@ -65,16 +65,18 @@ public class OrderStateRepository {
                 + "AND captured_amount=total_amount AND captured_currency=currency", orderId);
     }
 
-    public int startCompensation(String orderId) {
-        return jdbc.update("UPDATE orders SET status='COMPENSATING',updated_at=clock_timestamp(),version=version+1 "
-                + "WHERE order_id=? AND status='PENDING' AND ((reservation_status='REJECTED' AND reservation_verified) "
-                + "OR (capture_status='FAILED' AND capture_verified))", orderId);
+    public int startCompensation(String orderId, String reasonCode) {
+        return jdbc.update("UPDATE orders SET status='COMPENSATING',failure_reason_code=?,"
+                + "updated_at=clock_timestamp(),version=version+1 WHERE order_id=? AND status='PENDING' "
+                + "AND ((?='INVENTORY_REJECTED' AND reservation_status='REJECTED' AND reservation_verified) "
+                + "OR (?='PAYMENT_FAILED' AND capture_status='FAILED' AND capture_verified))",
+                reasonCode, orderId, reasonCode, reasonCode);
     }
 
     public int markCompensationFailed(String orderId) {
         return jdbc.update("UPDATE orders SET status=CASE WHEN status='COMPENSATING' THEN 'COMPENSATION_FAILED' "
                 + "ELSE status END,updated_at=clock_timestamp(),version=version+1 "
-                + "WHERE order_id=? AND status IN ('COMPENSATING','EXPIRING') AND EXISTS (SELECT 1 FROM sagas s "
+                + "WHERE order_id=? AND status IN ('COMPENSATING','EXPIRING','EXPIRED') AND EXISTS (SELECT 1 FROM sagas s "
                 + "JOIN saga_steps st ON st.saga_id=s.saga_id WHERE s.order_id=orders.order_id "
                 + "AND s.status='COMPENSATING' AND st.operation IN ('RELEASE','REFUND') "
                 + "AND st.status='IN_PROGRESS' AND st.failure_class='TRANSIENT' "
@@ -84,7 +86,7 @@ public class OrderStateRepository {
     public int retryCompensation(String orderId) {
         return jdbc.update("UPDATE orders SET status=CASE WHEN status='COMPENSATION_FAILED' THEN 'COMPENSATING' "
                 + "ELSE status END,updated_at=clock_timestamp(),version=version+1 "
-                + "WHERE order_id=? AND status IN ('COMPENSATION_FAILED','EXPIRING') AND EXISTS (SELECT 1 FROM sagas s "
+                + "WHERE order_id=? AND status IN ('COMPENSATION_FAILED','EXPIRING','EXPIRED') AND EXISTS (SELECT 1 FROM sagas s "
                 + "JOIN saga_steps st ON st.saga_id=s.saga_id WHERE s.order_id=orders.order_id "
                 + "AND s.status='COMPENSATION_FAILED' AND st.operation IN ('RELEASE','REFUND') "
                 + "AND st.status='IN_PROGRESS' AND st.failure_class='TRANSIENT' "
@@ -95,6 +97,7 @@ public class OrderStateRepository {
     public int fail(String orderId) {
         return jdbc.update("UPDATE orders SET status='FAILED',failed_at=clock_timestamp(),terminal_at=clock_timestamp(),"
                 + "updated_at=clock_timestamp(),version=version+1 WHERE order_id=? AND status='COMPENSATING' "
+                + "AND failure_reason_code IS NOT NULL "
                 + "AND reservation_verified AND reservation_status IN ('RELEASED','NOT_CREATED','REJECTED') "
                 + "AND capture_status NOT IN ('UNKNOWN','IN_PROGRESS') AND refund_status NOT IN ('UNKNOWN','IN_PROGRESS') "
                 + "AND (capture_status<>'SUCCEEDED' OR (refund_status='SUCCEEDED' AND refund_verified))", orderId);
@@ -157,8 +160,54 @@ public class OrderStateRepository {
         if (changed != 1) throw new IllegalStateException("Saga status could not be updated");
     }
 
-    public void insertOutbox(UUID eventId, String type, String orderId, String payload, String hash) {
-        jdbc.update("INSERT INTO outbox_events(event_id,event_type,aggregate_id,payload,payload_hash) "
-                + "VALUES (?,?,?,CAST(? AS jsonb),?)", eventId, type, orderId, payload, hash);
+    public EventData eventData(String orderId, String timestampColumn) {
+        if (!List.of("confirmed_at", "failed_at", "expired_at").contains(timestampColumn))
+            throw new IllegalArgumentException("Unsupported event timestamp");
+        return jdbc.queryForObject("SELECT o.correlation_id,o.failure_reason_code,o." + timestampColumn
+                + ",(SELECT st.command_id FROM sagas s JOIN saga_steps st ON st.saga_id=s.saga_id "
+                + "WHERE s.order_id=o.order_id ORDER BY st.updated_at DESC,st.created_at DESC LIMIT 1) command_id "
+                + "FROM orders o WHERE o.order_id=?", (rs, n) -> new EventData(rs.getString("correlation_id"),
+                        rs.getString("failure_reason_code"), rs.getTimestamp(timestampColumn).toInstant(),
+                        rs.getObject("command_id", UUID.class)), orderId);
     }
+
+    public void insertOutbox(UUID eventId, String type, String orderId, UUID commandId,
+            String correlationId, java.time.Instant occurredAt, String payload, String hash) {
+        jdbc.update("INSERT INTO outbox_events(event_id,event_type,aggregate_id,command_id,correlation_id,"
+                + "occurred_at,payload,payload_hash) VALUES (?,?,?,?,?,?,CAST(? AS jsonb),?)",
+                eventId, type, orderId, commandId, correlationId,
+                java.sql.Timestamp.from(occurredAt), payload, hash);
+    }
+
+    public void reopenForLateCapture(String orderId) {
+        jdbc.update("UPDATE sagas s SET status='COMPENSATING',branch='EXPIRATION',current_operation='REFUND',"
+                + "completed_at=NULL,updated_at=clock_timestamp(),version=s.version+1 FROM orders o "
+                + "WHERE s.order_id=o.order_id AND o.order_id=? AND o.status='EXPIRED' "
+                + "AND o.capture_status='SUCCEEDED' AND o.capture_verified "
+                + "AND NOT (o.refund_status='SUCCEEDED' AND o.refund_verified) AND s.status='COMPLETED'", orderId);
+        jdbc.update("WITH source AS (SELECT s.saga_id,o.order_id,o.payment_id,o.correlation_id,gen_random_uuid() command_id "
+                + "FROM sagas s JOIN orders o ON o.order_id=s.order_id WHERE o.order_id=? AND o.status='EXPIRED' "
+                + "AND o.capture_status='SUCCEEDED' AND o.capture_verified AND s.status='COMPENSATING'), prepared AS ("
+                + "SELECT source.*,jsonb_build_object('commandId',command_id::text,'orderId',order_id,"
+                + "'reason','LATE_CAPTURE','correlationId',correlation_id) body FROM source) "
+                + "INSERT INTO saga_steps(step_id,saga_id,operation,command_id,correlation_id,idempotency_key,"
+                + "saga_payload,request_payload,payload_hash,status) SELECT gen_random_uuid(),saga_id,'REFUND',command_id,"
+                + "correlation_id,'payment:refund:'||order_id||':'||payment_id||':v1',"
+                + "jsonb_build_object('schemaVersion',1,'paymentRequest',body),body,"
+                + "encode(sha256(convert_to(body::text,'UTF8')),'hex'),'NOT_STARTED' FROM prepared "
+                + "ON CONFLICT (saga_id,operation) DO NOTHING", orderId);
+    }
+
+    public void completeLateRefund(String orderId) {
+        jdbc.update("UPDATE saga_steps st SET status='SUCCEEDED',failure_class='NONE',last_error=NULL,"
+                + "completed_at=COALESCE(st.completed_at,clock_timestamp()),updated_at=clock_timestamp() FROM sagas s,orders o "
+                + "WHERE st.saga_id=s.saga_id AND s.order_id=o.order_id AND o.order_id=? AND o.status='EXPIRED' "
+                + "AND st.operation='REFUND' AND o.refund_status='SUCCEEDED' AND o.refund_verified ", orderId);
+        jdbc.update("UPDATE sagas s SET status='COMPLETED',current_operation=NULL,completed_at=clock_timestamp(),"
+                + "updated_at=clock_timestamp(),version=s.version+1 FROM orders o WHERE s.order_id=o.order_id "
+                + "AND o.order_id=? AND o.status='EXPIRED' AND o.refund_status='SUCCEEDED' AND o.refund_verified "
+                + "AND s.status<>'COMPLETED'", orderId);
+    }
+
+    public record EventData(String correlationId, String reasonCode, java.time.Instant occurredAt, UUID commandId) { }
 }

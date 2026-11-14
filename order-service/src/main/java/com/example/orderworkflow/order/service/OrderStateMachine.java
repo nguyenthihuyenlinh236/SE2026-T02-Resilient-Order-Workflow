@@ -5,7 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.HexFormat;
-import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.UUID;
 
 import org.springframework.stereotype.Service;
@@ -53,6 +53,7 @@ public class OrderStateMachine {
             throw new IllegalArgumentException("UNKNOWN capture cannot be verified");
         if (repository.saveCapture(orderId, resultOrderId, paymentId, status, verified, amount, currency) != 1)
             throw new IllegalStateException("Capture result is mismatched or stale");
+        if (verified && "SUCCEEDED".equals(status)) repository.reopenForLateCapture(orderId);
     }
 
     @Transactional
@@ -64,14 +65,16 @@ public class OrderStateMachine {
             throw new IllegalArgumentException("UNKNOWN refund cannot be verified");
         if (repository.saveRefund(orderId, refundId, status, verified) != 1)
             throw new IllegalStateException("Refund result is stale");
+        if (verified && "SUCCEEDED".equals(status)) repository.completeLateRefund(orderId);
     }
 
     @Transactional
     public Transition confirm(String orderId) { return terminal(orderId, "OrderConfirmed", repository.confirm(orderId)); }
 
     @Transactional
-    public Transition startCompensation(String orderId) {
-        if (repository.startCompensation(orderId) == 0) return rejected(orderId);
+    public Transition startCompensation(String orderId, String reasonCode) {
+        require(reasonCode, "INVENTORY_REJECTED", "PAYMENT_FAILED");
+        if (repository.startCompensation(orderId, reasonCode) == 0) return rejected(orderId);
         repository.updateSagaBranch(orderId, "COMPENSATING", "FAILURE");
         return Transition.APPLIED;
     }
@@ -117,11 +120,38 @@ public class OrderStateMachine {
 
     private Transition terminal(String orderId, String eventType, int changed) {
         if (changed == 0) return rejected(orderId);
+        String status = switch (eventType) {
+            case "OrderConfirmed" -> "CONFIRMED";
+            case "OrderFailed" -> "FAILED";
+            case "OrderExpired" -> "EXPIRED";
+            default -> throw new IllegalArgumentException("Unsupported event type");
+        };
+        String timestampField = switch (eventType) {
+            case "OrderConfirmed" -> "confirmedAt";
+            case "OrderFailed" -> "failedAt";
+            case "OrderExpired" -> "expiredAt";
+            default -> throw new IllegalArgumentException("Unsupported event type");
+        };
+        var event = repository.eventData(orderId, switch (eventType) {
+            case "OrderConfirmed" -> "confirmed_at";
+            case "OrderFailed" -> "failed_at";
+            case "OrderExpired" -> "expired_at";
+            default -> throw new IllegalArgumentException("Unsupported event type");
+        });
         repository.completeSaga(orderId);
         String payload;
-        try { payload = json.writeValueAsString(Map.of("orderId", orderId, "eventType", eventType)); }
+        var body = new LinkedHashMap<String, Object>();
+        body.put("orderId", orderId);
+        body.put("status", status);
+        if ("OrderFailed".equals(eventType)) {
+            if (event.reasonCode() == null) throw new IllegalStateException("OrderFailed reason is missing");
+            body.put("reasonCode", event.reasonCode());
+        }
+        body.put(timestampField, event.occurredAt().toString());
+        try { payload = json.writeValueAsString(body); }
         catch (Exception exception) { throw new IllegalStateException("Outbox payload could not be serialized", exception); }
-        repository.insertOutbox(UUID.randomUUID(), eventType, orderId, payload, sha256(payload));
+        repository.insertOutbox(UUID.randomUUID(), eventType, orderId, event.commandId(),
+                event.correlationId(), event.occurredAt(), payload, sha256(payload));
         return Transition.APPLIED;
     }
 

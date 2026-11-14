@@ -45,7 +45,7 @@ class OrderDemoProfileTests {
     void demoStartsWithFlywaySchemaAndUsableCatalogSeed() {
         assertThat(jdbc.queryForObject("""
                 SELECT count(*) FROM flyway_schema_history WHERE success
-                """, Integer.class)).isEqualTo(4);
+                """, Integer.class)).isEqualTo(5);
         assertThat(jdbc.queryForObject("""
                 SELECT count(*) FROM product_catalog WHERE store_id = 'STORE-001'
                 """, Integer.class)).isEqualTo(3);
