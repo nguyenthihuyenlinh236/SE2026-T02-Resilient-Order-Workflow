@@ -1,0 +1,27 @@
+VT-005 baseline evidence
+Branch: feature/vt005-order-search-lananh
+Commit: ec965d6fad867f9fb9ef756f5650d69731017abb
+Command previously executed: mvn -pl order-service test
+Source: existing Surefire reports from the verified TASK 1 run; this is a report summary, not reconstructed Maven stdout.
+Tests: 16; Failures: 0; Errors: 0; Skipped: 0
+
+Report: com.example.orderworkflow.order.OrderDemoProfileTests.txt; modified: 2026-11-14T14:14:27.4808789+07:00
+-------------------------------------------------------------------------------
+Test set: com.example.orderworkflow.order.OrderDemoProfileTests
+-------------------------------------------------------------------------------
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 24.61 s -- in com.example.orderworkflow.order.OrderDemoProfileTests
+Report: com.example.orderworkflow.order.OrderIntegrationTests.txt; modified: 2026-11-14T14:14:32.9884406+07:00
+-------------------------------------------------------------------------------
+Test set: com.example.orderworkflow.order.OrderIntegrationTests
+-------------------------------------------------------------------------------
+Tests run: 10, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 5.538 s -- in com.example.orderworkflow.order.OrderIntegrationTests
+Report: com.example.orderworkflow.order.OrderServiceApplicationTests.txt; modified: 2026-11-14T14:14:33.7801569+07:00
+-------------------------------------------------------------------------------
+Test set: com.example.orderworkflow.order.OrderServiceApplicationTests
+-------------------------------------------------------------------------------
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.791 s -- in com.example.orderworkflow.order.OrderServiceApplicationTests
+Report: com.example.orderworkflow.order.service.OrderServiceTests.txt; modified: 2026-11-14T14:14:34.4511031+07:00
+-------------------------------------------------------------------------------
+Test set: com.example.orderworkflow.order.service.OrderServiceTests
+-------------------------------------------------------------------------------
+Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.658 s -- in com.example.orderworkflow.order.service.OrderServiceTests

@@ -1,0 +1,2 @@
+# Keep reviewed, non-sensitive evidence logs despite the repository-wide *.log rule.
+!*.log

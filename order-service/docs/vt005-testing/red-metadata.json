@@ -1,0 +1,28 @@
+{
+    "Phase":  "RED",
+    "BaselineCommit":  "ec965d6fad867f9fb9ef756f5650d69731017abb",
+    "Branch":  "feature/vt005-order-search-lananh",
+    "Command":  "mvn -pl order-service -Dtest=OrderSearchIntegrationTests,OrderApiContractTests -Dlogging.level.root=WARN -Dlogging.level.org.springframework=WARN test",
+    "ExitCode":  1,
+    "Tests":  29,
+    "Failures":  27,
+    "Errors":  0,
+    "Skipped":  0,
+    "Passed":  2,
+    "FailureReason":  "Missing collection GET maps HttpRequestMethodNotSupportedException to HTTP 500; assertions expect 200 or 400.",
+    "ProductionFilesModified":  false,
+    "SourceFiles":  [
+                        {
+                            "Path":  "order-service/src/test/java/com/example/orderworkflow/order/OrderSearchFixtures.java",
+                            "Sha256":  "38e9765a687d4db13faa40b1e92c6befdef1d6f3aad19300693254427c1f9fa6"
+                        },
+                        {
+                            "Path":  "order-service/src/test/java/com/example/orderworkflow/order/OrderSearchIntegrationTests.java",
+                            "Sha256":  "b1f8a967bd40fd5a152048de9966e810c775cd4ccff735e00cdda716eb2fc95f"
+                        },
+                        {
+                            "Path":  "order-service/src/test/java/com/example/orderworkflow/order/OrderApiContractTests.java",
+                            "Sha256":  "699b9ff5e8faffe460f710cda3e21b8e3b11dde5163f115d0d8ca778a03b9bbe"
+                        }
+                    ]
+}
