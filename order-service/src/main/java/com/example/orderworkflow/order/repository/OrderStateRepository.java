@@ -19,8 +19,8 @@ public class OrderStateRepository {
         return jdbc.update("UPDATE orders SET reservation_status=?,reservation_verified=?,unknown_operation=?,"
                 + "updated_at=clock_timestamp(),version=version+1 WHERE order_id=? "
                 + "AND status NOT IN ('CONFIRMED','FAILED','EXPIRED') "
-                + "AND NOT (reservation_verified AND reservation_status IN ('RELEASED','REJECTED'))",
-                status, verified, unknownOperation, orderId);
+                + "AND (NOT reservation_verified OR (reservation_status='RESERVED' AND ?='RELEASED' AND ?))",
+                status, verified, unknownOperation, orderId, status, verified);
     }
 
     public int saveCapture(String orderId, String resultOrderId, String paymentId, String status,
@@ -35,7 +35,7 @@ public class OrderStateRepository {
     public int saveRefund(String orderId, String refundId, String status, boolean verified) {
         return jdbc.update("UPDATE orders SET refund_id=?,refund_status=?,refund_verified=?,"
                 + "updated_at=clock_timestamp(),version=version+1 WHERE order_id=? "
-                + "AND NOT (refund_verified AND refund_status='SUCCEEDED')", refundId, status, verified, orderId);
+                + "AND NOT (refund_verified AND refund_status IN ('SUCCEEDED','FAILED'))", refundId, status, verified, orderId);
     }
 
     public int confirm(String orderId) {
@@ -54,13 +54,21 @@ public class OrderStateRepository {
     }
 
     public int markCompensationFailed(String orderId) {
-        return jdbc.update("UPDATE orders SET status='COMPENSATION_FAILED',updated_at=clock_timestamp(),version=version+1 "
-                + "WHERE order_id=? AND status='COMPENSATING'", orderId);
+        return jdbc.update("UPDATE orders SET status=CASE WHEN status='COMPENSATING' THEN 'COMPENSATION_FAILED' "
+                + "ELSE status END,updated_at=clock_timestamp(),version=version+1 "
+                + "WHERE order_id=? AND status IN ('COMPENSATING','EXPIRING') AND EXISTS (SELECT 1 FROM sagas s "
+                + "JOIN saga_steps st ON st.saga_id=s.saga_id WHERE s.order_id=orders.order_id "
+                + "AND st.operation IN ('RELEASE','REFUND') AND st.status IN ('FAILED','UNKNOWN') "
+                + "AND st.attempt_count>=5)", orderId);
     }
 
     public int retryCompensation(String orderId) {
-        return jdbc.update("UPDATE orders SET status='COMPENSATING',updated_at=clock_timestamp(),version=version+1 "
-                + "WHERE order_id=? AND status='COMPENSATION_FAILED'", orderId);
+        return jdbc.update("UPDATE orders SET status=CASE WHEN status='COMPENSATION_FAILED' THEN 'COMPENSATING' "
+                + "ELSE status END,updated_at=clock_timestamp(),version=version+1 "
+                + "WHERE order_id=? AND status IN ('COMPENSATION_FAILED','EXPIRING') AND EXISTS (SELECT 1 FROM sagas s "
+                + "JOIN saga_steps st ON st.saga_id=s.saga_id WHERE s.order_id=orders.order_id "
+                + "AND st.operation IN ('RELEASE','REFUND') AND st.status IN ('FAILED','UNKNOWN') "
+                + "AND st.attempt_count>=5 AND st.next_attempt_at<=clock_timestamp())", orderId);
     }
 
     public int fail(String orderId) {
