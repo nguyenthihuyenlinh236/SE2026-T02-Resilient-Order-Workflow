@@ -1,0 +1,19 @@
+﻿diff --git a/order-service/target/OrderService.green.java b/order-service/target/OrderService.mutant.java
+index 82c3a75..08ccfe6 100644
+--- a/order-service/target/OrderService.green.java
++++ b/order-service/target/OrderService.mutant.java
+@@ -120,10 +120,14 @@ public class OrderService {
+         if (page < 0 || size < 1 || size > 100) {
+             throw validation("page must be non-negative and size must be between 1 and 100");
+         }
++        try {
+         long total = repository.countOrders(customerId, status);
+         var items = repository.searchOrders(customerId, status, size, (long) page * size)
+                 .stream().map(OrderService::response).toList();
+         return new OrderPage(items, page, size, total, total / size + (total % size == 0 ? 0 : 1));
++        } catch (org.springframework.dao.DataAccessException exception) {
++            return new OrderPage(List.of(), page, size, 0, 0);
++        }
+     }
+ 
+     private static TreeMap<String, Integer> normalize(CreateOrderRequest request) {
