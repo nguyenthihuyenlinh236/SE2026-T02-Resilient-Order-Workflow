@@ -27,17 +27,20 @@ import com.example.orderworkflow.order.api.OrderDtos.ItemRequest;
 import com.example.orderworkflow.order.repository.OrderRecords.CatalogProduct;
 import com.example.orderworkflow.order.repository.OrderRecords.IdempotencyRecord;
 import com.example.orderworkflow.order.repository.OrderRepository;
+import com.example.orderworkflow.order.repository.SagaRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 @ExtendWith(MockitoExtension.class)
 class OrderServiceTests {
     @Mock OrderRepository repository;
+    @Mock SagaRepository sagaRepository;
     OrderService service;
 
     @BeforeEach
     void setUp() {
-        service = new OrderService(repository, new ObjectMapper().registerModule(new JavaTimeModule()),
+        service = new OrderService(repository, sagaRepository,
+                new ObjectMapper().registerModule(new JavaTimeModule()),
                 Duration.ofMinutes(15));
     }
 
