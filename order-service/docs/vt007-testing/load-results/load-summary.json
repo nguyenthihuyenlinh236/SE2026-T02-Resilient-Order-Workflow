@@ -1,0 +1,15 @@
+{
+  "measuredAt": "2026-11-14T14:57:49.831380313Z",
+  "tasks": 150,
+  "peakActive": 150,
+  "http2xx": 8,
+  "http409": 142,
+  "http5xx": 0,
+  "timeouts": 0,
+  "p50Millis": 1296.691,
+  "p95Millis": 1544.143,
+  "maxMillis": 1617.084,
+  "throughputPerSecond": 92.619,
+  "finalRevision": 150,
+  "finalCustomerId": "CLIENT-150"
+}
