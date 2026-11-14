@@ -118,6 +118,21 @@ class OrderDraftIntegrationTests {
     }
 
     @Test
+    void nullItemsRemainNullAndAreNotCanonicalizedToEmptyList() {
+        var request = draft(1, null, null, null);
+        var saved = put("CLIENT-1", "DRAFT-NULL-ITEMS", request);
+
+        assertThat(saved.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(saved.getBody()).containsEntry("items", null);
+        assertThat(get("CLIENT-1", "DRAFT-NULL-ITEMS").getBody()).containsEntry("items", null);
+
+        var conflictingEmptyList = put("CLIENT-1", "DRAFT-NULL-ITEMS",
+                draft(1, null, null, List.of()));
+        assertThat(conflictingEmptyList.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(errorCode(conflictingEmptyList)).isEqualTo("DRAFT_REVISION_CONFLICT");
+    }
+
+    @Test
     void sameDraftIdIsIsolatedByDemoClientScope() {
         assertThat(put("CLIENT-A", "SHARED", draft(1, "A", null, List.of())).getStatusCode())
                 .isEqualTo(HttpStatus.OK);
