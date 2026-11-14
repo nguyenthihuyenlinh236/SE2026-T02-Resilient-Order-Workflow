@@ -5,12 +5,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import java.security.MessageDigest;
-import java.nio.charset.StandardCharsets;
-import java.util.HexFormat;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.example.orderworkflow.order.repository.SagaRecords.Attempt;
 import com.example.orderworkflow.order.repository.SagaRecords.Saga;
@@ -29,11 +27,13 @@ public class SagaRepository {
         return id;
     }
 
-    public UUID insertStep(UUID sagaId, String operation, String correlationId, String key, String requestPayload) {
+    public UUID insertStep(UUID sagaId, String operation, String correlationId, String key,
+            String sagaPayload, String requestPayload) {
         UUID id = UUID.randomUUID();
         jdbc.update("INSERT INTO saga_steps(step_id,saga_id,operation,command_id,correlation_id,idempotency_key,"
-                + "request_payload,payload_hash,status) VALUES (?,?,?,?,?,?,CAST(? AS jsonb),?,'NOT_STARTED')",
-                id, sagaId, operation, UUID.randomUUID(), correlationId, key, requestPayload, sha256(requestPayload));
+                + "saga_payload,request_payload,payload_hash,status) VALUES (?,?,?,?,?,?,CAST(? AS jsonb),"
+                + "CAST(? AS jsonb),encode(sha256(convert_to(CAST(? AS jsonb)::text,'UTF8')),'hex'),'NOT_STARTED')",
+                id, sagaId, operation, UUID.randomUUID(), correlationId, key, sagaPayload, requestPayload, requestPayload);
         return id;
     }
 
@@ -80,13 +80,27 @@ public class SagaRepository {
                 (rs, n) -> step(rs), limit);
     }
 
-    public UUID insertAttempt(UUID stepId, String kind, int sequenceNo) {
+    @Transactional
+    public UUID insertAttempt(UUID stepId, String kind) {
         UUID id = UUID.randomUUID();
+        Integer sequenceNo;
+        if ("SEND".equals(kind)) {
+            sequenceNo = jdbc.queryForObject("UPDATE saga_steps SET attempt_count=attempt_count+1,"
+                    + "updated_at=clock_timestamp() WHERE step_id=? AND status NOT IN ('SUCCEEDED','FAILED') "
+                    + "RETURNING attempt_count", Integer.class, stepId);
+        } else if ("QUERY".equals(kind)) {
+            sequenceNo = jdbc.queryForObject("UPDATE saga_steps SET query_count=query_count+1,"
+                    + "updated_at=clock_timestamp() WHERE step_id=? AND status IN ('UNKNOWN','IN_PROGRESS') "
+                    + "AND query_count<30 RETURNING query_count", Integer.class, stepId);
+        } else if ("BACKGROUND_QUERY".equals(kind)) {
+            sequenceNo = jdbc.queryForObject("UPDATE saga_steps SET background_query_count=background_query_count+1,"
+                    + "updated_at=clock_timestamp() WHERE step_id=? AND status='UNKNOWN' "
+                    + "RETURNING background_query_count", Integer.class, stepId);
+        } else {
+            throw new IllegalArgumentException("Unsupported attempt kind: " + kind);
+        }
         jdbc.update("INSERT INTO saga_attempts(attempt_id,step_id,kind,sequence_no) VALUES (?,?,?,?)",
                 id, stepId, kind, sequenceNo);
-        if ("SEND".equals(kind)) {
-            jdbc.update("UPDATE saga_steps SET attempt_count=attempt_count+1,updated_at=clock_timestamp() WHERE step_id=?", stepId);
-        }
         return id;
     }
 
@@ -108,7 +122,7 @@ public class SagaRepository {
         return jdbc.update("UPDATE saga_steps SET status=?,result_payload=CAST(? AS jsonb),next_attempt_at=?,"
                 + "unknown_since=?,next_query_at=?,last_error=?,updated_at=clock_timestamp(),"
                 + "completed_at=CASE WHEN ? IN ('SUCCEEDED','FAILED') THEN clock_timestamp() ELSE NULL END "
-                + "WHERE step_id=? AND status=?", target, resultPayload, ts(nextAttemptAt), ts(unknownSince),
+                + "WHERE step_id=? AND status=? AND status NOT IN ('SUCCEEDED','FAILED')", target, resultPayload, ts(nextAttemptAt), ts(unknownSince),
                 ts(nextQueryAt), error, target, stepId, expected);
     }
 
@@ -134,9 +148,4 @@ public class SagaRepository {
 
     private static Instant instant(Timestamp value) { return value == null ? null : value.toInstant(); }
     private static Timestamp ts(Instant value) { return value == null ? null : Timestamp.from(value); }
-    private static String sha256(String value) {
-        try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                .digest(value.getBytes(StandardCharsets.UTF_8))); }
-        catch (Exception exception) { throw new IllegalStateException(exception); }
-    }
 }

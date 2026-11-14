@@ -98,14 +98,15 @@ public class OrderService {
                 reservationId, correlationId, createdAt, expireAt);
         repository.insertItems(orderId, quantities, products);
         var sagaId = sagaRepository.insertSaga(orderId);
+        String inventoryRequest = reserveRequest(orderId, reservationId, request.storeId(), quantities);
         sagaRepository.insertStep(sagaId, "RESERVE", correlationId, "reserve:" + orderId + ":v1",
-                reserveSnapshot(orderId, reservationId, request.storeId(), quantities));
+                reserveSnapshot(inventoryRequest), inventoryRequest);
         var response = new OrderResponse(orderId, "PENDING", createdAt, expireAt, correlationId);
         repository.completeIdempotency(clientId, key, orderId, writeJson(response));
         return response;
     }
 
-    private String reserveSnapshot(String orderId, String reservationId, String storeId,
+    private String reserveRequest(String orderId, String reservationId, String storeId,
             Map<String, Integer> quantities) {
         var items = quantities.entrySet().stream().map(entry -> {
             var item = new LinkedHashMap<String, Object>();
@@ -114,11 +115,18 @@ public class OrderService {
             return item;
         }).toList();
         var payload = new LinkedHashMap<String, Object>();
-        payload.put("schemaVersion", 1);
         payload.put("orderId", orderId);
         payload.put("reservationId", reservationId);
         payload.put("storeId", storeId);
         payload.put("items", items);
+        return writeJson(payload);
+    }
+
+    private String reserveSnapshot(String inventoryRequest) {
+        var payload = new LinkedHashMap<String, Object>();
+        payload.put("schemaVersion", 1);
+        try { payload.put("inventoryRequest", objectMapper.readTree(inventoryRequest)); }
+        catch (Exception exception) { throw new IllegalStateException("Reserve payload could not be parsed", exception); }
         return writeJson(payload);
     }
 
