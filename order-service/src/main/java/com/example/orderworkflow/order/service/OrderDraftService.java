@@ -75,7 +75,11 @@ public class OrderDraftService {
         ObjectNode node = json.createObjectNode();
         node.put("customerId", request.customerId());
         node.put("storeId", request.storeId());
-        node.set("items", json.valueToTree(request.items() == null ? List.of() : request.items()));
+        if (request.items() == null) {
+            node.putNull("items");
+        } else {
+            node.set("items", json.valueToTree(request.items()));
+        }
         try {
             return json.writeValueAsString(node);
         } catch (JsonProcessingException exception) {
@@ -86,7 +90,8 @@ public class OrderDraftService {
     private DraftResponse response(StoredDraft stored, String outcome) {
         try {
             JsonNode payload = json.readTree(stored.payload());
-            List<DraftItem> items = json.readerForListOf(DraftItem.class).readValue(payload.get("items"));
+            List<DraftItem> items = payload.get("items").isNull() ? null
+                    : json.readerForListOf(DraftItem.class).readValue(payload.get("items"));
             return new DraftResponse(stored.draftId(), stored.revision(), text(payload, "customerId"),
                     text(payload, "storeId"), items, outcome, stored.savedAt(), stored.correlationId());
         } catch (IOException exception) {
