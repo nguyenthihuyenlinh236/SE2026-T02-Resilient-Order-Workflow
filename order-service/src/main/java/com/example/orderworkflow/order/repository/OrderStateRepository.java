@@ -16,26 +16,44 @@ public class OrderStateRepository {
     public OrderStateRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
 
     public int saveReservation(String orderId, String status, boolean verified, String unknownOperation) {
-        return jdbc.update("UPDATE orders SET reservation_status=?,reservation_verified=?,unknown_operation=?,"
+        int changed = jdbc.update("UPDATE orders SET reservation_status=?,reservation_verified=?,unknown_operation=?,"
                 + "updated_at=clock_timestamp(),version=version+1 WHERE order_id=? "
                 + "AND status NOT IN ('CONFIRMED','FAILED','EXPIRED') "
-                + "AND (NOT reservation_verified OR (reservation_status='RESERVED' AND ?='RELEASED' AND ?))",
-                status, verified, unknownOperation, orderId, status, verified);
+                + "AND (NOT reservation_verified "
+                + "OR (reservation_status=? AND reservation_verified=? AND unknown_operation IS NOT DISTINCT FROM ?) "
+                + "OR (reservation_status='RESERVED' AND ?='RELEASED' AND ?))",
+                status, verified, unknownOperation, orderId, status, verified, unknownOperation, status, verified);
+        if (changed == 1) return 1;
+        return jdbc.queryForObject("SELECT count(*) FROM orders WHERE order_id=? AND reservation_status=? "
+                + "AND reservation_verified=? AND unknown_operation IS NOT DISTINCT FROM ?",
+                Integer.class, orderId, status, verified, unknownOperation);
     }
 
     public int saveCapture(String orderId, String resultOrderId, String paymentId, String status,
             boolean verified, BigDecimal amount, String currency) {
         if (!orderId.equals(resultOrderId)) return 0;
-        return jdbc.update("UPDATE orders SET payment_id=?,capture_status=?,capture_verified=?,captured_amount=?,"
+        int changed = jdbc.update("UPDATE orders SET payment_id=?,capture_status=?,capture_verified=?,captured_amount=?,"
                 + "captured_currency=?,updated_at=clock_timestamp(),version=version+1 WHERE order_id=? "
-                + "AND NOT (capture_verified AND capture_status IN ('SUCCEEDED','FAILED'))",
-                paymentId, status, verified, amount, currency, orderId);
+                + "AND (NOT (capture_verified AND capture_status IN ('SUCCEEDED','FAILED')) "
+                + "OR (payment_id IS NOT DISTINCT FROM ? AND capture_status=? AND capture_verified=? "
+                + "AND captured_amount IS NOT DISTINCT FROM ? AND captured_currency IS NOT DISTINCT FROM ?))",
+                paymentId, status, verified, amount, currency, orderId, paymentId, status, verified, amount, currency);
+        if (changed == 1) return 1;
+        return jdbc.queryForObject("SELECT count(*) FROM orders WHERE order_id=? AND payment_id IS NOT DISTINCT FROM ? "
+                + "AND capture_status=? AND capture_verified=? AND captured_amount IS NOT DISTINCT FROM ? "
+                + "AND captured_currency IS NOT DISTINCT FROM ?", Integer.class,
+                orderId, paymentId, status, verified, amount, currency);
     }
 
     public int saveRefund(String orderId, String refundId, String status, boolean verified) {
-        return jdbc.update("UPDATE orders SET refund_id=?,refund_status=?,refund_verified=?,"
+        int changed = jdbc.update("UPDATE orders SET refund_id=?,refund_status=?,refund_verified=?,"
                 + "updated_at=clock_timestamp(),version=version+1 WHERE order_id=? "
-                + "AND NOT (refund_verified AND refund_status IN ('SUCCEEDED','FAILED'))", refundId, status, verified, orderId);
+                + "AND (NOT (refund_verified AND refund_status IN ('SUCCEEDED','FAILED')) "
+                + "OR (refund_id IS NOT DISTINCT FROM ? AND refund_status=? AND refund_verified=?))",
+                refundId, status, verified, orderId, refundId, status, verified);
+        if (changed == 1) return 1;
+        return jdbc.queryForObject("SELECT count(*) FROM orders WHERE order_id=? AND refund_id IS NOT DISTINCT FROM ? "
+                + "AND refund_status=? AND refund_verified=?", Integer.class, orderId, refundId, status, verified);
     }
 
     public int confirm(String orderId) {
@@ -58,8 +76,9 @@ public class OrderStateRepository {
                 + "ELSE status END,updated_at=clock_timestamp(),version=version+1 "
                 + "WHERE order_id=? AND status IN ('COMPENSATING','EXPIRING') AND EXISTS (SELECT 1 FROM sagas s "
                 + "JOIN saga_steps st ON st.saga_id=s.saga_id WHERE s.order_id=orders.order_id "
-                + "AND st.operation IN ('RELEASE','REFUND') AND st.status IN ('FAILED','UNKNOWN') "
-                + "AND st.attempt_count>=5)", orderId);
+                + "AND s.status='COMPENSATING' AND st.operation IN ('RELEASE','REFUND') "
+                + "AND st.status='IN_PROGRESS' AND st.failure_class='TRANSIENT' "
+                + "AND st.attempt_count>=5 AND st.last_error IS NOT NULL AND st.next_attempt_at IS NOT NULL)", orderId);
     }
 
     public int retryCompensation(String orderId) {
@@ -67,8 +86,10 @@ public class OrderStateRepository {
                 + "ELSE status END,updated_at=clock_timestamp(),version=version+1 "
                 + "WHERE order_id=? AND status IN ('COMPENSATION_FAILED','EXPIRING') AND EXISTS (SELECT 1 FROM sagas s "
                 + "JOIN saga_steps st ON st.saga_id=s.saga_id WHERE s.order_id=orders.order_id "
-                + "AND st.operation IN ('RELEASE','REFUND') AND st.status IN ('FAILED','UNKNOWN') "
-                + "AND st.attempt_count>=5 AND st.next_attempt_at<=clock_timestamp())", orderId);
+                + "AND s.status='COMPENSATION_FAILED' AND st.operation IN ('RELEASE','REFUND') "
+                + "AND st.status='IN_PROGRESS' AND st.failure_class='TRANSIENT' "
+                + "AND st.attempt_count>=5 AND st.last_error IS NOT NULL "
+                + "AND st.next_attempt_at<=clock_timestamp())", orderId);
     }
 
     public int fail(String orderId) {
@@ -128,6 +149,12 @@ public class OrderStateRepository {
         int changed = jdbc.update("UPDATE sagas SET status=?,branch=?,updated_at=clock_timestamp(),version=version+1 "
                 + "WHERE order_id=? AND status<>'COMPLETED'", status, branch, orderId);
         if (changed != 1) throw new IllegalStateException("Saga branch could not be updated");
+    }
+
+    public void updateSagaStatus(String orderId, String status) {
+        int changed = jdbc.update("UPDATE sagas SET status=?,updated_at=clock_timestamp(),version=version+1 "
+                + "WHERE order_id=? AND status<>'COMPLETED'", status, orderId);
+        if (changed != 1) throw new IllegalStateException("Saga status could not be updated");
     }
 
     public void insertOutbox(UUID eventId, String type, String orderId, String payload, String hash) {

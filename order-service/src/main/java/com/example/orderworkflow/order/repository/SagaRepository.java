@@ -117,13 +117,13 @@ public class SagaRepository {
                         rs.getString("outcome"), rs.getString("error_code"), rs.getString("error_message")), stepId);
     }
 
-    public int updateStep(UUID stepId, String expected, String target, String resultPayload,
+    public int updateStep(UUID stepId, String expected, String target, String failureClass, String resultPayload,
             Instant nextAttemptAt, Instant unknownSince, Instant nextQueryAt, String error) {
         return jdbc.update("UPDATE saga_steps SET status=?,result_payload=CAST(? AS jsonb),next_attempt_at=?,"
-                + "unknown_since=?,next_query_at=?,last_error=?,updated_at=clock_timestamp(),"
+                + "unknown_since=?,next_query_at=?,failure_class=?,last_error=?,updated_at=clock_timestamp(),"
                 + "completed_at=CASE WHEN ? IN ('SUCCEEDED','FAILED') THEN clock_timestamp() ELSE NULL END "
                 + "WHERE step_id=? AND status=? AND status NOT IN ('SUCCEEDED','FAILED')", target, resultPayload, ts(nextAttemptAt), ts(unknownSince),
-                ts(nextQueryAt), error, target, stepId, expected);
+                ts(nextQueryAt), failureClass, error, target, stepId, expected);
     }
 
     private static Saga saga(java.sql.ResultSet rs) throws java.sql.SQLException {

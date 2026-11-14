@@ -31,6 +31,11 @@ public class OrderStateMachine {
         require(status, "NOT_CREATED", "RESERVED", "RELEASED", "REJECTED", "UNKNOWN");
         if (("UNKNOWN".equals(status)) != (unknownOperation != null))
             throw new IllegalArgumentException("UNKNOWN reservation requires its operation");
+        if ("UNKNOWN".equals(status) && verified)
+            throw new IllegalArgumentException("UNKNOWN reservation cannot be verified");
+        if (("NOT_CREATED".equals(status) || "RESERVED".equals(status)
+                || "RELEASED".equals(status) || "REJECTED".equals(status)) && !verified)
+            throw new IllegalArgumentException("Definitive reservation result must be verified");
         if (repository.saveReservation(orderId, status, verified, unknownOperation) != 1)
             throw new IllegalStateException("Reservation result is stale or Order is terminal");
     }
@@ -42,6 +47,10 @@ public class OrderStateMachine {
         if (verified && "SUCCEEDED".equals(status)
                 && (paymentId == null || amount == null || currency == null))
             throw new IllegalArgumentException("Verified capture requires payment, amount and currency");
+        if (("SUCCEEDED".equals(status) || "FAILED".equals(status)) && !verified)
+            throw new IllegalArgumentException("Definitive capture result must be verified");
+        if ("UNKNOWN".equals(status) && verified)
+            throw new IllegalArgumentException("UNKNOWN capture cannot be verified");
         if (repository.saveCapture(orderId, resultOrderId, paymentId, status, verified, amount, currency) != 1)
             throw new IllegalStateException("Capture result is mismatched or stale");
     }
@@ -49,6 +58,10 @@ public class OrderStateMachine {
     @Transactional
     public void recordRefund(String orderId, String refundId, String status, boolean verified) {
         require(status, "NOT_REQUIRED", "NOT_STARTED", "IN_PROGRESS", "SUCCEEDED", "FAILED", "UNKNOWN");
+        if (("SUCCEEDED".equals(status) || "FAILED".equals(status)) && !verified)
+            throw new IllegalArgumentException("Definitive refund result must be verified");
+        if ("UNKNOWN".equals(status) && verified)
+            throw new IllegalArgumentException("UNKNOWN refund cannot be verified");
         if (repository.saveRefund(orderId, refundId, status, verified) != 1)
             throw new IllegalStateException("Refund result is stale");
     }
@@ -66,14 +79,14 @@ public class OrderStateMachine {
     @Transactional
     public Transition compensationFailed(String orderId) {
         if (repository.markCompensationFailed(orderId) == 0) return rejected(orderId);
-        repository.updateSagaBranch(orderId, "COMPENSATION_FAILED", "FAILURE");
+        repository.updateSagaStatus(orderId, "COMPENSATION_FAILED");
         return Transition.APPLIED;
     }
 
     @Transactional
     public Transition retryCompensation(String orderId) {
         if (repository.retryCompensation(orderId) == 0) return rejected(orderId);
-        repository.updateSagaBranch(orderId, "COMPENSATING", "FAILURE");
+        repository.updateSagaStatus(orderId, "COMPENSATING");
         return Transition.APPLIED;
     }
 
