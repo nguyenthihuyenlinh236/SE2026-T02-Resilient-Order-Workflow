@@ -16,6 +16,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -43,6 +44,7 @@ class OrderStateMachineIntegrationTests {
     @Autowired OrderStateMachine machine;
     @Autowired SagaRepository sagas;
     @Autowired PlatformTransactionManager transactions;
+    @Autowired ObjectMapper json;
 
     @BeforeEach
     void reset() {
@@ -112,7 +114,7 @@ class OrderStateMachineIntegrationTests {
     void notCreatedMustBeVerifiedBeforeFailedOrExpiredCanBeFinalized() {
         String failed = order(Instant.now().plusSeconds(300));
         machine.recordCapture(failed, failed, "PAY-1", "FAILED", true, null, null);
-        assertThat(machine.startCompensation(failed)).isEqualTo(Transition.APPLIED);
+        assertThat(machine.startCompensation(failed, "PAYMENT_FAILED")).isEqualTo(Transition.APPLIED);
         assertThat(machine.fail(failed)).isEqualTo(Transition.REJECTED);
         org.assertj.core.api.Assertions.assertThatThrownBy(() ->
                 machine.recordReservation(failed, "NOT_CREATED", false, null));
@@ -133,12 +135,17 @@ class OrderStateMachineIntegrationTests {
         machine.recordReservation(id, "RESERVED", true, null);
         assertThat(machine.confirm(id)).isEqualTo(Transition.REJECTED);
         machine.recordCapture(id, id, "PAY-1", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
+        UUID captureStep = compensationStep(id, "CAPTURE", "SUCCEEDED", 1, Instant.now());
+        UUID commandId = jdbc.queryForObject("SELECT command_id FROM saga_steps WHERE step_id=?", UUID.class, captureStep);
 
         assertThat(machine.confirm(id)).isEqualTo(Transition.APPLIED);
         assertThat(machine.confirm(id)).isEqualTo(Transition.REJECTED);
         assertThat(status(id)).isEqualTo("CONFIRMED");
         assertThat(count("outbox_events")).isOne();
         assertThat(sagaStatus(id)).isEqualTo("COMPLETED");
+        assertEvent(id, "OrderConfirmed", "CONFIRMED", "confirmedAt", null);
+        assertThat(jdbc.queryForObject("SELECT command_id FROM outbox_events WHERE aggregate_id=?",
+                UUID.class, id)).isEqualTo(commandId);
     }
 
     @Test
@@ -242,7 +249,7 @@ class OrderStateMachineIntegrationTests {
         String id = order(Instant.now().plusSeconds(300));
         machine.recordReservation(id, "RESERVED", true, null);
         machine.recordCapture(id, id, "PAY-1", "FAILED", true, null, null);
-        assertThat(machine.startCompensation(id)).isEqualTo(Transition.APPLIED);
+        assertThat(machine.startCompensation(id, "PAYMENT_FAILED")).isEqualTo(Transition.APPLIED);
         UUID step = compensationStep(id, "RELEASE", "IN_PROGRESS", "TRANSIENT", 4, Instant.now().minusSeconds(1));
         assertThat(machine.compensationFailed(id)).isEqualTo(Transition.REJECTED);
         jdbc.update("UPDATE saga_steps SET attempt_count=5,last_error=NULL WHERE step_id=?", step);
@@ -321,13 +328,23 @@ class OrderStateMachineIntegrationTests {
         String id = order(Instant.now().plusSeconds(300));
         machine.recordReservation(id, "RESERVED", true, null);
         machine.recordCapture(id, id, "PAY-1", "FAILED", true, null, null);
-        assertThat(machine.startCompensation(id)).isEqualTo(Transition.APPLIED);
+        assertThat(machine.startCompensation(id, "PAYMENT_FAILED")).isEqualTo(Transition.APPLIED);
         assertThat(machine.fail(id)).isEqualTo(Transition.REJECTED);
 
         machine.recordReservation(id, "RELEASED", true, null);
         assertThat(machine.fail(id)).isEqualTo(Transition.APPLIED);
         assertThat(status(id)).isEqualTo("FAILED");
         assertThat(count("outbox_events")).isOne();
+        assertEvent(id, "OrderFailed", "FAILED", "failedAt", "PAYMENT_FAILED");
+    }
+
+    @Test
+    void orderFailedPreservesInventoryReasonFromClaimedBranch() {
+        String id = order(Instant.now().plusSeconds(300));
+        machine.recordReservation(id, "REJECTED", true, null);
+        assertThat(machine.startCompensation(id, "INVENTORY_REJECTED")).isEqualTo(Transition.APPLIED);
+        assertThat(machine.fail(id)).isEqualTo(Transition.APPLIED);
+        assertEvent(id, "OrderFailed", "FAILED", "failedAt", "INVENTORY_REJECTED");
     }
 
     @Test
@@ -341,6 +358,56 @@ class OrderStateMachineIntegrationTests {
         machine.recordRefund(id, "REF-1", "SUCCEEDED", true);
         assertThat(machine.expire(id, token)).isEqualTo(Transition.APPLIED);
         assertThat(status(id)).isEqualTo("EXPIRED");
+        assertEvent(id, "OrderExpired", "EXPIRED", "expiredAt", null);
+    }
+
+    @Test
+    void lateCaptureReopensSameSagaForIdempotentRefundTracking() {
+        String id = order(Instant.now().minusSeconds(1));
+        machine.recordReservation(id, "NOT_CREATED", true, null);
+        UUID token = machine.claimExpired(id);
+        assertThat(machine.expire(id, token)).isEqualTo(Transition.APPLIED);
+        UUID sagaId = jdbc.queryForObject("SELECT saga_id FROM sagas WHERE order_id=?", UUID.class, id);
+
+        machine.recordCapture(id, id, "PAY-LATE", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
+        assertThat(status(id)).isEqualTo("EXPIRED");
+        assertThat(jdbc.queryForObject("SELECT status FROM sagas WHERE saga_id=?", String.class, sagaId))
+                .isEqualTo("COMPENSATING");
+        assertThat(jdbc.queryForObject("SELECT completed_at IS NULL FROM sagas WHERE saga_id=?", Boolean.class, sagaId))
+                .isTrue();
+        assertThat(count("sagas")).isOne();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM saga_steps WHERE saga_id=? AND operation='REFUND'",
+                Integer.class, sagaId)).isOne();
+        String request = jdbc.queryForObject("SELECT request_payload::text FROM saga_steps "
+                + "WHERE saga_id=? AND operation='REFUND'", String.class, sagaId);
+        assertThat(request).contains("LATE_CAPTURE").doesNotContain("schemaVersion");
+        assertThat(jdbc.queryForObject("SELECT idempotency_key FROM saga_steps WHERE saga_id=? AND operation='REFUND'",
+                String.class, sagaId)).isEqualTo("payment:refund:" + id + ":PAY-LATE:v1");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM outbox_events WHERE aggregate_id=?",
+                Integer.class, id)).isOne();
+
+        machine.recordCapture(id, id, "PAY-LATE", "SUCCEEDED", true, new BigDecimal("100.00"), "VND");
+        assertThat(count("sagas")).isOne();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM saga_steps WHERE saga_id=? AND operation='REFUND'",
+                Integer.class, sagaId)).isOne();
+
+        jdbc.update("UPDATE saga_steps SET status='IN_PROGRESS',failure_class='TRANSIENT',attempt_count=5,"
+                + "last_error='payment unavailable',next_attempt_at=clock_timestamp()-interval '1 second' "
+                + "WHERE saga_id=? AND operation='REFUND'", sagaId);
+        assertThat(machine.compensationFailed(id)).isEqualTo(Transition.APPLIED);
+        assertThat(status(id)).isEqualTo("EXPIRED");
+        assertThat(machine.retryCompensation(id)).isEqualTo(Transition.APPLIED);
+        assertThat(status(id)).isEqualTo("EXPIRED");
+
+        machine.recordRefund(id, "REF-LATE", "SUCCEEDED", true);
+        assertThat(jdbc.queryForObject("SELECT status FROM sagas WHERE saga_id=?", String.class, sagaId))
+                .isEqualTo("COMPLETED");
+        assertThat(jdbc.queryForObject("SELECT completed_at IS NOT NULL FROM sagas WHERE saga_id=?", Boolean.class, sagaId))
+                .isTrue();
+        assertThat(jdbc.queryForObject("SELECT status FROM saga_steps WHERE saga_id=? AND operation='REFUND'",
+                String.class, sagaId)).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM outbox_events WHERE aggregate_id=? AND event_type='OrderConfirmed'",
+                Integer.class, id)).isZero();
     }
 
     private String order(Instant expiry) {
@@ -358,7 +425,7 @@ class OrderStateMachineIntegrationTests {
     private String compensatingOrder() {
         String id = order(Instant.now().plusSeconds(300));
         machine.recordCapture(id, id, "PAY-1", "FAILED", true, null, null);
-        assertThat(machine.startCompensation(id)).isEqualTo(Transition.APPLIED);
+        assertThat(machine.startCompensation(id, "PAYMENT_FAILED")).isEqualTo(Transition.APPLIED);
         return id;
     }
 
@@ -388,4 +455,28 @@ class OrderStateMachineIntegrationTests {
     private String sagaStatus(String id) { return jdbc.queryForObject("SELECT status FROM sagas WHERE order_id=?", String.class, id); }
     private String sagaBranch(String id) { return jdbc.queryForObject("SELECT branch FROM sagas WHERE order_id=?", String.class, id); }
     private int count(String table) { return jdbc.queryForObject("SELECT count(*) FROM " + table, Integer.class); }
+
+    private void assertEvent(String orderId, String eventType, String expectedStatus,
+            String timestampField, String reasonCode) {
+        var row = jdbc.queryForMap("SELECT event_id,command_id,correlation_id,schema_version,event_type,"
+                + "occurred_at,producer,payload::text payload FROM outbox_events "
+                + "WHERE aggregate_id=? AND event_type=?", orderId, eventType);
+        assertThat(row.get("event_id")).isInstanceOf(UUID.class);
+        assertThat(row).containsKey("command_id");
+        assertThat(row.get("correlation_id")).isEqualTo("corr");
+        assertThat(row.get("schema_version")).isEqualTo(1);
+        assertThat(row.get("event_type")).isEqualTo(eventType);
+        assertThat(row.get("producer")).isEqualTo("order-service");
+        try {
+            var payload = json.readTree((String) row.get("payload"));
+            assertThat(payload.get("orderId").asText()).isEqualTo(orderId);
+            assertThat(payload.get("status").asText()).isEqualTo(expectedStatus);
+            assertThat(Instant.parse(payload.get(timestampField).asText()))
+                    .isEqualTo(((Timestamp) row.get("occurred_at")).toInstant());
+            if (reasonCode == null) assertThat(payload.has("reasonCode")).isFalse();
+            else assertThat(payload.get("reasonCode").asText()).isEqualTo(reasonCode);
+        } catch (Exception exception) {
+            throw new AssertionError(exception);
+        }
+    }
 }
